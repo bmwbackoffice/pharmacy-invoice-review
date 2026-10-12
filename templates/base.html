@@ -101,11 +101,14 @@
         {'href':'/qb',          'label':'QB entry',     'children':[('/payments','Payments'),('/qb-reconcile','QB reconcile')]},
         {'href':'/chat',        'label':'Chat',         'children':[('/learnings','Learnings')]},
         {'href':'/browse',      'label':'Records',      'children':[('/emails','Emails'),('/duplicates','Duplicates')]},
-        {'href':none,           'label':'Setup',        'children':[('/reference/stores','Stores'),('/reference/sender_store_map','Senders'),('/reference/contact_store_map','Contacts'),('/cards','Cards'),('/reference/class_rules','Class rules'),('/reference/store_scope_rules','Store rules'),('/reference/vendor_name_map','Vendor names'),('/reference/account_name_map','Account names'),('/reference/vendor_account_assignment','Vendor→account')]},
+        {'href':none,           'label':'Setup',        'children':[('/reference/vendor_name_map','Vendors'),('/reference/stores','Stores'),('/reference/class_rules','Rules')]},
         {'href':'/admin/users', 'label':'Users',        'admin_only':true, 'children':[]},
     ] %}
     {% macro is_here(href) -%}
-      {{ 'y' if href and (path == href or (href != '/' and path.startswith(href ~ '/')) or (href == '/review' and path == '/')) else '' }}
+      {#- A Setup page also counts as "here" for its group's menu entry (SETUP_GROUPS: tabs share one entry). -#}
+      {%- set _sg_path, _sg_href = setup_group(path), setup_group(href) if href else none -%}
+      {{ 'y' if href and (path == href or (href != '/' and path.startswith(href ~ '/')) or (href == '/review' and path == '/')
+                          or (_sg_path and _sg_href and _sg_path[0] == _sg_href[0])) else '' }}
     {%- endmacro %}
     <nav id="topnav">
       {% for g in nav_groups %}

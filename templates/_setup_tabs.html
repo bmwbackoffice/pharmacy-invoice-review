@@ -1,0 +1,19 @@
+{# Tabs across the top of a grouped Setup page (review_app.SETUP_GROUPS). Renders nothing elsewhere. #}
+{% set _sg = setup_group(request.url.path) %}
+{% if _sg %}
+<style>
+  .setup-tabs { display:flex; flex-wrap:wrap; gap:4px; align-items:flex-end; border-bottom:2px solid var(--line);
+                margin:0 0 14px; }
+  .setup-tabs .grp { font-weight:800; margin-right:10px; padding:6px 0; }
+  .setup-tabs a { padding:7px 12px; border:1px solid var(--line); border-bottom:none; border-radius:6px 6px 0 0;
+                  text-decoration:none; color:var(--ink); background:#f6f8fb; margin-bottom:-2px; }
+  .setup-tabs a:hover { color:var(--brand); }
+  .setup-tabs a.on { background:#fff; color:var(--brand); font-weight:700; border-bottom:2px solid #fff; }
+</style>
+<nav class="setup-tabs" aria-label="{{ _sg[0] }} setup">
+  <span class="grp">Setup › {{ _sg[0] }}</span>
+  {% for href, label, _also in _sg[1] %}
+    <a href="{{ href }}" class="{{ 'on' if href == _sg[2] }}"{% if href == _sg[2] %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+{% endif %}

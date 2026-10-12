@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block content %}
+{% include "_setup_tabs.html" %}
 {% set unmapped = cards | selectattr('store', 'none') | list %}
 <h2>Cards <span class="muted">({{ cards|length }} seen · {{ unmapped|length }} unmapped)</span></h2>
 <p class="muted">Every card last-4 seen on any record (invoice, credit memo, or payment).

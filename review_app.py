@@ -126,6 +126,34 @@ templates.env.filters["us_date"] = us_date
 templates.env.filters["us_datetime"] = us_datetime
 templates.env.filters["store_label"] = web_db.store_label
 
+# Setup, grouped (2026-10-12): the Setup menu's 9 entries became 3 tabbed pages. Every table keeps its
+# own page and URL (links into them still work); the tabs just join the pages that belong together.
+# Each tab: (href, label, other paths that count as this tab).
+SETUP_GROUPS = [
+    ("Vendors", [("/reference/vendor_name_map", "Vendor names", ()),
+                 ("/reference/account_name_map", "Account names", ()),
+                 ("/reference/vendor_account_assignment", "Vendor → account", ())]),
+    ("Stores", [("/reference/stores", "Stores", ()),
+                ("/reference/sender_store_map", "Senders", ()),
+                ("/reference/contact_store_map", "Contacts", ()),
+                ("/cards", "Cards", ("/reference/card_store_map",))]),
+    ("Rules", [("/reference/class_rules", "Class rules", ()),
+               ("/reference/store_scope_rules", "Store rules", ())]),
+]
+
+
+def setup_group(path):
+    """(group name, tabs, the active tab's href) for a Setup page, else None."""
+    for name, tabs in SETUP_GROUPS:
+        for href, _label, also in tabs:
+            if path == href or path in also:
+                return name, tabs, href
+    return None
+
+
+templates.env.globals["setup_group"] = setup_group
+templates.env.globals["SETUP_GROUPS"] = SETUP_GROUPS
+
 
 def _diff_against(value, other):
     """`value` rendered as HTML with the characters that DIFFER from `other` wrapped in

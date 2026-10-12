@@ -5630,3 +5630,17 @@ vendor → **Exclude vendor** / **Exclude this vendor**; sales order → **Drop 
 duplicates kept out of QB". CSV export values unchanged. Tests: `tests/test_dashboard_labels.py` (log
 parsing incl. stale window; admin sees both sections, reviewer only Work and no log page; old labels gone,
 new ones used, behaviour hooks intact). Suite: 79 pass.
+
+### Setup merged into 3 tabbed pages (2026-10-12)
+
+The Setup menu went from 9 entries to 3 — **Vendors** (Vendor names · Account names · Vendor → account),
+**Stores** (Stores · Senders · Contacts · Cards; Card → store counts as the Cards tab) and **Rules** (Class
+rules · Store rules). Defined once in `review_app.SETUP_GROUPS` (+ `setup_group(path)`, both Jinja
+globals). Every table keeps its own page and URL, so links into them (QB entry's "add vendor", the
+reference redirects, bookmarks) still work; `templates/_setup_tabs.html` (included by `reference.html` and
+`cards.html`) draws the tab bar "Setup › <group>" with the current table active. `base.html`'s nav
+`is_here` treats any page of a group as "here" for that group's menu entry, so the Setup menu stays
+highlighted on every tab. No data, routes or saves changed. Tests: `tests/test_setup_tabs.py` (every
+REFERENCE_PAGES table is in a group; lookup incl. card_store_map → Cards; tabs render with the right one
+active; the menu has exactly Vendors/Stores/Rules and highlights the right one; no tabs elsewhere).
+Suite: 85 pass.
