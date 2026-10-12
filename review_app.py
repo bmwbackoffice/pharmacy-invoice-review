@@ -479,7 +479,7 @@ def statements_list(request: Request, run: str = "", vendor: str = "",
 
 
 @app.get("/review/{review_id}", response_class=HTMLResponse)
-def review_detail(request: Request, review_id: int, flagged: str = ""):
+def review_detail(request: Request, review_id: int, flagged: str = "", fix_error: str = ""):
     user = current_user(request)
     if not user:
         return _login_redirect()
@@ -498,7 +498,8 @@ def review_detail(request: Request, review_id: int, flagged: str = ""):
                   notes=web_db.list_review_notes(rkey),
                   users=[u for u in web_db.list_users() if u.get("active")],
                   manual_attachments=manual, has_pending_upload=has_pending_upload,
-                  flagged=flagged)
+                  flagged=flagged, stores=web_db.store_names(),
+                  fix_kinds=quick_fix_kinds(item.get("question")), fix_error=fix_error)
 
 
 @app.post("/review/{review_id}/attach")
@@ -606,6 +607,75 @@ def statement_lines_assign(request: Request, line_ids: str = Form(""),
         return _login_redirect()
     ids = [int(x) for x in line_ids.split(",") if x.strip().isdigit()]
     web_db.assign_statement_lines(ids, assigned_to, user["username"])
+    return RedirectResponse("/review", status_code=302)
+
+
+# Quick fix: which one-click fixes a review item's reason calls for. The fixes themselves are written
+# as plain lines into the Answer (compose_quick_fix_answer) and applied in code on the next run
+# (classify_emails.apply_reviewer_fixes), so the gate that flagged the item can't flag it again.
+_QUICK_FIX_SIGNS = {
+    "store": ("store could not be identified", "store rules", "confirm the real store"),
+    "date": ("date found",),
+    "amount": ("no usable amount", "calculated from line items"),
+    "enter": ("marked this bill not for quickbooks",),
+}
+_QUICK_FIX_LINE = re.compile(r"^\s*(Store|Date|Amount|Enter in QuickBooks):.*$\n?", re.I | re.M)
+
+
+def quick_fix_kinds(question):
+    """The Quick fix controls to show first for this reason text (others sit under 'More fixes')."""
+    q = (question or "").lower()
+    return [k for k, signs in _QUICK_FIX_SIGNS.items() if any(s in q for s in signs)]
+
+
+def compose_quick_fix_answer(existing, store="", date="", amount="", enter=False, note="", stores=()):
+    """The Answer text for a Quick fix: one line per fix, then the reviewer's note (if any), then any
+    earlier free-text answer with its old fix lines removed. Returns (answer, errors)."""
+    lines, errors = [], []
+    if store:
+        if store in stores:
+            lines.append(f"Store: {store}")
+        else:
+            errors.append("Pick a store from the list.")
+    if date:
+        try:
+            datetime.strptime(date, "%Y-%m-%d")
+            lines.append(f"Date: {date}")
+        except ValueError:
+            errors.append("The date isn't valid.")
+    if amount:
+        try:
+            amt = float(str(amount).replace(",", "").replace("$", "").strip())
+            if amt <= 0:
+                raise ValueError
+            lines.append(f"Amount: {amt:.2f} (confirmed)")
+        except ValueError:
+            errors.append("The amount must be a positive number.")
+    if enter:
+        lines.append("Enter in QuickBooks: yes")
+    if not lines and not errors:
+        errors.append("Choose at least one fix.")
+    rest = _QUICK_FIX_LINE.sub("", existing or "").strip()
+    parts = ["\n".join(lines)] + [p for p in ((note or "").strip(), rest) if p]
+    return "\n".join(parts), errors
+
+
+@app.post("/review/{review_id}/quick-fix")
+def review_quick_fix(request: Request, review_id: int, store: str = Form(""), fix_date: str = Form(""),
+                     amount: str = Form(""), enter: str = Form(""), note: str = Form("")):
+    """Save a Quick fix as this item's Answer (keeping its Notes to Learn). Nothing is reprocessed here;
+    the next classify run applies the values in code."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    item = web_db.get_review(review_id)
+    if not item:
+        return RedirectResponse("/review", status_code=302)
+    answer, errors = compose_quick_fix_answer(item.get("answer"), store.strip(), fix_date.strip(),
+                                              amount.strip(), bool(enter), note, web_db.store_names())
+    if errors:
+        return RedirectResponse(f"/review/{review_id}?fix_error={quote(' '.join(errors))}", status_code=302)
+    web_db.submit_review_answer(review_id, answer, item.get("notes_to_learn"), user["username"])
     return RedirectResponse("/review", status_code=302)
 
 

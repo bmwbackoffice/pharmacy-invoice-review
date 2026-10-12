@@ -65,6 +65,50 @@
     </table>
     {% endif %}
 
+    {# ---- Quick fix: one-click answers for the common flags, applied in code on the next run ---- #}
+    {% macro fix_store() %}
+      <label>Store</label>
+      <select name="store">
+        <option value="">— choose —</option>
+        {% for s in stores %}<option value="{{ s }}" {{ 'selected' if 'store' in fix_kinds and s == item.store_matched }}>{{ s | store_label }}</option>{% endfor %}
+      </select>
+    {% endmacro %}
+    {% macro fix_date() %}
+      <label>Date on the document</label>
+      <input type="date" name="fix_date" style="max-width:200px;">
+    {% endmacro %}
+    {% macro fix_amount() %}
+      <label>Correct total</label>
+      <input type="text" name="amount" inputmode="decimal" placeholder="e.g. 1091.33"
+             value="{{ '%.2f'|format(item.amount) if (item.amount and 'amount' in fix_kinds) else '' }}" style="max-width:200px;">
+    {% endmacro %}
+    {% macro fix_enter() %}
+      <label style="font-weight:400;display:block;margin:10px 0 0;cursor:pointer;">
+        <input type="checkbox" name="enter" value="1" style="width:auto;margin:0 6px 0 0;vertical-align:middle;">
+        This is a real bill — enter it in QuickBooks</label>
+    {% endmacro %}
+    {% set all_fixes = {'store': fix_store, 'date': fix_date, 'amount': fix_amount, 'enter': fix_enter} %}
+    <div class="card" id="quick-fix" style="background:#f3faf6;border:1px solid #cfe8da;margin-top:14px;">
+      <label style="font-weight:700;">Quick fix</label>
+      {% if fix_error %}<p class="pill rev" style="display:inline-block;margin:4px 0;">{{ fix_error }}</p>{% endif %}
+      <p class="muted" style="margin:4px 0 6px;">
+        {% if fix_kinds %}Fix what this item was flagged for. The next run applies it exactly, so it won't come back for the same reason.
+        {% else %}For a wrong store, date or amount, fix it here instead of typing an answer.{% endif %}</p>
+      <form method="post" action="/review/{{ item.id }}/quick-fix" style="margin:0;">
+        {% for k in fix_kinds %}{{ all_fixes[k]() }}{% endfor %}
+        {% set others = all_fixes.keys() | reject('in', fix_kinds) | list %}
+        {% if others %}
+        <details {{ 'open' if not fix_kinds }} style="margin-top:8px;">
+          <summary class="muted" style="cursor:pointer;">{{ 'More fixes' if fix_kinds else 'Show fixes' }}</summary>
+          {% for k in others %}{{ all_fixes[k]() }}{% endfor %}
+        </details>
+        {% endif %}
+        <label>Note (optional)</label>
+        <input type="text" name="note" placeholder="anything else the reprocess should know">
+        <div style="margin-top:10px;"><button class="btn" type="submit">Save fix</button></div>
+      </form>
+    </div>
+
     <div class="card" id="ai-assist" style="background:#f5f8ff;border:1px solid #dbe4f5;margin-top:14px;">
       <label style="font-weight:700;">AI assist — draft answer + learning ✨</label>
       <p class="muted" style="margin:4px 0 8px;">Describe the decision in your own words; Claude drafts

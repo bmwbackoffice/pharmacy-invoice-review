@@ -707,6 +707,8 @@ def apply_card_store_map(rec):
     invoice, credit_memo and payment records; mirrors the prompt's map instruction.
     Additive — a no-op when the record has no mapped card (CARD_STORE_MAP empty in
     Excel mode until curated), so the CLI is unaffected until cards are mapped."""
+    if rec.get("_reviewer_store"):
+        return                      # a reviewer picked the store on Quick fix (apply_reviewer_fixes)
     last4 = _norm_last4(rec.get("card_last4"))
     if last4 and last4 in CARD_STORE_MAP:
         rec["store_matched"] = CARD_STORE_MAP[last4]
@@ -813,6 +815,90 @@ def apply_unlisted_skip_gate(rec, rtype, classification):
     _append_text(rec, "review_reason",
                  f"The AI marked this bill not for QuickBooks{why}. Confirm it's a real bill to enter in "
                  f"QuickBooks (answer \"enter it in QuickBooks\"), or Ignore it if it shouldn't be entered.")
+
+
+# Quick fix (review item page, 2026-10-12): the web app writes these plain lines into the Answer, e.g.
+#   Store: Maple Pharmacy / Date: 2026-09-14 / Amount: 1091.33 (confirmed) / Enter in QuickBooks: yes
+# The model reads them like any answer, AND apply_reviewer_fixes sets them on the record in code, so the
+# gates that flagged the item (store, store rules, date, amount, skip-QB) can't send it back to review
+# because the model didn't restate a value exactly.
+_FIX_STORE = re.compile(r"^\s*Store:\s*(.+?)\s*$", re.I | re.M)
+_FIX_DATE = re.compile(r"^\s*Date:\s*(\d{4}-\d{2}-\d{2})\s*$", re.I | re.M)
+_FIX_AMOUNT = re.compile(r"^\s*Amount:\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(?:\(confirmed\))?\s*$", re.I | re.M)
+_FIX_ENTER = re.compile(r"^\s*Enter in QuickBooks:\s*yes\s*$", re.I | re.M)
+_DATE_FIELD = {"invoice": "invoice_date", "credit_memo": "credit_memo_date", "payment": "payment_date"}
+_AMOUNT_FIELD = {"invoice": "invoice_amount", "credit_memo": "credit_amount", "payment": "payment_amount"}
+
+
+def parse_reviewer_fixes(answer, store_names=None):
+    """The Quick fix lines in a reviewer's answer -> {"store", "date", "amount", "enter"} (only those
+    present). A store must be one of `store_names` (the stores table; matched ignoring case, returned
+    in its canonical spelling) or it's ignored; a date must be a real YYYY-MM-DD; an amount positive."""
+    out = {}
+    if not answer:
+        return out
+    m = _FIX_STORE.search(answer)
+    if m:
+        names = store_names if store_names is not None else [s.get("store_name") for s in load_stores()]
+        canon = {(n or "").strip().lower(): n for n in names if n}
+        if m.group(1).strip().lower() in canon:
+            out["store"] = canon[m.group(1).strip().lower()]
+    m = _FIX_DATE.search(answer)
+    if m:
+        try:
+            datetime.strptime(m.group(1), "%Y-%m-%d")
+            out["date"] = m.group(1)
+        except ValueError:
+            pass
+    m = _FIX_AMOUNT.search(answer)
+    if m:
+        try:
+            amt = float(m.group(1).replace(",", ""))
+            if amt > 0:
+                out["amount"] = amt
+        except ValueError:
+            pass
+    if _FIX_ENTER.search(answer):
+        out["enter"] = True
+    return out
+
+
+def apply_reviewer_fixes(classification, reviewer_answer, store_names=None):
+    """Set a reviewer's Quick fix values on the reprocessed record(s), in code, right after the model
+    responds and before the gates. A split file normally holds one record; with several, the store and
+    date fill only records missing them, and an amount (per-record by nature) is applied only to a
+    single record. The store is marked _reviewer_store so the card override and Setup › Store rules
+    respect it. A confirmed amount gets total_source 'confirmed' (saved blank: it wasn't read from a
+    printed total) so the amount gate accepts it. "Enter in QuickBooks" clears a skip-QB the model set,
+    except for an excluded vendor (which the exclusion still enforces). Notes record each change.
+    Returns the fixes applied ({} when the answer has none)."""
+    fixes = parse_reviewer_fixes(reviewer_answer, store_names)
+    if not classification or not fixes:
+        return {}
+    records = _all_records(classification)
+    single = len(records) == 1
+    for rtype, rec in records:
+        done = []
+        if "store" in fixes and (single or (rec.get("store_matched") or "").strip().lower() in ("", "unknown")):
+            rec["store_matched"] = fixes["store"]
+            rec["_reviewer_store"] = True
+            done.append(f"store {fixes['store']}")
+        dfield = _DATE_FIELD[rtype]
+        if "date" in fixes and (single or not (rec.get(dfield) or "").strip()):
+            rec[dfield] = fixes["date"]
+            done.append(f"date {fixes['date']}")
+        if "amount" in fixes and single:
+            rec[_AMOUNT_FIELD[rtype]] = fixes["amount"]
+            rec["total_source"] = "confirmed"
+            done.append(f"amount ${fixes['amount']:,.2f}")
+        if fixes.get("enter") and rtype in ("invoice", "credit_memo") and rec.get("skip_qb_import") \
+                and not is_excluded_vendor(rec.get("vendor_matched")):
+            rec["skip_qb_import"] = False
+            done.append("enter in QuickBooks")
+        if done:
+            _append_text(rec, "notes", f"[Set by a reviewer on Quick fix: {', '.join(done)}.]")
+    print(f"  reviewer Quick fix applied: {', '.join(sorted(fixes))}")
+    return fixes
 
 
 # Credit memos recorded so far, keyed (standard-vendor dedupe key, normalized number), plus the clean
@@ -1075,8 +1161,8 @@ def apply_scoped_learning_gate(rec):
     never fires when store_raw doesn't mention the reference (e.g. an invoice that literally names
     'BMW Technologies LLC')."""
     store_raw = _squash(rec.get("store_raw"))
-    if not store_raw:
-        return
+    if not store_raw or rec.get("_reviewer_store"):
+        return                      # (a store a reviewer picked on Quick fix is the answer to this flag)
     store = _norm(rec.get("store_matched"))
     vendor = _norm(rec.get("vendor_matched"))
     rules = STORE_SCOPE_RULES if STORE_SCOPE_RULES is not None else _DEFAULT_STORE_SCOPE_RULES
@@ -5179,6 +5265,8 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
         # Whether a reviewer's answer is being applied: apply_unlisted_skip_gate then trusts the
         # model's skip_qb_import (it followed the person) instead of sending the record back to review.
         c["_reviewer_answered"] = bool((reviewer_answer or "").strip())
+        # A reviewer's Quick fix values (store / date / amount / enter in QB) set in code, before the gates.
+        apply_reviewer_fixes(c, reviewer_answer)
         # An order already released from its hold is an invoice now (don't hold it again).
         apply_released_order_check(c)
         # Make the review-routing decision FINAL here (before file-saving / newly_flagged /

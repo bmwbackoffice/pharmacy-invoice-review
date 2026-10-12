@@ -5530,3 +5530,26 @@ change to the review logic, and add a test for each new incident.**
   after any Setup save and after a record edit (review_app._sync_account_class_rules).
 - Rule added via setup_maple_vitamins_class_rule.py: Maple Pharmacy + Purchase:Vitamins -> "Vitamins".
   Editable in Setup > Class rules (new Account column).
+
+### Quick fix on the review item page (2026-10-12)
+
+One-click answers for the common flags, so a reviewer doesn't type a free-text answer the model must
+restate exactly for the gates to clear. A **Quick fix** card on `/review/{id}` shows first the controls
+the reason calls for (`review_app.quick_fix_kinds`: store ← "Store could not be identified" / "Store
+rules" / "confirm the real store"; date ← "date found"; amount ← "No usable amount" / "calculated from
+line items"; enter ← "marked this bill not for QuickBooks"), the rest under "More fixes". **Save fix**
+(`POST /review/{id}/quick-fix`) writes plain lines into the Answer via `compose_quick_fix_answer`
+(`Store: Maple Pharmacy`, `Date: 2026-09-14`, `Amount: 1091.33 (confirmed)`, `Enter in QuickBooks:
+yes`, then the optional note, then any earlier free-text answer with its old fix lines removed), keeping
+Notes to Learn; bad input redirects back with `?fix_error=`. Nothing reprocesses in the web app.
+
+Pipeline: `classify_emails.parse_reviewer_fixes()` + `apply_reviewer_fixes()` run in
+`process_source_email` right after `_reviewer_answered`, before the released-order check and gates. A
+store must be in the stores table (canonical spelling); with one record everything applies, with several
+the store/date fill only blanks and the amount is skipped. Store sets `_reviewer_store`, which
+`apply_card_store_map` and `apply_scoped_learning_gate` now respect (else a mapped card or a Store rule
+re-flagged it). A confirmed amount sets `total_source='confirmed'` (gate passes; `_total_source` saves it
+blank, not "printed total"). Enter clears a model-set skip-QB except for an excluded vendor. Each record
+gets a `[Set by a reviewer on Quick fix: …]` note. Plain free-text answers are unaffected (no fix lines →
+no-op). On 2026-10-12, 54 of the 119 open items had a matching fix (28 date, 20 amount, 15 store).
+Tests: `tests/test_quick_fix.py` (17; page + route on a temp review_queue, rolled back). Suite: 58 pass.
