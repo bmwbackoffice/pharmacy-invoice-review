@@ -3253,7 +3253,7 @@ _REF = {
                           "order": "id"},
     # No single UNIQUE key (many rules may share a store/vendor); `class` is required.
     "class_rules":      {"unique": None, "required": "class",
-                         "cols": ["store_matched", "vendor_matched", "class", "note"],
+                         "cols": ["store_matched", "vendor_matched", "account", "class", "note"],
                          "order": "id"},
 }
 

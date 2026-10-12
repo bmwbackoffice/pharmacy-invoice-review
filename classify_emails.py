@@ -737,6 +737,8 @@ def apply_class_rules(rec):
     vendor = _norm(rec.get("vendor_matched"))
     best = None      # (precedence, class); higher precedence wins
     for r in CLASS_RULES:
+        if (r.get("account") or "").strip():
+            continue                              # account rules: database.apply_account_class_rules
         rs = _norm(r.get("store_matched"))
         rv = _norm(r.get("vendor_matched"))
         if not rs and not rv:
@@ -4284,6 +4286,82 @@ def resolve_store_preferred_duplicates(actor, dry_run=False):
     return {"resolved": resolved, "skipped": skipped}
 
 
+def flag_number_misread_duplicates(actor, dry_run=False):
+    """Catch duplicates the number-based dedup MISSES: same normalized vendor + amount + invoice_date
+    + store but DIFFERENT invoice numbers (a misread digit — e.g. Emerson E29402997 vs E29402597 for
+    the same $456.79 bill). Those otherwise both land on /qb and risk a double QuickBooks entry. This
+    FLAGS them (duplicate_suspect + a shared group + a reason) so /qb hides them by default and they
+    surface on /duplicates for a human to resolve — it never auto-ignores, because two genuinely
+    different invoices could rarely share vendor+amount+date+store, and a person should decide.
+    Conservative + idempotent:
+      - all members LIVE (not duplicate_ignored, not entered_in_qb, not skip_qb_import) with a date;
+      - >=2 members and >=2 DISTINCT invoice numbers (same number is the normal dedup's job);
+      - SKIP a cluster whose members already all share ONE common group id — so a human's 'not a
+        duplicate' decision is never re-flagged, and re-runs are no-ops.
+    Returns {"flagged": [...]}. dry_run reports without writing."""
+    if not USE_DB:
+        return {"flagged": []}
+    import secrets as _secrets
+    import psycopg2.extras as _extras
+    db = _database()
+    conn = db.connect()
+    conn.autocommit = False
+    flagged = []
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, vendor_matched, store_matched, invoice_number, amount, invoice_date, "
+                "       duplicate_suspect, duplicate_reason, duplicate_group_id "
+                "  FROM invoices "
+                " WHERE duplicate_ignored IS NOT TRUE AND entered_in_qb IS NOT TRUE "
+                "   AND skip_qb_import IS NOT TRUE "
+                "   AND invoice_number IS NOT NULL AND invoice_number <> '' "
+                "   AND amount IS NOT NULL AND invoice_date IS NOT NULL AND invoice_date <> ''")
+            clusters = {}
+            for r in cur.fetchall():
+                key = (_norm_vendor_dedupe(r["vendor_matched"] or ""),
+                       round(float(r["amount"]), 2),
+                       str(r["invoice_date"]).strip(),
+                       _norm(r["store_matched"]))
+                clusters.setdefault(key, []).append(r)
+
+            for key, members in clusters.items():
+                if len(members) < 2:
+                    continue
+                numbers = {(m["invoice_number"] or "").strip().lower() for m in members}
+                if len(numbers) < 2:
+                    continue   # same number -> the normal vendor+number dedup already handles it
+                gids = {m["duplicate_group_id"] for m in members}
+                if len(gids) == 1 and None not in gids:
+                    continue   # already one shared group -> reviewed/flagged; leave it alone
+                gid = next((g for g in gids if g), None) or _secrets.token_hex(4).upper()
+                reason = (f"Same vendor, amount (${key[1]:.2f}), date, and store as "
+                          f"{len(members)} other copy(ies) but a DIFFERENT invoice number "
+                          f"({', '.join(sorted(m['invoice_number'] for m in members))}) — likely the "
+                          f"same invoice with a misread number. Verify and keep one before entering QB.")
+                flagged.append({"group": gid, "ids": [m["id"] for m in members],
+                                "vendor": members[0].get("vendor_matched"),
+                                "amount": key[1], "store": members[0].get("store_matched"),
+                                "numbers": sorted(m["invoice_number"] for m in members)})
+                if dry_run:
+                    continue
+                for m in members:
+                    newly = not m["duplicate_suspect"]
+                    cur.execute(
+                        "UPDATE invoices SET duplicate_suspect = TRUE, duplicate_group_id = %s, "
+                        "duplicate_reason = COALESCE(NULLIF(duplicate_reason, ''), %s), edited_at = now() "
+                        "WHERE id = %s", (gid, reason, m["id"]))
+                    if newly:
+                        cur.execute(
+                            "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                            "changed_by) VALUES ('invoices',%s,'duplicate_suspect','false','true',%s)",
+                            (m["id"], actor))
+        conn.commit() if not dry_run else conn.rollback()
+    finally:
+        conn.close()
+    return {"flagged": flagged}
+
+
 def enrich_flagged_with_duplicate_info(results, history):
     """Read-only: for records already flagged for review, check them against
     invoice history too (this is normally skipped for flagged records in
@@ -5593,6 +5671,16 @@ def main():
             for r in sp["resolved"]:
                 print(f"    {r['vendor']} #{r['number']} @ {r['store']}: kept id {r['keep_id']}, "
                       f"ignored {r['ignored_ids']}")
+        # Misread-number duplicates (same vendor+amount+date+store, DIFFERENT number) — flag them so
+        # both can't silently land on /qb; a human resolves on /duplicates. Flags only, never ignores.
+        mm = flag_number_misread_duplicates("auto-flagged (misread-number duplicate backstop)")
+        if mm["flagged"]:
+            print(f"  MISREAD-DUP: flagged {len(mm['flagged'])} set(s) with matching "
+                  f"vendor/amount/date/store but a differing invoice number (hidden from /qb; "
+                  f"resolve on /duplicates):")
+            for f in mm["flagged"]:
+                print(f"    {f['vendor']} ${f['amount']} @ {f['store']}: numbers {f['numbers']} "
+                      f"(ids {f['ids']}, group {f['group']})")
 
     # Status-update safety net: any email SUCCESSFULLY handled this run (classified without error —
     # recorded, flagged-to-review, or informational) must not stay stuck on a stale status='error'
@@ -5777,6 +5865,16 @@ def main():
             print(f"WARNING: {corrected} email(s) left test_emails/ without a status write this run "
                   f"— backstopped to their destination status. A code path recorded/routed them "
                   f"without stamping emails.status; investigate so it's fixed at the source.")
+
+    # Account-based class rules (e.g. Maple + Purchase:Vitamins -> class "Vitamins"): applied AFTER the
+    # records are saved, since the account is only final once vendor standardization has run.
+    if USE_DB:
+        try:
+            n_cls = len(_database().apply_account_class_rules("classify run"))
+            if n_cls:
+                print(f"Account class rules: set class on {n_cls} record(s).")
+        except Exception as e:
+            print(f"(account class rules failed: {e})")
 
     # ---- Stamp the run row with completion time + counts ----
     if USE_DB:

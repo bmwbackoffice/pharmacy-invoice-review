@@ -1546,6 +1546,7 @@ async def edit_submit(request: Request, record_type: str, record_id: int):
         old_str = "" if old_val is None else str(old_val)
         if new_val != old_str:
             web_db.update_record_field(record_type, record_id, ui_field, new_val, user["username"])
+    _sync_account_class_rules("record edit")
     return RedirectResponse(f"/edit/{record_type}/{record_id}?saved=1", status_code=302)
 
 
@@ -2042,11 +2043,17 @@ REFERENCE_PAGES = {
         "help": ("Default QuickBooks class by store and/or vendor. Filled in when the document "
                  "didn't state a class — an explicit class on the email always wins. Leave Store "
                  "or Vendor blank for 'any'; when several rules match, the more specific wins "
-                 "(both fields > vendor-only > store-only)."),
+                 "(both fields > vendor-only > store-only). "
+                 "ACCOUNT rules: fill Account and the class is FORCED on every not-yet-entered "
+                 "record with that account (at that store/vendor, if set) — it overrides any other "
+                 "class, and follows the record if its account changes later. Records already "
+                 "entered in QB are never changed."),
         "columns": [
             {"name": "store_matched", "label": "Store (blank = any)", "type": "select",
              "options_from": "stores"},
             {"name": "vendor_matched", "label": "Vendor (blank = any)", "type": "text"},
+            {"name": "account", "label": "Account (blank = not an account rule)", "type": "select",
+             "options_from": "account_names"},
             {"name": "class", "label": "Class", "type": "text", "required": True},
             {"name": "note", "label": "Note", "type": "text"},
         ],
@@ -2097,10 +2104,21 @@ _VENDOR_STD_TABLES = {"vendor_name_map", "vendor_account_assignment"}
 _VENDOR_LOOKUP_TABLES = {"vendor_name_map", "vendor_account_assignment", "account_name_map"}
 
 
+def _sync_account_class_rules(why):
+    """Re-apply account-based class rules (database.apply_account_class_rules) after anything that
+    can change a record's account/store/vendor or the rules themselves. Never raises."""
+    try:
+        import database
+        database.apply_account_class_rules(f"web ({why})")
+    except Exception as e:
+        print(f"(account class rules after {why} failed: {e})")
+
+
 def _reference_saved_redirect(table):
     """Redirect back to a reference page after a successful save. For the vendor-standardization
     tables, first re-resolve existing unentered records against the now-updated mappings and pass
     the resolved count through for a one-line flash."""
+    _sync_account_class_rules(table)
     if table in _VENDOR_STD_TABLES:
         try:
             import classify_emails as ce

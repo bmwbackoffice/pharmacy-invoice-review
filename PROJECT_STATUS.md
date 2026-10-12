@@ -3664,6 +3664,22 @@ button, so it covers new uploads and sweeps the current backlog in one click. `i
   don't). Live replay: 0 of the 32 logged QB-marked records and 0 of the 771 `qb_match_candidates` change;
   0 same-vendor/same-amount/same-store invoice pairs in the app that the old rule conflated. Preventive.
 
+### FEATURE: misread-invoice-number duplicate backstop (prevents QB double-entry) (2026-10-12)
+
+Duplicates where the invoice NUMBER was read differently across copies (e.g. Emerson E29402997 vs
+E29402597, both $456.79) slipped past the vendor+number dedup and both landed on /qb — a double-entry
+risk. New `flag_number_misread_duplicates(actor, dry_run=False)` in [classify_emails.py](classify_emails.py)
+sweeps live invoice clusters sharing normalized vendor + amount + invoice_date + store but with >=2
+DISTINCT numbers; it FLAGS them (duplicate_suspect + shared group + reason) — never auto-ignores, since
+two genuinely-different invoices could rarely match — so /qb hides them by default and they surface on
+/duplicates for a human. Idempotent (skips clusters already sharing one group, so a human 'not a dup'
+decision is never re-flagged). Hooked into `main()` right after the store-preference backstop; both also
+runnable via [resolve_store_preferred.py](resolve_store_preferred.py) (dry-run / `--commit`).
+- **Data fix:** ignored invoice 710 (Emerson E29402597, the __2 copy of 709 E29402997) → only 709 left on /qb.
+- **Catch-up run (applied):** flagged 2 real sets — Boiron $604.13 @ Westgate (3 copies, would've been
+  triple-entered) and Full Life Direct $3089.22 @ Refuah (2 copies). Verified: all members suspect, one
+  group each; re-run flags 0 (idempotent).
+
 ### BUG (data-fixed, code fix pending decision): store-preference fails within a single run (2026-10-09)
 
 The existing "keep the store-scanned copy, auto-ignore the vendor copy" logic (`check_duplicate` →
@@ -5504,3 +5520,13 @@ Now:
 gate, dropping `_append_text`'s once-only guard, or removing the queue merge each makes tests fail.
 No leftover rows after a run (live review queue still 119). **Run the suite before handing off any
 change to the review logic, and add a test for each new incident.**
+
+### 2026-10-12 — Account-based class rules (Maple vitamins -> class "Vitamins")
+- class_rules gains an `account` column (migration). A rule with Account filled FORCES its class on
+  every not-yet-entered invoice/credit memo whose standard_account or qb_account matches (and store/
+  vendor, if set) — overrides a document-stated class. Store/vendor-only rules unchanged; apply_class_rules
+  now skips account rules. Logic: database.apply_account_class_rules() (edit_log'd, never touches
+  entered_in_qb records). Runs: end of each classify run, every init_db (_apply_standing_rules),
+  after any Setup save and after a record edit (review_app._sync_account_class_rules).
+- Rule added via setup_maple_vitamins_class_rule.py: Maple Pharmacy + Purchase:Vitamins -> "Vitamins".
+  Editable in Setup > Class rules (new Account column).

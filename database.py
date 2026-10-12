@@ -554,6 +554,9 @@ ALTER TABLE credit_memos  ADD COLUMN IF NOT EXISTS card_last4 TEXT;
 ALTER TABLE runs          ADD COLUMN IF NOT EXISTS learnings_hash TEXT;
 ALTER TABLE invoices      ADD COLUMN IF NOT EXISTS class TEXT;
 ALTER TABLE credit_memos  ADD COLUMN IF NOT EXISTS class TEXT;
+-- Account-based class rules (2026-10-12): a class_rules row with `account` set forces that class on
+-- not-yet-entered invoices/credit memos whose standard/QB account matches (see apply_account_class_rules).
+ALTER TABLE class_rules   ADD COLUMN IF NOT EXISTS account TEXT;
 ALTER TABLE payments      ADD COLUMN IF NOT EXISTS class TEXT;
 -- Shared duplicate GROUP id: a short human-typeable tag stamped on EVERY record in a matched
 -- duplicate cluster (the original AND every later match), independent of duplicate_suspect/
@@ -845,6 +848,8 @@ def _apply_standing_rules(cur):
         "VALUES (%s, CURRENT_DATE, 'web:rule') ON CONFLICT (learned_rule) DO NOTHING",
         (_SAGETEQ_LEARNING,),
     )
+    # Account-based class rules (class_rules.account) — keep not-yet-entered records in line.
+    apply_account_class_rules("init", cur=cur)
 
 
 def _seed_reference_tables(cur):
@@ -1043,11 +1048,65 @@ def load_class_rules():
     conn = connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT store_matched, vendor_matched, class FROM class_rules "
+            cur.execute("SELECT store_matched, vendor_matched, account, class FROM class_rules "
                         "WHERE class IS NOT NULL AND class <> '' ORDER BY id")
             return [dict(r) for r in cur.fetchall()]
     finally:
         conn.close()
+
+
+def apply_account_class_rules(username="system", dry_run=False, cur=None):
+    """Account-based class rules (Joel, 2026-10-12: 'anything at Maple classified to Purchase:Vitamins
+    gets class Vitamins'). A class_rules row with `account` filled applies to every invoice / credit
+    memo NOT yet entered in QB whose standard_account or qb_account equals it (case-insensitive), and
+    whose store/vendor match the rule's (blank = any). It OVERRIDES any other class (a document-stated
+    class or a store/vendor default) -- the account decides. Most specific rule wins (store+vendor >
+    vendor > store > account-only), ties -> lowest id. Records already entered in QB are never touched.
+    Idempotent; every change logged to edit_log. Runs after each classify run, at init, after any Setup
+    save and after a record edit, so a later account change (assignment, re-standardization, edit)
+    pulls the class along. Returns [(table, id, store, old_class, new_class)]."""
+    own = cur is None
+    conn = connect() if own else None
+    try:
+        c = conn.cursor() if own else cur
+        changes = []
+        for table in ("invoices", "credit_memos"):
+            c.execute(f"""
+                SELECT DISTINCT ON (r.id) r.id, r.store_matched, r.class, cr.class
+                  FROM {table} r
+                  JOIN class_rules cr
+                    ON btrim(coalesce(cr.account,'')) <> ''
+                   AND btrim(coalesce(cr.class,'')) <> ''
+                   AND lower(btrim(cr.account)) IN (lower(btrim(coalesce(r.standard_account,''))),
+                                                    lower(btrim(coalesce(r.qb_account,''))))
+                   AND (btrim(coalesce(cr.store_matched,'')) = ''
+                        OR lower(btrim(cr.store_matched)) = lower(btrim(coalesce(r.store_matched,''))))
+                   AND (btrim(coalesce(cr.vendor_matched,'')) = ''
+                        OR lower(btrim(cr.vendor_matched)) IN (lower(btrim(coalesce(r.vendor_matched,''))),
+                                                               lower(btrim(coalesce(r.standard_vendor,'')))))
+                 WHERE r.entered_in_qb IS NOT TRUE
+                 ORDER BY r.id,
+                          (btrim(coalesce(cr.store_matched,'')) <> '' AND btrim(coalesce(cr.vendor_matched,'')) <> '') DESC,
+                          (btrim(coalesce(cr.vendor_matched,'')) <> '') DESC,
+                          (btrim(coalesce(cr.store_matched,'')) <> '') DESC,
+                          cr.id""")
+            for rid, store, old_c, new_c in c.fetchall():
+                new_c = new_c.strip()
+                if (old_c or "").strip() == new_c:
+                    continue
+                changes.append((table, rid, store, old_c, new_c))
+                if dry_run:
+                    continue
+                c.execute(f"UPDATE {table} SET class = %s, edited_at = now() WHERE id = %s", (new_c, rid))
+                c.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                          "VALUES (%s,%s,%s,%s,%s,%s)",
+                          (table, rid, "class", old_c, new_c, f"{username} (account class rule)"))
+        if own and not dry_run:
+            conn.commit()
+        return changes
+    finally:
+        if own:
+            conn.close()
 
 
 def load_vendor_standardization():
