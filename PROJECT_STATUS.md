@@ -5644,3 +5644,22 @@ highlighted on every tab. No data, routes or saves changed. Tests: `tests/test_s
 REFERENCE_PAGES table is in a group; lookup incl. card_store_map → Cards; tabs render with the right one
 active; the menu has exactly Vendors/Stores/Rules and highlights the right one; no tabs elsewhere).
 Suite: 85 pass.
+
+### "My work" inbox (2026-10-12)
+
+New page `GET /my-work` (first entry in the menu, `templates/my_work.html`): one list of everything
+waiting on a person, built by `review_app.my_work(user)` from the SAME helpers the separate pages use
+(`list_open_reviews`, `list_open_statement_exceptions`, `list_duplicate_candidates`,
+`qb_list_candidates(status='pending')`, and for admins `list_flags` (pending / approved_for_fix) and
+`list_change_requests` (pending / approved_for_build)), so counts agree. Sections: **Assigned to you**
+(review items + statements assigned to the user), **Waiting for anyone** (unassigned review items and
+statements, duplicate sets, QB matches, admin flags/requests), a count + links for items assigned to
+other people, and **Ready for QuickBooks** (invoice/credit and payment counts from `dashboard_counts`,
+worked in bulk on QB entry / Payments). Oldest first (`_sort_key`, undated last), age labels
+(`_age_label`: "new" / "N hr" / "N days"), a green **Quick fix** chip on review items with a matching
+fix (`quick_fix_kinds`), and client-side kind filter buttons (All / Review / Statement / …). Live
+2026-10-12 as admin: 0 assigned, 144 waiting (120 review, 20 statements, 2 duplicate sets, 2 requests), 3
+assigned to others, 56 Quick fix chips. Running/failed investigations stay on the dashboard (system
+matter). The separate pages and the login landing page (/review) are unchanged. Tests:
+`tests/test_my_work.py` (placement, order, others count, admin-only flags/requests, chip, title, age
+labels on fixed data; page + menu order). Suite: 90 pass.

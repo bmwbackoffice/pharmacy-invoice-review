@@ -416,6 +416,120 @@ def dashboard(request: Request):
     return render(request, "dashboard.html", user, work=work, health=health)
 
 
+# --------------------------------------------------------------------------- #
+# My work (2026-10-12): one list of everything waiting on a person, across the separate queues. Built
+# from the same helpers those pages use, so the numbers agree. The separate pages stay as they are.
+# --------------------------------------------------------------------------- #
+
+def _age_label(when):
+    if not when:
+        return ""
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when)
+        except ValueError:
+            return ""
+    if isinstance(when, date) and not isinstance(when, datetime):
+        when = datetime(when.year, when.month, when.day)
+    now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
+    days = (now - when).days
+    if days >= 1:
+        return f"{days} day{'s' if days != 1 else ''}"
+    hours = int((now - when).total_seconds() // 3600)
+    return f"{hours} hr" if hours >= 1 else "new"
+
+
+def _sort_key(when):
+    """Oldest first; undated last. Works for naive and aware datetimes, dates and ISO strings."""
+    if not when:
+        return (1, 0.0)
+    if isinstance(when, str):
+        try:
+            when = datetime.fromisoformat(when)
+        except ValueError:
+            return (1, 0.0)
+    if isinstance(when, date) and not isinstance(when, datetime):
+        when = datetime(when.year, when.month, when.day)
+    return (0, when.timestamp())
+
+
+def my_work(user):
+    """{"mine": [...], "anyone": [...], "others": n, "entry": [...]}. Each item: kind, title, detail,
+    when, age, href, quick_fix, assigned_to."""
+    me = user["username"]
+    is_admin = user["role"] == "admin"
+    mine, anyone, others = [], [], 0
+
+    def place(item, assigned):
+        nonlocal others
+        if assigned and assigned == me:
+            mine.append(item)
+        elif assigned:
+            others += 1
+        else:
+            anyone.append(item)
+
+    for r in web_db.list_open_reviews():                     # unanswered review items
+        reason = (r.get("question") or "").strip()
+        amount = f" · ${float(r['amount']):,.2f}" if r.get("amount") not in (None, "") else ""
+        place({"kind": "Review", "title": f"{r.get('vendor_matched') or '(no vendor)'}"
+                                          f"{' #' + r['invoice_number'] if r.get('invoice_number') else ''}{amount}",
+               "detail": reason[:160] + ("…" if len(reason) > 160 else ""), "when": r.get("flagged_at"),
+               "href": f"/review/{r['id']}", "quick_fix": bool(quick_fix_kinds(reason)),
+               "assigned_to": r.get("assigned_to")}, r.get("assigned_to"))
+    for s in web_db.list_open_statement_exceptions():         # one row per statement
+        place({"kind": "Statement", "title": f"{s.get('vendor_matched') or '(multiple vendors)'} statement",
+               "detail": s.get("status_label") or "", "when": s.get("flagged_at"),
+               "href": "/statements", "quick_fix": False, "assigned_to": s.get("assigned_to")},
+              s.get("assigned_to"))
+    try:
+        dup_sets = web_db.list_duplicate_candidates()
+    except Exception:
+        dup_sets = []
+    for g in dup_sets:                                       # shared pool
+        first = (g.get("records") or [{}])[0]
+        anyone.append({"kind": "Duplicate", "title": f"{first.get('vendor_matched') or '?'}"
+                                                    f"{' #' + str(first.get('number')) if first.get('number') else ''}",
+                       "detail": f"{len(g.get('records') or [])} copies — keep the right one",
+                       "when": None, "href": "/duplicates", "quick_fix": False, "assigned_to": None})
+    for c in web_db.qb_list_candidates(status="pending"):
+        anyone.append({"kind": "QB match", "title": f"{c.get('qb_name') or '?'} #{c.get('qb_num') or '?'}",
+                       "detail": c.get("confidence_reason") or "doubtful QuickBooks match to confirm",
+                       "when": c.get("created_at"), "href": "/qb-reconcile/review", "quick_fix": False,
+                       "assigned_to": None})
+    if is_admin:
+        for f in web_db.list_flags(is_admin=True):
+            if f.get("status") in ("pending", "approved_for_fix"):
+                note = (f.get("note") or "").strip()
+                anyone.append({"kind": "Flag", "title": ("Approved to fix: " if f["status"] == "approved_for_fix"
+                                                        else "") + (note[:90] or "(no note)"),
+                               "detail": f"from {f.get('submitted_by') or '?'}", "when": f.get("created_at"),
+                               "href": "/flags", "quick_fix": False, "assigned_to": None})
+        for q in web_db.list_change_requests(is_admin=True):
+            if q.get("status") in ("pending", "approved_for_build"):
+                anyone.append({"kind": "Request", "title": q.get("title") or "(untitled)",
+                               "detail": ("approved — to build · " if q["status"] == "approved_for_build" else "")
+                                         + f"from {q.get('submitted_by') or '?'}",
+                               "when": q.get("created_at"), "href": "/requests", "quick_fix": False,
+                               "assigned_to": None})
+    for lst in (mine, anyone):
+        lst.sort(key=lambda i: _sort_key(i["when"]))
+        for i in lst:
+            i["age"] = _age_label(i["when"])
+    d = web_db.dashboard_counts()
+    entry = [{"label": "Invoices and credit memos to enter", "count": d["qb_invoices"] + d["qb_credits"], "href": "/qb"},
+             {"label": "Payments to enter", "count": d["payments"], "href": "/payments"}]
+    return {"mine": mine, "anyone": anyone, "others": others, "entry": entry}
+
+
+@app.get("/my-work", response_class=HTMLResponse)
+def my_work_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    return render(request, "my_work.html", user, work=my_work(user))
+
+
 SCHEDULED_LOG = BASE_DIR / "logs" / "scheduled_runs.log"
 _RUN_START = re.compile(r"^===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) =====", re.M)
 _RUN_RESULT = re.compile(r"^===== Result: (.+?) -- ([\d.]+) min =====", re.M)

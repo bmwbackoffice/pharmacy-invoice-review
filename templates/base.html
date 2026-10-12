@@ -96,6 +96,7 @@
     {# Grouped nav: each group = {href (primary link, or none for Setup), label, admin_only,
        children:[(href,label)...]}. Routes are unchanged — this only regroups the links. #}
     {% set nav_groups = [
+        {'href':'/my-work',     'label':'My work',      'children':[]},
         {'href':'/dashboard',   'label':'Dashboard',    'children':[]},
         {'href':'/review',      'label':'Review queue', 'children':[('/statements','Statements'),('/flags','Flags'),('/requests','Requests'),('/tracked','Tracked'),('/ignored','Dismissed'),('/sales-orders','Sales orders')]},
         {'href':'/qb',          'label':'QB entry',     'children':[('/payments','Payments'),('/qb-reconcile','QB reconcile')]},

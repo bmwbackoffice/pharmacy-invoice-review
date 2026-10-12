@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .mw-row { display:grid; grid-template-columns:96px minmax(0,1fr) 72px auto; gap:4px 12px; align-items:center;
+            padding:9px 12px; border-top:1px solid var(--line); }
+  .mw-row:first-of-type { border-top:none; }
+  .mw-kind { font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .mw-title { font-weight:700; }
+  .mw-detail { font-size:12.5px; color:var(--muted); overflow-wrap:anywhere; }
+  .mw-age { font-size:12.5px; color:var(--muted); text-align:right; white-space:nowrap; }
+  .mw-fix { font-size:11px; font-weight:700; padding:2px 7px; border-radius:999px; background:#dcfce7; color:#137547;
+            margin-left:6px; vertical-align:middle; }
+  .mw-entry { display:flex; gap:12px; flex-wrap:wrap; }
+  .mw-entry a { display:block; flex:1 1 220px; padding:12px 14px; border:1px solid var(--line); border-radius:8px;
+                text-decoration:none; color:inherit; background:#fff; }
+  .mw-entry b { font-size:24px; color:var(--brand); display:block; }
+  .mw-row .btn { justify-self:end; }
+  .mw-row[hidden] { display:none; }
+  .mw-filter { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 4px; }
+  .mw-filter button { padding:4px 11px; border:1px solid var(--line); border-radius:999px; background:#fff; cursor:pointer;
+                      font-size:12.5px; }
+  .mw-filter button[aria-pressed="true"] { background:var(--brand); border-color:var(--brand); color:#fff; }
+  @media (max-width:640px) { .mw-row { grid-template-columns:minmax(0,1fr) auto; } .mw-kind, .mw-age { grid-column:1; text-align:left; } }
+</style>
+
+{% macro rows(items, empty) %}
+<div class="card" style="padding:0;">
+  {% for i in items %}
+  <div class="mw-row" data-kind="{{ i.kind }}">
+    <div class="mw-kind">{{ i.kind }}</div>
+    <div>
+      <div class="mw-title">{{ i.title }}{% if i.quick_fix %}<span class="mw-fix" title="This item has a one-click Quick fix">Quick fix</span>{% endif %}</div>
+      {% if i.detail %}<div class="mw-detail">{{ i.detail }}</div>{% endif %}
+    </div>
+    <div class="mw-age" title="waiting">{{ i.age }}</div>
+    <a class="btn secondary" style="padding:4px 12px;" href="{{ i.href }}">Open</a>
+  </div>
+  {% else %}
+  <p class="muted" style="margin:0; padding:14px;">{{ empty }}</p>
+  {% endfor %}
+</div>
+{% endmacro %}
+
+<h2>My work</h2>
+<p class="muted">Everything waiting on a person, in one list — oldest first. The separate pages (Review queue,
+  Statements, Possible duplicates and the rest) still work the same; this just gathers them.</p>
+
+{% set kinds = (work.mine + work.anyone) | map(attribute='kind') | unique | list %}
+{% if kinds|length > 1 %}
+<div class="mw-filter" role="group" aria-label="Show">
+  <button type="button" data-show="" aria-pressed="true">All</button>
+  {% for k in kinds %}<button type="button" data-show="{{ k }}" aria-pressed="false">{{ k }}</button>{% endfor %}
+</div>
+{% endif %}
+
+<h3>Assigned to you <span class="muted">({{ work.mine|length }})</span></h3>
+{{ rows(work.mine, "Nothing is assigned to you right now.") }}
+
+<h3 style="margin-top:22px;">Waiting for anyone <span class="muted">({{ work.anyone|length }})</span></h3>
+{{ rows(work.anyone, "Nothing unassigned is waiting. 🎉") }}
+{% if work.others %}
+<p class="muted">{{ work.others }} more item{{ '' if work.others == 1 else 's' }} assigned to other people —
+  see the <a href="/review">Review queue</a> and <a href="/statements">Statements</a>.</p>
+{% endif %}
+
+<h3 style="margin-top:22px;">Ready for QuickBooks</h3>
+<div class="mw-entry">
+  {% for e in work.entry %}
+  <a href="{{ e.href }}"><b>{{ e.count }}</b>{{ e.label }}</a>
+  {% endfor %}
+</div>
+<script>
+// Filter the rows by kind (just shows/hides; nothing is saved).
+document.querySelectorAll('.mw-filter button').forEach(function (b) {
+  b.addEventListener('click', function () {
+    var k = b.dataset.show;
+    document.querySelectorAll('.mw-filter button').forEach(function (x) { x.setAttribute('aria-pressed', x === b); });
+    document.querySelectorAll('.mw-row').forEach(function (r) { r.hidden = !!k && r.dataset.kind !== k; });
+  });
+});
+</script>
+{% endblock %}
