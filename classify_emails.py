@@ -5342,6 +5342,14 @@ def main():
               f"'{api_key[:7]}...'). Set a real key (should start with 'sk-ant-').")
         sys.exit(1)
 
+    # One run at a time (the scheduled run and a manual "Fetch New Invoices" could otherwise overlap and
+    # overwrite each other's review queue and ledger). Held until this process exits. Exit code 3 =
+    # skipped because another run is going; scheduled_run.py logs it as a skip, not a failure.
+    if USE_DB and not _database().acquire_run_lock():
+        print("Another classify run is in progress (scheduled or manual) - skipping this one. "
+              "Nothing was changed; the next run picks up any new email.")
+        sys.exit(3)
+
     # Explicit per-request timeout: without one the SDK waits out its 10-min default (×retries)
     # on a stalled request — a silent ~20-30 min freeze. Bound it so a stall fails fast and hits
     # the retry below VISIBLY instead of hanging. 180s read is far above a normal classification

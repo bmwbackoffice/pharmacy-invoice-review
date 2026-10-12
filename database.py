@@ -2675,6 +2675,43 @@ def email_from_addresses():
         conn.close()
 
 
+# One classify run at a time (2026-10-12, for the scheduled run): each run full-replaces review_queue and
+# the duplicate ledger, so two overlapping runs would drop each other's work. A Postgres session-level
+# advisory lock is held for the whole run on its own connection; it works across computers and is freed
+# automatically if the process dies. The key is an arbitrary fixed number.
+RUN_LOCK_KEY = 7240611001
+_RUN_LOCK_CONN = None
+
+
+def acquire_run_lock():
+    """True if this process now holds the classify run lock (or already did); False if another run holds it."""
+    global _RUN_LOCK_CONN
+    if _RUN_LOCK_CONN is not None:
+        return True
+    conn = connect()
+    conn.autocommit = True
+    with conn.cursor() as cur:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (RUN_LOCK_KEY,))
+        got = cur.fetchone()[0]
+    if got:
+        _RUN_LOCK_CONN = conn
+    else:
+        conn.close()
+    return bool(got)
+
+
+def release_run_lock():
+    """Free the run lock (closing its connection frees it too, as does the process exiting)."""
+    global _RUN_LOCK_CONN
+    if _RUN_LOCK_CONN is not None:
+        try:
+            with _RUN_LOCK_CONN.cursor() as cur:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (RUN_LOCK_KEY,))
+        finally:
+            _RUN_LOCK_CONN.close()
+            _RUN_LOCK_CONN = None
+
+
 def load_credit_memo_keys():
     """Every recorded credit memo with a number, for the classifier's credit memo duplicate gate
     (credit memos have no ledger). Read-only."""

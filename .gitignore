@@ -23,6 +23,7 @@ Manual Instructions/
 *.wav
 
 # Scratch / generated
+logs/
 __pycache__/
 *.pyc
 _tmp_view/

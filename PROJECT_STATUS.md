@@ -5553,3 +5553,33 @@ blank, not "printed total"). Enter clears a model-set skip-QB except for an excl
 gets a `[Set by a reviewer on Quick fix: …]` note. Plain free-text answers are unaffected (no fix lines →
 no-op). On 2026-10-12, 54 of the 119 open items had a matching fix (28 date, 20 amount, 15 store).
 Tests: `tests/test_quick_fix.py` (17; page + route on a temp review_queue, rolled back). Suite: 58 pass.
+
+### Scheduled run + one-run-at-a-time lock (2026-10-12)
+
+So Quick fix answers and new email are processed without anyone double-clicking "Fetch New Invoices.bat".
+**Not active until Joel runs the setup script** (it creates a Windows scheduled task — a machine setting).
+
+- **Run lock** — `database.acquire_run_lock()` / `release_run_lock()`: a Postgres session-level advisory
+  lock (`RUN_LOCK_KEY = 7240611001`) held on its own connection for the whole classify run; freed when the
+  process exits or dies; works across computers. `classify_emails.main()` takes it right after the API-key
+  check (DB mode); if another run holds it, prints "Another classify run is in progress … skipping" and
+  exits **3**, before creating the API client or touching anything. Needed because every run full-replaces
+  `review_queue` and the duplicate ledgers. `Fetch New Invoices.bat` is unchanged and gets the same
+  protection.
+- **[scheduled_run.py](scheduled_run.py)** — does what the .bat does (gmail_fetcher.py, then
+  classify_emails.py --drive) with no window, no pause, and time limits (fetch 10 min — the Gmail step
+  opens a browser and waits if its sign-in expires; classify 90 min). Children run with python.exe +
+  CREATE_NO_WINDOW, `PYTHONUTF8=1` / `PYTHONIOENCODING=utf-8` (output goes to a file; cp1252 would crash on
+  an arrow/emoji), and `STATEMENT_GOLIVE_DATE` defaulted to 2026-08-07. Appends one block per run to
+  `logs/scheduled_runs.log` (rolls to `.log.1` past 5 MB; `logs/` is git-ignored) ending in
+  `Result: OK` / `SKIPPED (another run was in progress)` / `FAILED (exit N)` / `TIMED OUT`.
+- **[setup_scheduled_run.ps1](setup_scheduled_run.ps1)** — registers task "Pharmacy invoices - fetch and
+  classify": pythonw.exe scheduled_run.py, daily from 07:00 repeating every 30 min for 14 h (to 9 PM),
+  as the current user, Interactive logon (only while signed in — no stored password; the user env vars
+  ANTHROPIC_API_KEY / DATABASE_URL / STATEMENT_GOLIVE_DATE are in HKCU\Environment so the task sees them),
+  MultipleInstances IgnoreNew, 2 h execution limit, StartWhenAvailable, runs on battery. Options
+  `-EveryMinutes`, `-From`, `-Hours`, `-Remove`. Parse-checked; not registered by Claude.
+- **Cost:** a run with no new email makes no Claude API calls; each run with email pays one prompt-cache
+  write (~10K tokens of system prompt + learnings). Gmail calls are free.
+- Tests: `tests/test_scheduled_run.py` (main() exits 3 before the API client when the lock is held, carries
+  on when free; real advisory lock refuses a second session; result lines; UTF-8 env). Suite: 63 pass.
