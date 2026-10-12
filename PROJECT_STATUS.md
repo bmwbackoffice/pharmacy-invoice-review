@@ -679,8 +679,26 @@ returns one of four outcomes (SELF / REAL duplicate / POSSIBLE / STORE_CONFLICT)
     ($419.85, Madison; 356/357/358/590/946, all auto-ignored as duplicates of each other). Plus Garden of
     Life #52080970: the live copy 3005 is under 3M but came from refuahscanner@ and the vendor email said
     Refuah. Other all-ignored groups (Schwartz #235938, Emerson #E29402599, Herbal Health #2798 reminder,
-    7 payments) have a person's ignore in them and look deliberate. Fix by Restore on /duplicates.
-    A monitor for "no live copy" groups would catch this class going forward (not built).
+    7 payments) have a person's ignore in them and look deliberate. Fix with Restore on the new
+    `/no-live-copy` page (NOT /duplicates — it only shows sets that still have a live copy).
+  - **BUILT 2026-10-12: "Bills with no live copy" monitor.** `web_db.no_live_copy_groups()` groups
+    invoices + payments by `_duplicate_vendor_keyer()` + `ce._norm(number)` (same key as /duplicates) and
+    keeps groups where every copy is `duplicate_ignored`, none `entered_in_qb`, none `skip_qb_import`.
+    `by_person` = some copy's `duplicate_ignored_by` is a person (`_ignored_by_person`: non-blank and no
+    script marker — claude / cleanup / backfill / recheck / auto / diagnosis; so joel, js, Amy are people;
+    NULL = the pipeline). New web table `no_live_copy_confirmed` (record_type, vendor_key, number_key PK,
+    confirmed_by/at) — "Confirmed — leave ignored" on the page; undo deletes; both logged to edit_log
+    (table no_live_copy_confirmed, record_id 0). `no_live_copy_count()` (not by_person, not confirmed)
+    feeds a new dashboard tile "Bills with no live copy" → `GET /no-live-copy` (sections: needs a look /
+    a person ignored a copy / confirmed; each copy links to its record page and has a Restore button
+    posting to the existing `/records/{type}/{id}/duplicate` action=restore). `POST /no-live-copy/confirm`.
+    Template `templates/no_live_copy.html`. Live 2026-10-12: 13 groups, **5 need a look** (Lantev
+    #9GH5739, Emerson #E29402599 [ignored by manual-import-cleanup, a script], Herbal Health #2798 [an
+    auto-ignored payment reminder with no live invoice], Garden of Life #52099183, Lake Distribution
+    #1051), 8 include a person's ignore. Verified: TestClient page + dashboard render (fake user
+    -424242), confirm drops the count by 1 and shows "confirmed by", undo restores it, 2 edit_log rows,
+    all rolled back (live counts unchanged). The web app needs a restart to show it (WEB_DDL adds the
+    table on startup; already created on the live DB by the test's init_web_schema()).
   - `find_live_invoice` matches the live `invoices` row on **`email_filename`** (= a history
     entry's `source_file`); the `invoices` table has no `source_file` column, so the task's spec
     column name was corrected to `email_filename`.

@@ -346,6 +346,8 @@ def dashboard(request: Request):
          "note": "processing error"},
         {"label": "Orphaned ledger rows", "count": d.get("orphaned_history", 0), "href": "/reconcile",
          "note": "extracted but never recorded"},
+        {"label": "Bills with no live copy", "count": d.get("no_live_copy", 0), "href": "/no-live-copy",
+         "note": "every copy ignored as a duplicate, none entered"},
         {"label": "Never classified", "count": d.get("never_classified", 0),
          "href": "/emails?disposition=never_classified",
          "note": "fetched >1 day ago, no run ever processed it"},
@@ -364,6 +366,30 @@ def reconcile(request: Request):
     if not user:
         return _login_redirect()
     return render(request, "reconcile.html", user, rows=web_db.orphaned_history_records())
+
+
+@app.get("/no-live-copy", response_class=HTMLResponse)
+def no_live_copy(request: Request):
+    """Invoice/payment groups where every copy is ignored as a duplicate and none is entered -- a bill
+    that will never show for entry. Restore a copy (existing duplicate route), or confirm the group."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    groups = web_db.no_live_copy_groups()
+    return render(request, "no_live_copy.html", user,
+                  needs=[g for g in groups if not g["by_person"] and not g["confirmed"]],
+                  person=[g for g in groups if g["by_person"] and not g["confirmed"]],
+                  confirmed=[g for g in groups if g["confirmed"]])
+
+
+@app.post("/no-live-copy/confirm")
+def no_live_copy_confirm(request: Request, record_type: str = Form(...), vendor_key: str = Form(...),
+                         number_key: str = Form(...), undo: str = Form("")):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    web_db.confirm_no_live_copy(record_type, vendor_key, number_key, user["username"], confirm=not undo)
+    return RedirectResponse("/no-live-copy", status_code=302)
 
 
 # --------------------------------------------------------------------------- #

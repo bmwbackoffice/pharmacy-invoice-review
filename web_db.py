@@ -277,6 +277,18 @@ DO $$ BEGIN
         CHECK ((flag_id IS NOT NULL)::int + (request_id IS NOT NULL)::int = 1);
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 CREATE INDEX IF NOT EXISTS ix_investigations_request ON investigations (request_id, started_at DESC);
+
+-- /no-live-copy: invoice/payment groups whose copies are ALL duplicate-ignored (none entered, none
+-- skip-QB) -- a bill that will never show for entry. A row here = a person checked the group and
+-- confirmed it should stay ignored, so it stops counting on the dashboard. Keyed like the page groups.
+CREATE TABLE IF NOT EXISTS no_live_copy_confirmed (
+    record_type  TEXT NOT NULL,          -- 'invoice' | 'payment'
+    vendor_key   TEXT NOT NULL,          -- _duplicate_vendor_keyer() of the vendor
+    number_key   TEXT NOT NULL,          -- classify_emails._norm() of the number
+    confirmed_by TEXT,
+    confirmed_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (record_type, vendor_key, number_key)
+);
 """
 
 
@@ -2560,6 +2572,100 @@ def orphaned_history_records():
         conn.close()
 
 
+# duplicate_ignored_by values written by scripts rather than a person clicking Ignore (NULL is the
+# pipeline itself). Anything else -- 'joel', 'js', 'Amy' -- is a person.
+_SCRIPT_IGNORE_MARKERS = ("claude", "cleanup", "backfill", "recheck", "auto", "diagnosis")
+
+
+def _ignored_by_person(ignored_by):
+    who = (ignored_by or "").strip().lower()
+    return bool(who) and not any(m in who for m in _SCRIPT_IGNORE_MARKERS)
+
+
+def no_live_copy_groups():
+    """Invoice and payment groups -- same vendor (standard-name duplicate key, as /duplicates uses) and
+    same normalized number -- where EVERY copy is duplicate_ignored, none is entered in QuickBooks and
+    none is skip_qb_import: a bill that will never show for entry. Happens when each copy is ignored as a
+    duplicate of another (Lake Distribution #1051 x5), or after a store-conflict supersede whose survivor
+    was later ignored too (Lantev #9GH5739, Garden of Life #52099183) -- found 2026-10-12.
+    Each group: {record_type, vendor, number, vendor_key, number_key, copies, by_person, confirmed}.
+    by_person = some copy was ignored by a person (probably deliberate); confirmed = a person checked
+    it on /no-live-copy (no_live_copy_confirmed). Newest groups first. Read-only."""
+    import classify_emails as ce
+    vkey = _duplicate_vendor_keyer()
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 'invoice' AS record_type, id, vendor_matched, invoice_number AS number, amount, "
+                "       store_matched, invoice_date AS doc_date, email_filename, duplicate_ignored, "
+                "       entered_in_qb, skip_qb_import, duplicate_ignored_by, duplicate_reason "
+                "  FROM invoices WHERE coalesce(btrim(invoice_number), '') <> '' "
+                "UNION ALL "
+                "SELECT 'payment', id, vendor_matched, reference_number, amount, store_matched, "
+                "       payment_date, email_filename, duplicate_ignored, entered_in_qb, skip_qb_import, "
+                "       duplicate_ignored_by, duplicate_reason "
+                "  FROM payments WHERE coalesce(btrim(reference_number), '') <> ''")
+            rows = cur.fetchall()
+            confirmed = {}
+            cur.execute("SELECT to_regclass('no_live_copy_confirmed') IS NOT NULL AS ok")
+            if cur.fetchone()["ok"]:
+                cur.execute("SELECT * FROM no_live_copy_confirmed")
+                confirmed = {(r["record_type"], r["vendor_key"], r["number_key"]): r for r in cur.fetchall()}
+    finally:
+        conn.close()
+    groups = {}
+    for r in rows:
+        k = (r["record_type"], vkey(r["vendor_matched"]), ce._norm(r["number"]))
+        if k[1] and k[2]:
+            groups.setdefault(k, []).append(r)
+    out = []
+    for k, copies in groups.items():
+        if not all(c["duplicate_ignored"] for c in copies) \
+                or any(c["entered_in_qb"] or c["skip_qb_import"] for c in copies):
+            continue
+        copies.sort(key=lambda c: c["id"])
+        out.append({"record_type": k[0], "vendor_key": k[1], "number_key": k[2],
+                    "vendor": copies[-1]["vendor_matched"], "number": copies[-1]["number"],
+                    "copies": copies,
+                    "by_person": any(_ignored_by_person(c["duplicate_ignored_by"]) for c in copies),
+                    "confirmed": confirmed.get(k)})
+    out.sort(key=lambda g: -g["copies"][-1]["id"])
+    return out
+
+
+def no_live_copy_count():
+    """Dashboard number: groups with no live copy that no person ignored or confirmed."""
+    return sum(1 for g in no_live_copy_groups() if not g["by_person"] and not g["confirmed"])
+
+
+def confirm_no_live_copy(record_type, vendor_key, number_key, username, confirm=True):
+    """A person checked a no-live-copy group: confirm it stays ignored (stops counting), or undo that.
+    Logged to edit_log (record_id 0; the group is named in the values)."""
+    if record_type not in ("invoice", "payment") or not vendor_key or not number_key:
+        return
+    conn = connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor() as cur:
+            if confirm:
+                cur.execute("INSERT INTO no_live_copy_confirmed (record_type, vendor_key, number_key, "
+                            "confirmed_by) VALUES (%s,%s,%s,%s) ON CONFLICT DO NOTHING",
+                            (record_type, vendor_key, number_key, username))
+            else:
+                cur.execute("DELETE FROM no_live_copy_confirmed WHERE record_type=%s AND vendor_key=%s "
+                            "AND number_key=%s", (record_type, vendor_key, number_key))
+            if cur.rowcount:
+                cur.execute(
+                    "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                    "VALUES ('no_live_copy_confirmed', 0, %s, %s, %s, %s)",
+                    (f"{record_type} {vendor_key} #{number_key}",
+                     "open" if confirm else "confirmed", "confirmed" if confirm else "open", username))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def qb_list_batches(limit=50):
     """Past QB-reconcile import batches, newest first (for the history table)."""
     conn = connect()
@@ -2833,6 +2939,10 @@ def dashboard_counts():
         d["cards"] = sum(1 for c in list_seen_cards() if not c.get("store"))
     except Exception:
         d["cards"] = 0
+    try:
+        d["no_live_copy"] = no_live_copy_count()
+    except Exception:
+        d["no_live_copy"] = 0
     return d
 
 

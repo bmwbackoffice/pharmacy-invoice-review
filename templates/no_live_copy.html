@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+
+{% macro group_table(groups, show_confirm=True, show_undo=False) %}
+{% for g in groups %}
+<div class="card" style="padding:0; margin-bottom:12px;">
+  <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:10px 12px;">
+    <strong>{{ g.vendor or '—' }} #{{ g.number }}</strong>
+    <span class="muted">{{ g.record_type }} · {{ g.copies|length }} cop{{ 'y' if g.copies|length == 1 else 'ies' }}, all ignored</span>
+    {% if g.confirmed %}<span class="muted">confirmed by {{ g.confirmed.confirmed_by }}{% if g.confirmed.confirmed_at %} {{ g.confirmed.confirmed_at | us_date }}{% endif %}</span>{% endif %}
+    <span style="margin-left:auto;"></span>
+    {% if show_confirm or show_undo %}
+    <form method="post" action="/no-live-copy/confirm" style="display:inline"
+          {% if show_confirm %}onsubmit='return confirm({{ ("Leave every copy of " ~ (g.vendor or "") ~ " #" ~ g.number ~ " ignored? It will stop counting on the dashboard.")|tojson }});'{% endif %}>
+      <input type="hidden" name="record_type" value="{{ g.record_type }}">
+      <input type="hidden" name="vendor_key" value="{{ g.vendor_key }}">
+      <input type="hidden" name="number_key" value="{{ g.number_key }}">
+      {% if show_undo %}<input type="hidden" name="undo" value="1">
+        <button class="btn secondary" type="submit">Undo confirm</button>
+      {% else %}<button class="btn secondary" type="submit">Confirmed — leave ignored</button>{% endif %}
+    </form>
+    {% endif %}
+  </div>
+  <table>
+    <thead><tr><th>Record</th><th>Store</th><th class="num">Amount</th><th>Date</th><th>Ignored by</th><th>Why it was ignored</th><th></th></tr></thead>
+    <tbody>
+      {% for c in g.copies %}
+      <tr>
+        <td><a href="/records/{{ c.record_type }}/{{ c.id }}">#{{ c.id }}</a></td>
+        <td>{{ c.store_matched or '—' }}</td>
+        <td class="num">{{ money(c.amount) }}</td>
+        <td>{{ c.doc_date or '—' }}</td>
+        <td>{{ c.duplicate_ignored_by or 'pipeline' }}</td>
+        <td class="muted" style="font-size:12px; max-width:520px;">{{ c.duplicate_reason or '—' }}</td>
+        <td>
+          <form method="post" action="/records/{{ c.record_type }}/{{ c.id }}/duplicate" style="display:inline"
+                onsubmit="return confirm('Restore record #{{ c.id }} as a live record? It will show for QuickBooks entry.');">
+            <input type="hidden" name="action" value="restore">
+            <button class="btn secondary" type="submit">Restore</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endfor %}
+{% endmacro %}
+
+{% block content %}
+<h2>Bills with no live copy <span class="muted">({{ needs|length }})</span></h2>
+<p class="muted">Invoices and payments where every copy is ignored as a duplicate, none is entered in QuickBooks,
+  and none is kept out of QuickBooks — so the bill never shows for entry. It happens when each copy is ignored
+  as a duplicate of another. <b>Restore</b> the copy to enter (check its store), or, if the bill really shouldn't
+  be entered, <b>Confirmed — leave ignored</b>.</p>
+
+{% if not needs %}
+  <div class="card"><p class="muted" style="margin:0;">Nothing to check — every ignored group has a live copy, or a person ignored or confirmed it. ✓</p></div>
+{% else %}
+  {{ group_table(needs) }}
+{% endif %}
+
+{% if person %}
+<h3 style="margin-top:28px;">A person ignored a copy <span class="muted">({{ person|length }})</span></h3>
+<p class="muted">Every copy is ignored here too, but at least one by a person, so it's probably deliberate. Not counted on the dashboard.</p>
+{{ group_table(person) }}
+{% endif %}
+
+{% if confirmed %}
+<h3 style="margin-top:28px;">Confirmed <span class="muted">({{ confirmed|length }})</span></h3>
+{{ group_table(confirmed, show_confirm=False, show_undo=True) }}
+{% endif %}
+{% endblock %}
