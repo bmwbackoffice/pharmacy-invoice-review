@@ -77,6 +77,22 @@ class ReviewQueueMerge(RollbackTestCase):
         self.assertEqual(got["E"][1], 5, "restored during the run is kept")
         self.assertIn("N", got)
 
+    def test_dismiss_during_run_via_real_ignore_review(self):
+        """dedupe_review_queue (another chat, 2026-10-12) dismisses items through web_db.ignore_review
+        DURING a classify run, before save_review_queue. The save must not put them back."""
+        import web_db
+        self._ins(1, "A"); self._ins(2, "B")
+        rows = db.load_review_queue()
+        saved = web_db.connect
+        web_db.connect = db.connect                      # same rolled-back connection
+        try:
+            self.assertTrue(web_db.ignore_review(2, "auto-collapsed (review-queue dedupe backstop)"))
+        finally:
+            web_db.connect = saved
+        db.save_review_queue(rows)                       # the run's start-of-run copy still has B
+        self.cur.execute("SELECT filename FROM review_queue ORDER BY id")
+        self.assertEqual([r[0] for r in self.cur.fetchall()], ["A"])
+
     def test_consumed_answer_is_not_resurrected(self):
         self._ins(3, "C", answer="x", by="amy")
         c = dict(db.load_review_queue()[0]); c["Answer"] = ""; c["Question (AI review reason)"] = "new"

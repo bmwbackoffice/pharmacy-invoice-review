@@ -4448,6 +4448,93 @@ def flag_number_misread_duplicates(actor, dry_run=False):
     return {"flagged": flagged}
 
 
+def dedupe_review_queue(actor, dry_run=False):
+    """Collapse duplicate items in the REVIEW QUEUE. Duplicate detection skips records already
+    flagged for review, so when several copies of ONE invoice are flagged (e.g. a store conflict),
+    each lands in the queue separately — the reviewer sees the same invoice 2-3x. This keeps ONE copy
+    per cluster (preferring the store-scanned one, then one that has an invoice number) and DISMISSES
+    the rest via web_db.ignore_review (snapshot -> ignored_reviews, restorable). Record-time dedup
+    already prevents the actual double-ENTRY; this just removes the redundant review work.
+    Two pending items cluster together when they share normalized vendor + amount AND are linked by
+    the SAME non-empty invoice number, the SAME source email (a re-extraction), or the SAME duplicate
+    group id. Conservative; idempotent (a resolved cluster has one item left). Returns
+    {"dismissed": [...]}. dry_run reports without writing."""
+    if not USE_DB:
+        return {"dismissed": []}
+    import web_db                       # local: web_db imports classify_emails only inside functions
+    import psycopg2.extras as _extras
+    smap = load_sender_store_map()
+    db = _database()
+    conn = db.connect()
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT rq.id, rq.vendor_matched, rq.store_matched, rq.invoice_number, rq.amount, "
+                "       rq.source_email, rq.duplicate_group_id, e.from_address "
+                "  FROM review_queue rq LEFT JOIN emails e ON e.filename = rq.source_email "
+                " WHERE (rq.answer IS NULL OR rq.answer = '') "
+                "   AND rq.vendor_matched IS NOT NULL AND rq.amount IS NOT NULL")
+            items = cur.fetchall()
+    finally:
+        conn.close()
+
+    # Union-find over the pending items.
+    parent = {it["id"]: it["id"] for it in items}
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    by_id = {it["id"]: it for it in items}
+    for i in range(len(items)):
+        a = items[i]
+        for j in range(i + 1, len(items)):
+            b = items[j]
+            if (_norm_vendor_dedupe(a["vendor_matched"] or "") != _norm_vendor_dedupe(b["vendor_matched"] or "")
+                    or a["amount"] is None or b["amount"] is None
+                    or round(float(a["amount"]), 2) != round(float(b["amount"]), 2)):
+                continue
+            na, nb = (a["invoice_number"] or "").strip(), (b["invoice_number"] or "").strip()
+            same_num = bool(na) and na == nb
+            same_email = bool(a["source_email"]) and a["source_email"] == b["source_email"]
+            same_group = bool(a["duplicate_group_id"]) and a["duplicate_group_id"] == b["duplicate_group_id"]
+            if same_num or same_email or same_group:
+                union(a["id"], b["id"])
+
+    clusters = {}
+    for it in items:
+        clusters.setdefault(find(it["id"]), []).append(it["id"])
+
+    dismissed = []
+    for root, ids in clusters.items():
+        if len(ids) < 2:
+            continue
+        members = [by_id[i] for i in ids]
+
+        def rank(m):   # higher = better keeper: store-scan, then has-number, then lower id (stable)
+            is_scan = _norm(m.get("from_address")) in smap
+            has_num = bool((m.get("invoice_number") or "").strip())
+            return (is_scan, has_num, -m["id"])
+
+        keep = max(members, key=rank)
+        drop = [m for m in members if m["id"] != keep["id"]]
+        reason = (f"Duplicate of review #{keep['id']} (same {keep.get('vendor_matched')} invoice, "
+                  f"${keep.get('amount')}) — auto-collapsed by the review-queue dedupe backstop; kept "
+                  f"the store-scanned copy." if _norm(keep.get("from_address")) in smap else
+                  f"Duplicate of review #{keep['id']} (same {keep.get('vendor_matched')} invoice, "
+                  f"${keep.get('amount')}) — auto-collapsed by the review-queue dedupe backstop.")
+        dismissed.append({"keep_id": keep["id"], "dismissed_ids": [m["id"] for m in drop],
+                          "vendor": keep.get("vendor_matched"), "amount": keep.get("amount")})
+        if not dry_run:
+            for m in drop:
+                web_db.ignore_review(m["id"], actor, reason)
+    return {"dismissed": dismissed}
+
+
 def enrich_flagged_with_duplicate_info(results, history):
     """Read-only: for records already flagged for review, check them against
     invoice history too (this is normally skipped for flagged records in
@@ -5777,6 +5864,14 @@ def main():
             for f in mm["flagged"]:
                 print(f"    {f['vendor']} ${f['amount']} @ {f['store']}: numbers {f['numbers']} "
                       f"(ids {f['ids']}, group {f['group']})")
+        # Collapse duplicate copies of one invoice in the REVIEW QUEUE (dedup skips flagged records,
+        # so copies pile up there). Keeps one (store-scanned preferred), dismisses the rest.
+        rq = dedupe_review_queue("auto-collapsed (review-queue dedupe backstop)")
+        if rq["dismissed"]:
+            print(f"  REVIEW-DEDUPE: collapsed {len(rq['dismissed'])} duplicate review set(s):")
+            for d in rq["dismissed"]:
+                print(f"    {d['vendor']} ${d['amount']}: kept review #{d['keep_id']}, "
+                      f"dismissed {d['dismissed_ids']}")
 
     # Status-update safety net: any email SUCCESSFULLY handled this run (classified without error —
     # recorded, flagged-to-review, or informational) must not stay stuck on a stale status='error'

@@ -3664,6 +3664,24 @@ button, so it covers new uploads and sweeps the current backlog in one click. `i
   don't). Live replay: 0 of the 32 logged QB-marked records and 0 of the 771 `qb_match_candidates` change;
   0 same-vendor/same-amount/same-store invoice pairs in the app that the old rule conflated. Preventive.
 
+### FEATURE: review-queue dedupe backstop (collapse duplicate review items) (2026-10-12)
+
+Duplicate detection skips records already flagged for review, so when several copies of one invoice
+are flagged (e.g. a store conflict), each lands in the review queue separately — the reviewer sees the
+same invoice 2-3×. `dedupe_review_queue(actor, dry_run=False)` in [classify_emails.py](classify_emails.py)
+clusters pending review items by normalized vendor + amount, linked by same invoice number / same source
+email (a re-extraction) / same duplicate group (union-find), keeps ONE per cluster (store-scanned copy
+preferred, then one with a number) and DISMISSES the rest via `web_db.ignore_review` (snapshot →
+ignored_reviews, restorable). Record-time dedup already prevents the double-ENTRY; this removes redundant
+review work. Idempotent. Hooked into `main()` after the misread flagger; also in
+[resolve_store_preferred.py](resolve_store_preferred.py). (Note: web_db imports classify_emails only
+inside functions, so the local `import web_db` here is not circular.)
+- **Data fix:** GoL invoice #52081242 ($246.88) had 3 review items (store scan #3620, vendor copy #3636,
+  numberless re-extraction #3637) — dismissed #3636/#3637, kept the store scan #3620.
+- **Catch-up run (applied):** collapsed **9** more duplicate review sets (10 items dismissed — e.g. Herbal
+  Health USA #2773 had 3 reminder/overdue copies). Verified: dismissed gone from queue + snapshotted;
+  keepers remain; re-run collapses 0.
+
 ### FEATURE: misread-invoice-number duplicate backstop (prevents QB double-entry) (2026-10-12)
 
 Duplicates where the invoice NUMBER was read differently across copies (e.g. Emerson E29402997 vs

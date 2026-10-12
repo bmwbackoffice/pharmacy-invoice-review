@@ -34,6 +34,12 @@ def main():
         print(f"  {f['vendor']} ${f['amount']} @ {f['store']}: numbers {f['numbers']} "
               f"(ids {f['ids']}, group {f['group']})")
 
+    rq = ce.dedupe_review_queue(tag, dry_run=not commit)
+    print(f"\n[review-queue dedupe] collapsed duplicate review items (kept store scan): "
+          f"{len(rq['dismissed'])}")
+    for d in rq["dismissed"]:
+        print(f"  {d['vendor']} ${d['amount']}: keep review #{d['keep_id']}, dismiss {d['dismissed_ids']}")
+
     if not commit:
         print("\nDRY-RUN -- nothing written. Re-run with --commit to apply.")
 
