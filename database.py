@@ -2616,6 +2616,21 @@ def email_from_addresses():
         conn.close()
 
 
+def load_credit_memo_keys():
+    """Every recorded credit memo with a number, for the classifier's credit memo duplicate gate
+    (credit memos have no ledger). Read-only."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, vendor_matched, credit_memo_number, amount, email_filename, "
+                        "entered_in_qb FROM credit_memos "
+                        "WHERE credit_memo_number IS NOT NULL AND btrim(credit_memo_number) <> '' "
+                        "ORDER BY id")
+            return [dict(r) for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def find_live_invoice(source_file, vendor_matched, invoice_number):
     """Look up the live invoices-table row for a prior invoice_history match, by source file
     + vendor + invoice number. Returns {id, entered_in_qb, duplicate_group_id} or None.

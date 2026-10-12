@@ -78,15 +78,14 @@ def _std_eq(a, b):
     return bool(a and b and ce._norm(a) == ce._norm(b))
 
 
-def _digit_core(v):
-    """Longest run of digits in v once punctuation no longer splits it, with the classic OCR
-    letter/digit confusions (I/i <-> 1, O/o <-> 0) folded first -- so '86I0721' reads as
-    '8610721', matching the vendor's own numeric invoice number. The fold applies ONLY to a
-    letter flanked by digits on BOTH sides (genuine mid-number OCR noise); a letter affix such
-    as the 'IN' in '1618282-IN' is left alone, so it isn't glued on as a digit. Punctuation is
+def _digit_runs(v):
+    """Every run of digits in v once punctuation no longer splits it, each with leading zeros
+    stripped, after folding the classic OCR letter/digit confusions (I/i <-> 1, O/o <-> 0) -- so
+    '86I0721' reads as '8610721', matching the vendor's own numeric invoice number. The fold applies
+    ONLY to a letter flanked by digits on BOTH sides (genuine mid-number OCR noise); a letter affix
+    such as the 'IN' in '1618282-IN' is left alone, so it isn't glued on as a digit. Punctuation is
     removed first so an internal '/' or '-' doesn't split one number into two runs (e.g.
-    'INV/2026/47830' -> '202647830', matching 'INV/202647830'); leading zeros stripped too.
-    Empty if there are no digits at all."""
+    'INV/2026/47830' -> ['202647830'], matching 'INV/202647830'). Empty if there are no digits."""
     v = (v or "").strip()
     alnum = re.sub(r"[^0-9A-Za-z]", "", v)
     fold = {"I": "1", "i": "1", "O": "0", "o": "0"}
@@ -94,24 +93,32 @@ def _digit_core(v):
     for i, ch in enumerate(chars):
         if ch in fold and 0 < i < len(chars) - 1 and chars[i - 1].isdigit() and chars[i + 1].isdigit():
             chars[i] = fold[ch]
-    runs = re.findall(r"\d+", "".join(chars))
-    if not runs:
-        return ""
-    return max(runs, key=len).lstrip("0") or "0"
+    return [r.lstrip("0") or "0" for r in re.findall(r"\d+", "".join(chars))]
+
+
+def _digit_core(v):
+    """The longest of _digit_runs(v) -- the index bucket _num_bucket uses. Empty if no digits."""
+    runs = _digit_runs(v)
+    return max(runs, key=len) if runs else ""
 
 
 def _num_eq(a, b):
-    # Exact (normalized) match first; then fall back to the "digit core" so cosmetic-only
-    # differences (vendor prefix, leading zeros, punctuation/"IN"/"INV" affixes) still match,
-    # while genuinely different numbers do not. Covers Tier-1 auto-match, Tier-2 candidate
-    # detection, the statement pass, and the recheck button (all route through here).
+    # Exact (normalized) match first; then fall back to the digits so cosmetic-only differences
+    # (vendor prefix, leading zeros, punctuation/"IN"/"INV" affixes) still match, while genuinely
+    # different numbers do not. Covers Tier-1 auto-match, Tier-2 candidate detection, the statement
+    # pass, and the recheck button (all route through here).
+    # EVERY digit run must agree, not just the longest (2026-10-12): letters inside a number that
+    # split its digits are part of the number, so 'SUB2026M08' / 'SUB2026M09' (a monthly bill at a
+    # fixed amount) or 'S1234A01' / 'S1234A02' no longer match on '2026' / '1234' alone -- a false
+    # Tier-1 match marks the wrong bill entered and the real one silently never shows for entry. A
+    # number this turns away still reaches the review list on vendor + amount + date.
     na, nb = ce._norm(_num_str(a)), ce._norm(_num_str(b))
     if na == "" or nb == "":
         return False
     if na == nb:
         return True
-    core_a, core_b = _digit_core(na), _digit_core(nb)
-    return core_a != "" and core_a == core_b
+    runs_a = _digit_runs(na)
+    return bool(runs_a) and runs_a == _digit_runs(nb)
 
 
 # --------------------------------------------------------------------------- #

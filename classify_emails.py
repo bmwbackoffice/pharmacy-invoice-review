@@ -813,6 +813,89 @@ def apply_unlisted_skip_gate(rec, rtype, classification):
                  f"QuickBooks (answer \"enter it in QuickBooks\"), or Ignore it if it shouldn't be entered.")
 
 
+# Credit memos recorded so far, keyed (standard-vendor dedupe key, normalized number), plus the clean
+# ones seen earlier in this run. Loaded on first use (one run = one process); None until then.
+_CREDIT_MEMO_POOL = None
+
+
+def _credit_memo_pool():
+    global _CREDIT_MEMO_POOL
+    if _CREDIT_MEMO_POOL is None:
+        _CREDIT_MEMO_POOL = {}
+        rows = []
+        if USE_DB:
+            try:
+                rows = _database().load_credit_memo_keys()
+            except Exception as e:
+                print(f"(could not load credit memos for the duplicate check: {e})")
+        for r in rows:
+            key = (_dedupe_vendor_key(r.get("vendor_matched")), _norm(r.get("credit_memo_number")))
+            if key[0] and key[1]:
+                _CREDIT_MEMO_POOL.setdefault(key, []).append(r)
+    return _CREDIT_MEMO_POOL
+
+
+def apply_credit_memo_duplicate_gate(classification, filename):
+    """Credit memos have no duplicate ledger, so before 2026-10-12 a credit sent twice (vendor email +
+    store scan, or a resend) reached QB entry twice and was taken twice. This sends a credit memo to
+    review when one with the same vendor (standard name, like DU-01) and number was already recorded
+    from a different email, or seen clean earlier in this run: a person ignores the second copy or
+    confirms it's a separate credit. It never auto-ignores (credit memos have no duplicate columns).
+    Skips skip-QB and excluded-vendor credits (never entered), credits without a vendor or number, and an email reprocessed
+    with a reviewer's answer (the person has seen this reason, so it can't loop). The same email (a
+    reprocess, or the split file of the original email) never matches itself. Runs right after
+    apply_review_gates, before documents are filed, so a flagged copy gets its own review document."""
+    if not classification or classification.get("_reviewer_answered"):
+        return
+    source_id = _record_source_id(filename)
+    own = {filename, source_id}
+    pool = _credit_memo_pool()
+    for cm in classification.get("credit_memos") or []:
+        if cm.get("skip_qb_import") or is_excluded_vendor(cm.get("vendor_matched")):
+            continue
+        key = (_dedupe_vendor_key(cm.get("vendor_matched")), _norm(cm.get("credit_memo_number")))
+        if not key[0] or not key[1]:
+            continue
+        priors = [p for p in pool.get(key, []) if p.get("email_filename") not in own]
+        if not priors:
+            if not record_flagged(cm):
+                pool.setdefault(key, []).append({
+                    "id": None, "vendor_matched": cm.get("vendor_matched"),
+                    "credit_memo_number": cm.get("credit_memo_number"),
+                    "amount": cm.get("credit_amount"), "email_filename": source_id,
+                    "entered_in_qb": False})
+            continue
+
+        def _amt(v):
+            try:
+                return abs(float(v))
+            except (TypeError, ValueError):
+                return None
+        this_amt = _amt(cm.get("credit_amount"))
+        same = [p for p in priors if this_amt is not None and _amt(p.get("amount")) is not None
+                and abs(_amt(p.get("amount")) - this_amt) < 0.005]
+        p = (same or priors)[0]
+        where = (f"credit memo record #{p['id']}" if p.get("id")
+                 else f"earlier in this run, from {p.get('email_filename')}")
+        p_amt = _amt(p.get("amount"))
+        in_qb = ", already entered in QuickBooks" if p.get("entered_in_qb") else ""
+        num, vendor = cm.get("credit_memo_number"), cm.get("vendor_matched")
+        if same:
+            note = (f"Credit memo #{num} from {vendor} was already recorded from another email ({where}"
+                    f"{', $' + format(p_amt, ',.2f') if p_amt is not None else ''}{in_qb}) — this looks "
+                    f"like a second copy of the same credit. Ignore this item if it is, or answer \"enter "
+                    f"it in QuickBooks\" if it's a separate credit.")
+        else:
+            note = (f"Credit memo #{num} from {vendor} was already recorded from another email ({where}"
+                    f"{', for $' + format(p_amt, ',.2f') if p_amt is not None else ''}{in_qb}); this copy "
+                    f"is {'$' + format(this_amt, ',.2f') if this_amt is not None else 'missing an amount'} "
+                    f"— possibly a revised credit memo. Ignore this item if the earlier one stands, or "
+                    f"answer with what to enter (and ignore the earlier record on its page if this one "
+                    f"replaces it).")
+        cm["needs_human_review"] = True
+        _append_text(cm, "review_reason", note)
+
+
 def _append_text(rec, field, note):
     """Append `note` to rec[field] (space-separated) unless that exact sentence is already there.
     The review gates run twice on a record — at classification time (apply_review_gates) and again
@@ -4999,6 +5082,8 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
         # Make the review-routing decision FINAL here (before file-saving / newly_flagged /
         # duplicate-checks assume a record's fate) — otherwise a gate-flagged record vanishes.
         apply_review_gates(c)
+        # A credit memo already recorded from another email goes to review (no ledger covers them).
+        apply_credit_memo_duplicate_gate(c, path.name)
         # Clean qb-bound records → invoice_files/ or payment_files/.
         saved = assign_invoice_files(path, text, attachments, c, html_body, cid_images)
         result["invoice_file_paths"] = saved

@@ -565,6 +565,23 @@ queue but still recorded.
   answered/assigned, M ignored, K restored/added.` Verified with a self-reverting temp-table test
   (answer, assign, ignore, restore, errored-answer stamps, consumed-answer re-flag, no-load path;
   live counts unchanged). No `classify_emails.py` change.
+- **Credit memos get a duplicate check (2026-10-12).** Credit memos have no ledger and no duplicate
+  columns, so a credit sent twice reached QB entry twice. New `apply_credit_memo_duplicate_gate(c,
+  filename)` in [classify_emails.py](classify_emails.py), called in `process_source_email` right after
+  `apply_review_gates` (before files are filed, so the flagged copy gets its own review document): a
+  credit memo whose vendor (standard-name `_dedupe_vendor_key`, like DU-01) + `_norm` number matches one
+  already recorded from a DIFFERENT email, or seen clean earlier in this run, goes to review. Two reasons:
+  same amount → "looks like a second copy … Ignore this item if it is, or answer \"enter it in
+  QuickBooks\""; different amount → "possibly a revised credit memo". Names the earlier record id and
+  whether it's entered in QB. Never auto-ignores. Skips skip-QB and excluded-vendor credits, no vendor /
+  no number, an email reprocessed with a reviewer's answer (`_reviewer_answered`, so it can't loop), and
+  the same email (`filename` or its `_record_source_id`). Pool: new read-only
+  `database.load_credit_memo_keys()`, loaded once per run into `_CREDIT_MEMO_POOL`; clean in-run credits
+  are appended. Live data (2026-10-12): 116 numbered credit memos, 8 same-number sets across emails; 7 are
+  excluded vendors (McKesson ×5, SmartSource, Madison Pharmacy — never entered), the 8th is the known
+  Prime Packaging #AR092424 pair (#104 entered, #112 not). Verified read-only: same/different amount flag
+  with the right sentence (once, on repeat), same email / reviewer-answered / skip-QB don't, second copy
+  in one run flags.
 - **Retry/reprocess recovers From/To/Cc header context (fixed 2026-09).** A flagged item's reprocess
   source is its **split PDF/PNG** in `review_pending/`, which has no email headers of its own —
   `read_email_content` returns `text=""` for it (by design; the file IS the attachment). So on every
@@ -3592,6 +3609,17 @@ button, so it covers new uploads and sweeps the current backlog in one click. `i
   regressed the `-IN` suffix cases — caught in edge testing and corrected to the flanked rule.) Verified:
   Lantev matches, `-IN` suffixes still match, Zahler still rejected; live sim resolves the pending Lantev
   card (119), 0 suspicious.
+- **Tightened (2026-10-12): every digit run must agree.** The longest-run rule let letters inside a number
+  be ignored, so `SUB2026M08` / `SUB2026M09` (a fixed-amount monthly bill) or `S1234A01` / `S1234A02`
+  matched on `2026` / `1234` alone; a false Tier-1 match marks the wrong bill entered and the real one
+  silently never shows for entry. Now `_digit_runs(v)` (same punctuation strip + flanked OCR fold, each
+  run's leading zeros stripped) returns ALL runs and `_num_eq` requires the lists to be equal.
+  `_digit_core` = the longest of them, still used only as `_num_bucket`'s index (equal numbers have equal
+  run lists, so they still share a bucket). A number this turns away still reaches the review list on
+  vendor + amount + date. Every documented case unchanged (`INV-000146`/`146`, `W00123`, `-IN`,
+  `INV/2026/47830`, `161230-9-IN`, Lantev `86I0721`, `U-13944`, `R204825` match; Zahler and `2026/146`
+  don't). Live replay: 0 of the 32 logged QB-marked records and 0 of the 771 `qb_match_candidates` change;
+  0 same-vendor/same-amount/same-store invoice pairs in the app that the old rule conflated. Preventive.
 
 ### BUG (data-fixed, code fix pending decision): store-preference fails within a single run (2026-10-09)
 
