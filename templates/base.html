@@ -77,7 +77,18 @@
     .num { text-align:right; font-variant-numeric:tabular-nums; }
   </style>
 </head>
-<body>
+<body{% if user and user.role == 'viewer' %} class="read-only"{% endif %}>
+{% if user and user.role == 'viewer' %}
+{# Read-only users: hide everything that would change data. The server refuses those requests anyway
+   (review_app._read_only_guard); this just keeps buttons from showing that can't work. #}
+<style>
+  body.read-only form[method="post" i]:not(.pref-form), body.read-only #quick-fix, body.read-only #ai-assist,
+  body.read-only button[type="submit"][form], body.read-only .ignore-btn,
+  body.read-only .rw-only { display:none !important; }
+  /* The per-row "mark entered" buttons post from JavaScript; keep them as a status label only. */
+  body.read-only .entered-btn { pointer-events:none; opacity:.75; }
+</style>
+{% endif %}
   {% if user %}
   <header>
     <span class="brand">Invoice Review</span>
@@ -126,7 +137,7 @@
         {% endif %}
       {% endfor %}
     </nav>
-    <span class="right">{{ user.display_name }} ({{ user.role }}) · <a href="/logout">log out</a></span>
+    <span class="right">{{ user.display_name }} ({{ 'read-only' if user.role == 'viewer' else user.role }}) · <a href="/logout">log out</a></span>
   </header>
   {% endif %}
   <main>
@@ -139,6 +150,11 @@
     {% endif %}
     {# Global one-line flash (e.g. the one-click "Ignore this vendor" confirmation). Any page can
        receive it via a ?flash=... redirect; shown once on load, not persisted. #}
+    {% if user and user.role == 'viewer' %}
+    <div class="card" style="background:#eef2ff; border-color:#c7d2fe; margin-bottom:10px; padding:8px 12px;">
+      👁 Read-only access — you can view and export everything, but not change it.
+    </div>
+    {% endif %}
     {% set _flash = request.query_params.get('flash') %}
     {% if _flash %}<div class="ok-msg">{{ _flash }}</div>{% endif %}
     {% block content %}{% endblock %}

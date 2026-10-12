@@ -318,6 +318,11 @@ def verify_password(pw, hashed):
         return False
 
 
+# 'viewer' = read-only (2026-10-12): every page, no changes (review_app._read_only_guard).
+ROLES = ("admin", "reviewer", "viewer")
+ROLE_LABELS = {"admin": "admin", "reviewer": "reviewer", "viewer": "read-only"}
+
+
 def create_user(username, password, display_name=None, role="reviewer"):
     conn = connect()
     try:
@@ -425,7 +430,7 @@ def update_user(user_id, admin_username, display_name=None, role=None, active=No
                 cur.execute("UPDATE users SET display_name = %s WHERE id = %s",
                             (dn or None, user_id))
                 _log("display_name", u["display_name"], dn)
-            if role in ("admin", "reviewer") and role != u["role"]:
+            if role in ROLES and role != u["role"]:
                 cur.execute("UPDATE users SET role = %s WHERE id = %s", (role, user_id))
                 _log("role", u["role"], role)
             if active is not None and bool(active) != bool(u["active"]):
@@ -1628,9 +1633,31 @@ _PAYMENT_SORT = {"vendor": "p.vendor_matched", "store": "p.store_matched",
                  "date_added": "p.date_added"}
 
 
+def _money_or_none(v):
+    """'$1,091.33' / '1091.33' -> 1091.33; blank or unreadable -> None (the filter is then skipped)."""
+    s = str(v or "").replace("$", "").replace(",", "").strip()
+    try:
+        return float(s) if s else None
+    except ValueError:
+        return None
+
+
+def payment_vendor_names():
+    """Distinct payment vendors, for the Payments vendor filter's suggestions."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT vendor_matched FROM payments WHERE coalesce(btrim(vendor_matched),'') <> '' "
+                        "ORDER BY 1")
+            return [r[0] for r in cur.fetchall()]
+    finally:
+        conn.close()
+
+
 def list_payments(store=None, entered=None, run_id=None, date_from=None, date_to=None,
                   sort="date_added", direction="desc", dup=None, show_ignored=False, group=None,
-                  show_skipped=False, missing=None):
+                  show_skipped=False, missing=None, q=None, vendor=None, reference=None,
+                  applied=None, amount_min=None, amount_max=None, added_from=None, added_to=None):
     """Payment records for the Payments tab, joined to emails for the run filter.
     Filters: store, entered/not-entered, run, payment-date range, and possible-duplicate
     (dup: 'yes' = flagged, 'all' = include flagged (no filter), else default/'no' = hide
@@ -1670,6 +1697,30 @@ def list_payments(store=None, entered=None, run_id=None, date_from=None, date_to
         clauses.append(f"{eff_date} >= %s"); params.append(date_from)
     if date_to:
         clauses.append(f"{eff_date} <= %s"); params.append(date_to)
+    # Search fields (2026-10-12). Text matches ignore case; reference and applied-invoice numbers also
+    # ignore punctuation and spaces, so '75227825' finds 'REF-7522 7825'.
+    alnum = "regexp_replace(lower(coalesce({}, '')), '[^a-z0-9]', '', 'g')"
+    if q and q.strip():
+        like = f"%{q.strip()}%"
+        clauses.append("(p.vendor_matched ILIKE %s OR p.reference_number ILIKE %s OR p.invoice_number ILIKE %s "
+                       "OR p.store_matched ILIKE %s OR p.email_filename ILIKE %s OR p.notes ILIKE %s "
+                       "OR CAST(p.amount AS TEXT) LIKE %s)")
+        params.extend([like] * 6 + [f"%{_money_or_none(q) if _money_or_none(q) is not None else q.strip()}%"])
+    if vendor and vendor.strip():
+        clauses.append("p.vendor_matched ILIKE %s"); params.append(f"%{vendor.strip()}%")
+    for value, col in ((reference, "p.reference_number"), (applied, "p.invoice_number")):
+        key = re.sub(r"[^a-z0-9]", "", (value or "").lower())
+        if key:
+            clauses.append(f"{alnum.format(col)} LIKE %s"); params.append(f"%{key}%")
+    lo, hi = _money_or_none(amount_min), _money_or_none(amount_max)
+    if lo is not None:
+        clauses.append("p.amount >= %s"); params.append(lo - 0.005)
+    if hi is not None:
+        clauses.append("p.amount <= %s"); params.append(hi + 0.005)
+    if added_from:
+        clauses.append("p.date_added >= %s"); params.append(added_from)
+    if added_to:
+        clauses.append("p.date_added <= %s"); params.append(added_to)
     where = "WHERE " + " AND ".join(clauses)
     order = _order_clause(sort, direction, _PAYMENT_SORT, "p.date_added DESC NULLS LAST")
     conn = connect()

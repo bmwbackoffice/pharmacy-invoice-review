@@ -254,7 +254,7 @@
 
 {# ---- Columns settings panel (visibility + order, saved per user) ---- #}
 <div class="card" id="qbcolspanel" style="display:none;">
-  <form method="post" action="/qb/columns" id="qbcolsform">
+  <form method="post" action="/qb/columns" id="qbcolsform" class="pref-form">
     <h3 style="margin-top:0;">Table columns</h3>
     <p class="muted">Choose which columns show and their order — saved for your account. Tick to show,
       use ↑ ↓ to reorder. (The control columns — select, Entered, source email, edit — are always shown.)</p>
@@ -301,7 +301,7 @@
     </div>
     <div style="margin-top:10px;"><button class="btn" type="submit">Save</button></div>
   </form>
-  <form method="post" action="/qb/columns" style="margin-top:8px;">
+  <form method="post" action="/qb/columns" class="pref-form" style="margin-top:8px;">
     <input type="hidden" name="reset" value="1">
     <button class="btn secondary" type="submit">Reset to standard order</button>
   </form>

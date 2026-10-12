@@ -29,6 +29,19 @@
   <form method="get" action="/payments">
     {% if params.group %}<input type="hidden" name="group" value="{{ params.group }}">{% endif %}
     <div class="row">
+      <div style="flex:2 1 260px;"><label>Search</label>
+        <input name="q" type="search" value="{{ params.q }}" placeholder="vendor, reference, invoice #, amount, store, email…"></div>
+      <div><label>Vendor</label>
+        <input name="vendor" list="payment-vendors" value="{{ params.vendor }}" placeholder="any">
+        <datalist id="payment-vendors">{% for v in vendors %}<option value="{{ v }}">{% endfor %}</datalist></div>
+      <div><label>Reference #</label><input name="reference" value="{{ params.reference }}" placeholder="any part"></div>
+      <div><label>Applied to invoice #</label><input name="applied" value="{{ params.applied }}" placeholder="any part"></div>
+      <div><label>Amount from</label><input name="amount_min" inputmode="decimal" value="{{ params.amount_min }}" placeholder="$"></div>
+      <div><label>Amount to</label><input name="amount_max" inputmode="decimal" value="{{ params.amount_max }}" placeholder="$"></div>
+      <div><label>Added from</label><input name="added_from" type="date" value="{{ params.added_from }}"></div>
+      <div><label>Added to</label><input name="added_to" type="date" value="{{ params.added_to }}"></div>
+    </div>
+    <div class="row">
       <div><label>Entered in QB</label>
         <select name="entered">
           <option value="" {{ 'selected' if not params.entered }}>any</option>
@@ -74,7 +87,7 @@
 
 {# Bulk action bar — checkboxes below belong to this form via form="paybulk" (HTML5). #}
 {% set exportq = [] %}
-{% for k in ['store','entered','dup','ignored','skipped','missing','run','date_from','date_to','sort','direction'] %}
+{% for k in ['store','entered','dup','ignored','skipped','missing','run','date_from','date_to','sort','direction'] + search_keys %}
   {% if params[k] %}{% set _ = exportq.append(k ~ '=' ~ (params[k]|urlencode)) %}{% endif %}
 {% endfor %}
 {% set filterq = exportq|join('&') %}

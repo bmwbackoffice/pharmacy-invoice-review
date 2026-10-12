@@ -10,7 +10,7 @@
       <div><label>Username</label><input name="username" required></div>
       <div><label>Display name</label><input name="display_name"></div>
       <div><label>Password</label><input name="password" type="password" required></div>
-      <div><label>Role</label><select name="role"><option value="reviewer">reviewer</option><option value="admin">admin</option></select></div>
+      <div><label>Role</label><select name="role"><option value="reviewer">reviewer</option><option value="admin">admin</option><option value="viewer">read-only</option></select></div>
     </div>
     <div style="margin-top:12px;"><button class="btn" type="submit">Create user</button></div>
   </form>
@@ -29,7 +29,7 @@
     {% for u in users %}
       {% set sortq = ('&sort=' ~ params.sort if params.sort else '') ~ ('&direction=' ~ params.direction if params.direction else '') %}
       <tr>
-        <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ u.role }}</td>
+        <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ 'read-only' if u.role == 'viewer' else u.role }}</td>
         <td>{{ 'yes' if u.active else 'no' }}</td>
         <td class="muted">{{ u.created_at | us_date }}</td>
         <td style="white-space:nowrap;">
@@ -50,6 +50,7 @@
                 <select name="role">
                   <option value="reviewer" {{ 'selected' if u.role=='reviewer' }}>reviewer</option>
                   <option value="admin" {{ 'selected' if u.role=='admin' }}>admin</option>
+                  <option value="viewer" {{ 'selected' if u.role=='viewer' }}>read-only — can look, can't change anything</option>
                 </select></div>
               <div><label>Active</label>
                 <select name="active">

@@ -5583,3 +5583,29 @@ So Quick fix answers and new email are processed without anyone double-clicking 
   write (~10K tokens of system prompt + learnings). Gmail calls are free.
 - Tests: `tests/test_scheduled_run.py` (main() exits 3 before the API client when the lock is held, carries
   on when free; real advisory lock refuses a second session; result lines; UTF-8 env). Suite: 63 pass.
+
+### Read-only users + Payments search fields (2026-10-12)
+
+**Read-only role ('viewer', shown as "read-only").** `web_db.ROLES = ("admin", "reviewer", "viewer")`;
+Users page create/edit offer it (`users_create`, `users_edit`, `update_user` accept any of ROLES).
+Enforced in ONE place: `review_app._read_only_guard` (BaseHTTPMiddleware, added just BEFORE
+SessionMiddleware so the session is available inside it) refuses every non-GET/HEAD/OPTIONS request from
+a viewer with 403 — the message page, or JSON `{"error": …}` for fetch calls — except `/login`,
+`/logout`, `/chat/ask` (Chat only reads data) and `/qb/columns` (the user's own column layout).
+`base.html` adds `body.read-only` + a "Read-only access" banner and hides post forms (except
+`.pref-form`), the Quick fix and AI assist cards, `button[type=submit][form]` bulk buttons and
+`.ignore-btn`; the per-row "mark entered" buttons become non-clickable status labels. GET routes only
+write the viewer's own UI prefs. No data access changes otherwise (a viewer sees everything).
+
+**Payments search.** New filters on `/payments` (and its CSV export, via the shared
+`review_app._payment_search` / `PAYMENT_SEARCH_FIELDS`): Search (`q`: vendor, reference, applied
+invoice, store, email file, notes, amount), Vendor (contains; datalist from
+`web_db.payment_vendor_names()`), Reference # and Applied to invoice # (contains, ignoring punctuation
+and spaces), Amount from/to (accepts `$1,091.33`; ±half a cent; unreadable = ignored), Added from/to
+(`date_added`). `web_db.list_payments` takes the new keywords (all optional, backward compatible); the
+pager and export links carry them (`search_keys`).
+
+Tests: `tests/test_readonly_and_payments.py` (viewer can open pages; changes refused 403 before reaching
+the DB layer — tripwires on submit_review_answer / set_record_ignored; JSON 403 for fetch; reviewer not
+blocked; admin sees the read-only option; each search filter on a real payment, read-only). Suite: 68 pass.
+Restart the web app to apply.

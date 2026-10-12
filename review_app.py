@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Resp
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.concurrency import run_in_threadpool
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 import chat_qa
@@ -37,6 +38,32 @@ BASE_DIR = Path(__file__).parent
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-insecure-change-me")
 
 app = FastAPI(title="Pharmacy Invoice Review")
+
+# Read-only users (role 'viewer', 2026-10-12) can open every page and export, but every request that
+# could change something (anything but GET/HEAD) is refused here, in one place, instead of in each of
+# the ~56 POST routes. Exceptions: signing in/out, Chat (it only reads data), and the user's own QB-entry
+# column layout (a personal display preference; its forms carry class "pref-form" so base.html shows
+# them). Added BEFORE the session middleware so that one wraps this and request.session is available.
+_READ_ONLY_ALLOWED = {"/login", "/logout", "/chat/ask", "/qb/columns"}
+READ_ONLY_MESSAGE = "You have read-only access, so you can look but not change anything. Ask an admin if you need to."
+
+
+async def _read_only_guard(request: Request, call_next):
+    if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in _READ_ONLY_ALLOWED:
+        uid = request.session.get("user_id")
+        user = await run_in_threadpool(web_db.get_user_by_id, uid) if uid else None
+        if user and user.get("role") == "viewer":
+            wants_json = ("application/json" in request.headers.get("accept", "")
+                          or request.headers.get("content-type", "").startswith("application/json"))
+            if wants_json:
+                return JSONResponse({"error": READ_ONLY_MESSAGE}, status_code=403)
+            resp = render(request, "message.html", user, message=READ_ONLY_MESSAGE)
+            resp.status_code = 403
+            return resp
+    return await call_next(request)
+
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=_read_only_guard)
 app.add_middleware(SessionMiddleware, secret_key=SECRET_KEY, https_only=False)
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -1472,6 +1499,18 @@ def qb_reconcile_unmatched_restore(request: Request, unmatched_id: int):
 #     Reuses the QB toggle + bulk-entered routes (record_type='payment').
 # --------------------------------------------------------------------------- #
 
+# Payments search fields (2026-10-12): query-string name -> list_payments keyword.
+PAYMENT_SEARCH_FIELDS = {"q": "q", "vendor": "vendor", "reference": "reference", "applied": "applied",
+                         "amount_min": "amount_min", "amount_max": "amount_max",
+                         "added_from": "added_from", "added_to": "added_to"}
+
+
+def _payment_search(request):
+    """The Payments search fields from the query string: (list_payments kwargs, params for the template)."""
+    vals = {k: (request.query_params.get(k) or "").strip() for k in PAYMENT_SEARCH_FIELDS}
+    return {PAYMENT_SEARCH_FIELDS[k]: v or None for k, v in vals.items()}, vals
+
+
 @app.get("/payments", response_class=HTMLResponse)
 def payments_page(request: Request, store: str = "", entered: str = "", run: str = "",
                   date_from: str = "", date_to: str = "", sort: str = "", direction: str = "desc",
@@ -1482,11 +1521,12 @@ def payments_page(request: Request, store: str = "", entered: str = "", run: str
         return _login_redirect()
     prefs = web_db.get_user_prefs(user["id"])
     srt = sort or "date_added"
+    search, search_params = _payment_search(request)
     rows_all = web_db.list_payments(store=store or None, entered=entered or None, run_id=run or None,
                                     date_from=date_from or None, date_to=date_to or None,
                                     sort=srt, direction=direction, dup=dup or None,
                                     show_ignored=(ignored == "1"), group=group or None,
-                                    show_skipped=(skipped == "1"), missing=missing or None)
+                                    show_skipped=(skipped == "1"), missing=missing or None, **search)
     rows, pg = _paginate(rows_all, page, page_size, prefs, user["id"], "payments_page_size")
     try:
         missing_count = web_db.missing_info_counts()["payments"]
@@ -1495,10 +1535,12 @@ def payments_page(request: Request, store: str = "", entered: str = "", run: str
     return render(request, "payments.html", user, rows=rows, file_url=file_preview_url,
                   runs=web_db.list_runs(), stores=web_db.store_names(), dup=dup,
                   group=group, pg=pg, page_size_options=PAGE_SIZE_OPTIONS, skipped=skipped,
-                  missing_count=missing_count,
+                  missing_count=missing_count, vendors=web_db.payment_vendor_names(),
+                  search_keys=list(PAYMENT_SEARCH_FIELDS),
                   params=dict(store=store, entered=entered, run=run, date_from=date_from,
                               date_to=date_to, dup=dup, ignored=ignored, group=group,
-                              skipped=skipped, sort=srt, direction=direction, missing=missing))
+                              skipped=skipped, sort=srt, direction=direction, missing=missing,
+                              **search_params))
 
 
 # Column order for the Payments CSV export / "Copy visible rows" (kept in sync with payments.html).
@@ -1518,7 +1560,8 @@ def payments_export(request: Request, store: str = "", entered: str = "", run: s
                                 date_from=date_from or None, date_to=date_to or None,
                                 sort=sort or "date_added", direction=direction, dup=dup or None,
                                 show_ignored=(ignored == "1"), group=group or None,
-                                show_skipped=(skipped == "1"), missing=missing or None)
+                                show_skipped=(skipped == "1"), missing=missing or None,
+                                **_payment_search(request)[0])
     base = str(request.base_url).rstrip("/")
 
     def _abs(link):
@@ -2393,7 +2436,7 @@ def users_create(request: Request, username: str = Form(...), password: str = Fo
     if web_db.get_user(username):
         return RedirectResponse("/admin/users?error=Username+already+exists", status_code=302)
     web_db.create_user(username, password, display_name or username,
-                       "admin" if role == "admin" else "reviewer")
+                       role if role in web_db.ROLES else "reviewer")
     return RedirectResponse("/admin/users", status_code=302)
 
 
@@ -2416,7 +2459,7 @@ def users_edit(request: Request, user_id: int, display_name: str = Form(""),
         web_db.update_user(
             user_id, user["username"],
             display_name=display_name,
-            role=role if role in ("admin", "reviewer") else None,
+            role=role if role in web_db.ROLES else None,
             active=(active == "1"),
             new_password=(new_password or None))
     except ValueError as e:
