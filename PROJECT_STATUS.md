@@ -656,6 +656,31 @@ returns one of four outcomes (SELF / REAL duplicate / POSSIBLE / STORE_CONFLICT)
   with Joel): if the earlier one were ever actually the correct store, it's silently superseded —
   mitigated by never auto-superseding once something is in QB. The earlier copy's saved
   `invoice_files/` PDF is **orphaned, not auto-deleted** (logged on the console).
+  - **CHANGED 2026-10-12: a store conflict no longer auto-supersedes unless a reviewer's answer produced
+    the later copy.** None of the 3 real supersedes were a forwarded reclassify instruction: Garden of
+    Life #52080970 (vendor email → Refuah; a scan from REFUAH's own scanner read 3M and won, 3005 live
+    under 3M — likely wrong), #52099183 (later ended with all 3 copies ignored, none entered), Lantev
+    #9GH5739 (a copy with NO store superseded Maple; both copies now ignored, none entered). Now, when the
+    earlier copy is live and not entered and `classification["_reviewer_answered"]` is false, both copies
+    become POSSIBLE duplicates: new `database.flag_store_conflict_prior(id, reason, gid)` sets the earlier
+    one suspect (not ignored; skips entered/ignored/already-suspect; edit_log by "store-conflict check"),
+    the new copy is suspect with a "Two copies … name different stores (X and Y) — open Possible
+    duplicates and Keep this one on the copy with the right store" reason, shared group, not added to the
+    ledger. Both drop off QB entry and show as one set on /duplicates. With a reviewer's answer the old
+    supersede still runs (reason now ends "a reviewer's answer"). Entered-in-QB / prior-not-found
+    fallbacks unchanged. Same-run pair (prior not in the DB yet): only the new copy is flagged, as before.
+    `check_duplicate`'s store_conflict reason now says "this copy has it under Y" (not "reclassifies").
+    Verified with a self-reverting single-connection test (no answer → both suspect, set on /duplicates;
+    answer → superseded; entered prior untouched; live edit_log/suspect counts unchanged).
+  - **OPEN (found 2026-10-12, data NOT changed — Joel to decide):** invoice groups where EVERY copy is
+    duplicate-ignored, none entered, none skip-QB, with no person behind any ignore — the bill never
+    shows for entry: Garden of Life #52099183 ($438.40, 3M; ids 1083/1404/1834 — note a matching payment
+    #125 exists, ignored by joel), Lantev #9GH5739 ($413.30, Maple; 2156/3347), Lake Distribution #1051
+    ($419.85, Madison; 356/357/358/590/946, all auto-ignored as duplicates of each other). Plus Garden of
+    Life #52080970: the live copy 3005 is under 3M but came from refuahscanner@ and the vendor email said
+    Refuah. Other all-ignored groups (Schwartz #235938, Emerson #E29402599, Herbal Health #2798 reminder,
+    7 payments) have a person's ignore in them and look deliberate. Fix by Restore on /duplicates.
+    A monitor for "no live copy" groups would catch this class going forward (not built).
   - `find_live_invoice` matches the live `invoices` row on **`email_filename`** (= a history
     entry's `source_file`); the `invoices` table has no `source_file` column, so the task's spec
     column name was corrected to `email_filename`.

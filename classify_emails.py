@@ -3357,7 +3357,7 @@ def check_duplicate(invoice, history, source_id=None, source_file=None):
                 return "store_conflict", (
                     f"Invoice #{invoice.get('invoice_number')} from {invoice.get('vendor_matched')} "
                     f"was already recorded to {prior.get('store_matched')} from {prior.get('source_file')} "
-                    f"— this copy reclassifies it to {invoice.get('store_matched')}."
+                    f"— this copy has it under {invoice.get('store_matched')}."
                 ), dup_of, prior
             # STORE-PREFERENCE (forward-only): on an exact duplicate to the SAME store, prefer the
             # STORE-SCANNED copy over the vendor's own send, regardless of arrival order. Applies
@@ -4046,10 +4046,15 @@ def apply_duplicate_checks(results, history, payment_history=None):
                           f"(possible missed invoice).")
                 continue   # a reminder is never added to invoice history as a bill of its own
             if status == "store_conflict":
-                # Same invoice previously recorded to a DIFFERENT store. Joel's convention:
-                # the LATER (reclassified) copy is the one to keep; auto-ignore the EARLIER,
-                # already-recorded one — UNLESS it's already entered in QuickBooks (never
-                # silently override a completed QB entry) or the DB/prior row isn't available.
+                # Same invoice + amount previously recorded to a DIFFERENT store. Until 2026-10-12 the
+                # LATER copy always won and the earlier one was auto-ignored, meant for a copy Joel
+                # forwards with a reclassify instruction. But none of the 3 real cases were that: two
+                # were store scans whose read store disagreed with the vendor's own email (Garden of
+                # Life #52080970 kept 3M from REFUAH's scanner), and one copy with no store at all
+                # superseded Maple (Lantev #9GH5739). Now the later copy wins on its own only when a
+                # reviewer's answer produced it (a person decided the store). Otherwise both copies are
+                # marked possible duplicates -- off QB entry, side by side on /duplicates -- and a
+                # person keeps the right one. Never overrides a copy already entered in QuickBooks.
                 gid = _group_id_for(prior, "invoice")   # tie both copies into one group
                 # Look the prior up by ITS OWN spelling + number: the two copies can be spelled
                 # differently (matched by standard name), and the DB lookup can't always resolve that.
@@ -4059,11 +4064,30 @@ def apply_duplicate_checks(results, history, payment_history=None):
                 if prior_live and prior_live.get("duplicate_ignored"):
                     _flag_ignored_prior(inv, dup_of, gid)   # someone already kept another copy
                     append_to_history = False
+                elif prior_live and not prior_live.get("entered_in_qb") and not c.get("_reviewer_answered"):
+                    # The copies disagree about the store and no person has said which is right.
+                    pick = (f" Two copies of invoice #{inv.get('invoice_number')} from "
+                            f"{inv.get('vendor_matched')} name different stores ({(prior or {}).get('store_matched')} "
+                            f"and {inv.get('store_matched')}) — open Possible duplicates and Keep this one on "
+                            f"the copy with the right store; the other is then ignored.")
+                    _database().flag_store_conflict_prior(
+                        prior_live["id"],
+                        f"A later copy ({r['filename']}) has this invoice under {inv.get('store_matched')}." + pick,
+                        gid)
+                    inv["is_duplicate_suspect"] = True
+                    inv["duplicate_reason"] = reason + pick
+                    inv["duplicate_ignored"] = False
+                    inv["duplicate_of"] = dup_of
+                    inv["duplicate_group_id"] = gid
+                    append_to_history = False   # earlier copy stays in the ledger; a person picks
+                    print(f"  store conflict on {inv.get('vendor_matched')} #{inv.get('invoice_number')}: "
+                          f"{(prior or {}).get('store_matched')} (id={prior_live['id']}) vs "
+                          f"{inv.get('store_matched')} -> both marked possible duplicates for a person.")
                 elif prior_live and not prior_live.get("entered_in_qb"):
                     _database().supersede_duplicate_invoice(
                         prior_live["id"], r["filename"],
                         f"Superseded by a later reclassification to {inv.get('store_matched')} "
-                        f"(from {r['filename']}).", gid)
+                        f"(from {r['filename']}, a reviewer's answer).", gid)
                     print(f"  store conflict on {inv.get('vendor_matched')} "
                           f"#{inv.get('invoice_number')}: auto-ignored the EARLIER copy "
                           f"(recorded to a different store; now superseded, id={prior_live['id']}) "

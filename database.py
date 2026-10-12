@@ -2748,6 +2748,32 @@ def supersede_duplicate_invoice(invoice_id, duplicate_of, reason, group_id=None)
         conn.close()
 
 
+def flag_store_conflict_prior(invoice_id, reason, group_id=None, actor="store-conflict check"):
+    """Mark an already-recorded invoice a POSSIBLE duplicate (suspect, NOT ignored) because a later
+    copy of the same invoice + amount names a different store -- so it drops off QB entry and shows
+    with the later copy on Possible duplicates until a person keeps the right one. Never touches a
+    copy already entered in QuickBooks or already ignored. Logged to edit_log. True if it changed."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE invoices SET duplicate_suspect = TRUE, duplicate_reason = %s, "
+                "duplicate_group_id = COALESCE(%s, duplicate_group_id) "
+                "WHERE id = %s AND entered_in_qb IS NOT TRUE AND duplicate_ignored IS NOT TRUE "
+                "  AND duplicate_suspect IS NOT TRUE",
+                (reason, group_id, invoice_id))
+            changed = cur.rowcount > 0
+            if changed:
+                cur.execute(
+                    "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                    "VALUES ('invoices', %s, 'duplicate_suspect', 'false', 'true', %s)",
+                    (invoice_id, actor))
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
 def save_history(rows):
     conn = connect()
     try:
