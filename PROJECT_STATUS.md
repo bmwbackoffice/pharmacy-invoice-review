@@ -5474,3 +5474,33 @@ Now:
   `qb_match.apply_vendor_name_corrections_from_qb_history` after it applies corrections.
 - **[refresh_qb_names.py](refresh_qb_names.py)** (new): one-time catch-up; dry-run by default,
   `--commit` to write. NOT yet run against the live DB.
+
+### Regression test suite (2026-10-12)
+
+`tests/` holds rerunnable tests, one per real incident, written with the standard library's `unittest`
+(pytest isn't installed). Run from the project folder:
+
+    python -m unittest discover -s tests -v
+
+- **[tests/_base.py](tests/_base.py)** — `PureTestCase` switches the classifier to Excel mode for the
+  test (`USE_DB=False`, empty `VENDOR_STD` / `SENDER_STORE_MAP`, default store rules, a fixed exclusion
+  list, empty credit memo pool) and restores it afterwards; `inv()` / `ledger()` builders.
+- **[tests/test_duplicates.py](tests/test_duplicates.py)** — DU-01/02/03/04/06/15: duplicate vs
+  possible vs self, legal-suffix vendor (Authentic Health #1351), store conflict (Garden of Life
+  #52080970), store-preferred and second scan (Boiron / A&S), store conflict goes to a person, MMS shared
+  reference, applied invoice from notes, payments never auto-ignored on amount, credit memo gate
+  (Prime Packaging #AR092424; excluded McKesson skipped; same email; reviewer answer; same run; once).
+- **[tests/test_gates.py](tests/test_gates.py)** — GT-03/04/05/06/10/11, RT-01: date / amount /
+  derived total / store gates, sentence once, Carepax leak (Abbott #1605), 112 Hillside except Braun,
+  GT-11 Refuah-billed real bill + excluded vendor + cost split + reviewer answer, routing.
+- **[tests/test_qb_numbers.py](tests/test_qb_numbers.py)** — QB-07 match / no-match lists (Zahler,
+  Lantev, `-IN`, `SUB2026M08`) and the `_num_bucket` invariant.
+- **[tests/test_db_rollback.py](tests/test_db_rollback.py)** — needs `DATABASE_URL`, else skipped.
+  One connection, commit/close no-ops, rolled back in `tearDown`: LC-01 review-queue merge (temp
+  `review_queue` + `ignored_reviews` shadows) and DU-03 store conflict (synthetic `ZZTEST` email +
+  invoice rows).
+
+41 tests, all pass (~1 s). Mutation-checked: putting back the old QB rule, removing the credit memo
+gate, dropping `_append_text`'s once-only guard, or removing the queue merge each makes tests fail.
+No leftover rows after a run (live review queue still 119). **Run the suite before handing off any
+change to the review logic, and add a test for each new incident.**
