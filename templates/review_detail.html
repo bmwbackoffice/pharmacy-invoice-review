@@ -178,11 +178,11 @@
     <div class="card" style="background:#fdf6f6;border:1px solid #f0d9d9;margin-top:14px;">
       <label style="font-weight:700;">Not an actionable record?</label>
       <p class="muted" style="margin:4px 0 8px;">Dismiss and remove it from the queue — no reprocess,
-        no API call. It's snapshotted and restorable from <a href="/ignored">Ignored</a>.</p>
+        no API call. It's snapshotted and restorable from <a href="/ignored">Dismissed</a>.</p>
       <form method="post" action="/review/{{ item.id }}/ignore" style="margin:0;">
         <input name="reason" placeholder="Reason (optional)">
         <div style="margin-top:8px;">
-          <button class="btn" type="submit" style="background:#b45309;">Ignore item</button>
+          <button class="btn" type="submit" style="background:#b45309;">Dismiss item</button>
         </div>
       </form>
     </div>

@@ -19,7 +19,7 @@
   <span class="muted">({{ dup_groups|length }} set{{ '' if dup_groups|length == 1 else 's' }} to review)</span>
 </h2>
 <p class="muted">Each table is one document's copies side by side — the likely <strong>original</strong> plus
-every copy still flagged as a possible duplicate. Per copy: <strong>ignore</strong> it (excluded from QB,
+every copy still flagged as a possible duplicate. Per copy: <strong>mark it a duplicate</strong> (kept out of QB,
 keeps the others) or <strong>dismiss the flag</strong> if it isn't actually a duplicate. Resolved sets drop
 off this page. Excluded-vendor <em>invoices</em> are left out (they never enter QB anyway); payments are
 always shown.</p>
@@ -37,7 +37,7 @@ always shown.</p>
     <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;">
       <input type="hidden" name="action" value="restore">
       <button class="btn secondary" type="submit" style="padding:3px 9px; font-size:12px;"
-              title="Un-ignore this copy (bring it back as a live record)">Restore</button>
+              title="Not a duplicate after all — bring it back as a live record">Restore</button>
     </form>
   {% else %}
   {% set flagged = r.duplicate_suspect %}
@@ -57,7 +57,7 @@ always shown.</p>
           onsubmit="return confirm('Mark this {{ r.record_type }} ({{ (r.store_matched | store_label) or '?' }}, {{ money(r.amount) }}) as a duplicate and exclude it from QuickBooks?');">
       <input type="hidden" name="action" value="ignore">
       <input type="hidden" name="duplicate_of" value="{{ original_email if flagged else '' }}">
-      <button class="btn" type="submit" style="padding:3px 9px; font-size:12px;">Ignore</button>
+      <button class="btn" type="submit" style="padding:3px 9px; font-size:12px;">Duplicate</button>
     </form>
     {% if flagged %}
     <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;">
@@ -86,7 +86,7 @@ always shown.</p>
             <th class="rowlabel"></th>
             {% for r in g.records %}
             <th style="background:{{ '#eef2f7' if r.duplicate_ignored else ('#eef4fb' if r.duplicate_suspect else '#f0f9f4') }};{{ 'color:var(--muted);' if r.duplicate_ignored }}">
-              {{ 'Ignored' if r.duplicate_ignored else ('Possible duplicate' if r.duplicate_suspect else 'Likely Correct') }}
+              {{ 'Duplicate (kept out)' if r.duplicate_ignored else ('Possible duplicate' if r.duplicate_suspect else 'Likely Correct') }}
               <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;">{{ r.record_type.replace('_', ' ') | title }}</div>
             </th>
             {% endfor %}

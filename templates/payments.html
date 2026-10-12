@@ -62,10 +62,10 @@
         <select name="run">{{ run_options(runs, params.run) }}</select></div>
       <div><label>Payment date from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
       <div><label>Payment date to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
-      <div><label>Ignored duplicates</label>
+      <div><label>Duplicates</label>
         <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
           <input type="checkbox" name="ignored" value="1" {{ 'checked' if params.ignored=='1' }} onchange="this.form.submit()" style="width:auto;">
-          show auto-ignored duplicates
+          show duplicates kept out of QB
         </label></div>
       <div><label>Reference-only</label>
         <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
@@ -132,7 +132,7 @@
         <td>{{ r.payment_date | us_date }}{% if 'date' in (r.missing_info or '') %}<span class="pill" style="background:#fee2e2;color:#b91c1c;">no date</span>{% endif %}</td>
         <td>{{ r.reference_number or '—' }}{% if r.applied_invoice %}<div class="muted" title="The invoice the remittance says this payment settles">for invoice #{{ r.applied_invoice }}</div>{% endif %}</td>
         <td>
-          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — ignored</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the payment this duplicates">↗</a>{% endif %}
+          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — kept out of QB</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the payment this duplicates">↗</a>{% endif %}
             <form method="post" action="/records/payment/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
               <input type="hidden" name="action" value="restore">
               <button type="submit" class="linklike" title="not actually a duplicate — restore">undo</button>
@@ -140,7 +140,7 @@
           {% elif r.duplicate_suspect %}<span class="pill dup" title="{{ r.duplicate_reason or '' }}">possible duplicate</span>
             <form method="post" action="/records/payment/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
               <input type="hidden" name="action" value="ignore">
-              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">ignore this one</button>
+              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">mark duplicate</button>
             </form>
           {% endif %}
           {% if r.duplicate_group_id %}<a class="pill" style="background:#eef2ff;color:#4338ca;" href="?group={{ r.duplicate_group_id|urlencode }}" title="Show all records in this duplicate group">Group {{ r.duplicate_group_id }}</a>{% endif %}
@@ -157,7 +157,7 @@
           {% if not r.skip_qb_import %}
           <button class="btn secondary ignore-btn" type="button"
                   data-rt="payment" data-rid="{{ r.record_id }}"
-                  style="padding:4px 10px;" title="exclude this one payment from QB">ignore</button>
+                  style="padding:4px 10px;" title="keep this one payment out of QuickBooks">don't enter</button>
           {% endif %}
         </td>
       </tr>
@@ -202,7 +202,7 @@ document.getElementById('paytable').addEventListener('click', function (e) {
 // on /browse and the record detail page.
 document.getElementById('paytable').addEventListener('click', function (e) {
   var b = e.target.closest('.ignore-btn'); if (!b) return;
-  if (!confirm('Exclude this one payment from QuickBooks import?')) return;
+  if (!confirm("Keep this payment out of QuickBooks? You can allow it again from its record page.")) return;
   var f = document.createElement('form'); f.method = 'post';
   f.action = '/records/' + b.dataset.rt + '/' + b.dataset.rid + '/ignore';
   var i = document.createElement('input'); i.type = 'hidden'; i.name = 'ignored'; i.value = '1';

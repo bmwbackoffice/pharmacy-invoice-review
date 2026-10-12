@@ -138,10 +138,10 @@
           <option value="yes" {{ 'selected' if params.dup=='yes' }}>only flagged</option>
           <option value="no" {{ 'selected' if params.dup=='no' }}>only not flagged</option>
         </select></div>
-      <div><label>Ignored duplicates</label>
+      <div><label>Duplicates</label>
         <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
           <input type="checkbox" name="ignored" value="1" {{ 'checked' if params.ignored=='1' }} style="width:auto;">
-          show ignored
+          show duplicates kept out of QB
         </label></div>
       <div><label>Added from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
       <div><label>Added to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
@@ -203,7 +203,7 @@
         <td class="flags-cell">
           {% if is_review %}<span class="pill rev">In review</span>{% endif %}
           {% if r.skip_qb_import %}<span class="pill skip">skip QB</span>{% endif %}
-          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — ignored</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the record this duplicates">↗</a>{% endif %}
+          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — kept out of QB</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the record this duplicates">↗</a>{% endif %}
             {% if r.record_type in ['invoice','payment'] %}
             <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
               <input type="hidden" name="action" value="restore">
@@ -213,7 +213,7 @@
             {% if r.record_type in ['invoice','payment'] %}
             <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
               <input type="hidden" name="action" value="ignore">
-              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">ignore this one</button>
+              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">mark duplicate</button>
             </form>{% endif %}
           {% endif %}
           {% if r.duplicate_group_id %}<a class="pill" style="background:#eef2ff;color:#4338ca;" href="?group={{ r.duplicate_group_id|urlencode }}" title="Show all records in this duplicate group">Group {{ r.duplicate_group_id }}</a>{% endif %}
@@ -222,12 +222,12 @@
           {% if r.skip_qb_import and r.ignored_by %}
             <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/ignore" style="display:inline;margin:0;">
               <input type="hidden" name="ignored" value="0">
-              <button type="submit" class="linklike" title="restore to normal (re-include in QB)">restore</button>
+              <button type="submit" class="linklike" title="put it back for QuickBooks entry">allow in QB</button>
             </form>
           {% elif r.record_type in ['invoice','credit_memo','payment'] and not r.skip_qb_import %}
             <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/ignore" style="display:inline;margin:0;">
               <input type="hidden" name="ignored" value="1">
-              <button type="submit" class="linklike" title="exclude this one record from QB (manual override)">ignore</button>
+              <button type="submit" class="linklike" title="keep this one record out of QuickBooks">don't enter in QB</button>
             </form>
           {% endif %}
         </td>

@@ -34,8 +34,8 @@
               title="Record on the next classify run instead of waiting">Release now</button>
           </form>
           <form method="post" action="/sales-orders/{{ o.id }}/ignore" style="display:inline;margin:0 0 0 4px;"
-            onsubmit="return confirm('Ignore this sales order? It will never be recorded.');">
-            <button class="btn" type="submit" style="background:#b45309;padding:4px 10px;">Ignore</button>
+            onsubmit="return confirm('Drop this sales order? It will never be recorded.');">
+            <button class="btn" type="submit" style="background:#b45309;padding:4px 10px;">Drop order</button>
           </form>
         </td>
       </tr>
@@ -47,7 +47,7 @@
 </div>
 
 {% if superseded %}
-<h3 style="margin-top:18px;">Superseded <span class="muted">(an invoice arrived, or manually ignored)</span></h3>
+<h3 style="margin-top:18px;">Superseded <span class="muted">(an invoice arrived, or dropped by hand)</span></h3>
 <div class="card" style="padding:0;">
   <table>
     <thead><tr><th>Vendor</th><th>Order #</th><th class="num">Amount</th><th>Replaced by</th><th>Held</th></tr></thead>

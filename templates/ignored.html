@@ -2,13 +2,13 @@
 {% from "_macros.html" import money %}
 {% block content %}
 <p><a href="/review">&larr; back to review queue</a></p>
-<h2>Ignored items <span class="muted">({{ items|length }})</span></h2>
+<h2>Dismissed review items <span class="muted">({{ items|length }})</span></h2>
 <p class="muted">Dismissed review items. They were removed from the queue without reprocessing; the
   original snapshot is kept so any one can be restored back into the queue.</p>
 <div class="card" style="padding:0;">
   <table>
     <thead><tr>
-      <th>Received</th><th>Ignored</th><th>Vendor</th><th>Store</th><th>Invoice #</th>
+      <th>Received</th><th>Dismissed</th><th>Vendor</th><th>Store</th><th>Invoice #</th>
       <th class="num">Amount</th><th>Why flagged</th><th>By</th><th>Reason</th><th></th>
     </tr></thead>
     <tbody>
@@ -34,7 +34,7 @@
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="10" class="muted" style="padding:18px;">Nothing ignored.</td></tr>
+      <tr><td colspan="10" class="muted" style="padding:18px;">Nothing dismissed.</td></tr>
     {% endfor %}
     </tbody>
   </table>

@@ -38,7 +38,7 @@
     {% if rec.record_type in ('invoice','credit_memo') and rec.vendor and not rec.skip_qb_import %}
     <p class="muted" style="margin:8px 0 0;">Not a real vendor?
       {{ ignore_vendor_button(rec.vendor, '/records/' ~ rec.record_type ~ '/' ~ rec.id,
-                              'Ignore this vendor', 'linklike') }}
+                              'Exclude this vendor', 'linklike') }}
       — excludes all its invoices from QuickBooks.</p>
     {% endif %}
 
@@ -95,23 +95,23 @@
             style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:6px;">
         <input type="hidden" name="action" value="ignore">
         <input type="text" name="duplicate_of" placeholder="email filename of the original (optional)" style="max-width:340px;">
-        <button class="btn secondary" type="submit">Ignore as duplicate</button>
+        <button class="btn secondary" type="submit">Mark as duplicate</button>
       </form>
     {% endif %}
   {% endif %}
   {# Manual per-record Ignore / Restore (independent of vendor rules + duplicate detection). #}
   {% if rec.skip_qb_import and rec.ignored_by %}
-    <p class="muted">Ignored by {{ rec.ignored_by }}{% if rec.ignored_at %} · {{ rec.ignored_at | us_date }}{% endif %} — recorded, not entered in QuickBooks.
+    <p class="muted">Kept out of QuickBooks by {{ rec.ignored_by }}{% if rec.ignored_at %} · {{ rec.ignored_at | us_date }}{% endif %} — recorded, not entered.
       <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/ignore" style="display:inline">
         <input type="hidden" name="ignored" value="0">
-        <button class="btn secondary" type="submit">Restore (re-include in QB)</button>
+        <button class="btn secondary" type="submit">Allow in QuickBooks</button>
       </form></p>
   {% elif rec.skip_qb_import %}
     <p class="muted">Excluded vendor — recorded for reference, but not entered in QuickBooks.</p>
   {% elif rec.record_type in ('invoice','credit_memo','payment') %}
     <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/ignore" style="display:inline">
       <input type="hidden" name="ignored" value="1">
-      <button class="btn secondary" type="submit">Ignore (exclude from QB)</button>
+      <button class="btn secondary" type="submit">Don't enter in QuickBooks</button>
     </form>
   {% endif %}
   {% if rec.entered_in_qb %}<p class="muted">Marked entered in QuickBooks.</p>{% endif %}

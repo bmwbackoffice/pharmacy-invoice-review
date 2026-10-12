@@ -15,8 +15,8 @@
 {% macro outcome(r) -%}
   {%- if r.record_type == 'review' -%}In review
   {%- elif r.entered_in_qb -%}Entered in QB
-  {%- elif r.duplicate_ignored -%}Duplicate — auto-ignored (kept out of QB)
-  {%- elif r.skip_qb_import and r.ignored_by -%}Ignored by {{ r.ignored_by }} — recorded, not entered in QB
+  {%- elif r.duplicate_ignored -%}Duplicate — kept out of QB
+  {%- elif r.skip_qb_import and r.ignored_by -%}Kept out of QB by {{ r.ignored_by }} — recorded, not entered in QB
   {%- elif r.skip_qb_import -%}Excluded vendor — recorded, not entered in QB
   {%- elif r.duplicate_suspect -%}Possible duplicate — recorded
   {%- else -%}Recorded — pending QB entry
@@ -28,7 +28,7 @@
    after (empty → the route falls back to the Referer). Confirms first (broad action — excludes ALL
    of the vendor's invoices going forward). The confirm text is deliberately generic (no vendor name
    interpolated) so an apostrophe in the name can't break the JS. Renders nothing when vendor is blank. #}
-{% macro ignore_vendor_button(vendor, return_to='', label='Ignore this vendor', cls='btn secondary', style='') -%}
+{% macro ignore_vendor_button(vendor, return_to='', label='Exclude this vendor', cls='btn secondary', style='') -%}
   {%- if vendor -%}
   <form method="post" action="/vendors/exclude" style="display:inline; margin:0;"
         onsubmit="return confirm('Exclude this vendor from QuickBooks entirely? ALL of its invoices will be skipped going forward — not just this record.');">

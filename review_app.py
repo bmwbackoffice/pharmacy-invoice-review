@@ -344,8 +344,10 @@ def dashboard(request: Request):
         return _login_redirect()
     d = web_db.dashboard_counts()
     setup = d["qb_invoices_setup"]
-    # Tiles merged so each page is represented ONCE (counts/notes combine the sub-queues).
-    tiles = [
+    # Tiles merged so each page is represented ONCE (counts/notes combine the sub-queues). Since
+    # 2026-10-12 split in two: "work" = queues people work through (everyone sees them); "health" =
+    # checks that something went wrong in the system (admins only -- noise for reviewers).
+    work = [
         {"label": "Review queue", "count": d["review"], "href": "/review",
          "note": f"{d['review']} awaiting an answer", "breakdown": d["review_by"]},
         {"label": "Statement exceptions", "count": d["statement"], "href": "/statements",
@@ -367,21 +369,80 @@ def dashboard(request: Request):
          "note": f"{d['requests_pending']} pending, {d['requests_approved']} approved for build"},
         {"label": "Sales orders (held)", "count": d["sales_orders"], "href": "/sales-orders",
          "note": "held, awaiting an invoice"},
-        {"label": "Cards → store", "count": d["cards"], "href": "/cards",
-         "note": "card last-4 with no store mapping"},
-        {"label": "Failed emails", "count": d["failed_emails"], "href": "/emails?disposition=error",
-         "note": "processing error"},
-        {"label": "Orphaned ledger rows", "count": d.get("orphaned_history", 0), "href": "/reconcile",
-         "note": "extracted but never recorded"},
-        {"label": "Bills with no live copy", "count": d.get("no_live_copy", 0), "href": "/no-live-copy",
-         "note": "every copy ignored as a duplicate, none entered"},
-        {"label": "Never classified", "count": d.get("never_classified", 0),
-         "href": "/emails?disposition=never_classified",
-         "note": "fetched >1 day ago, no run ever processed it"},
         {"label": "QB match review", "count": d.get("qb_pending", 0), "href": "/qb-reconcile/review",
          "note": "doubtful QuickBooks-reconcile matches to confirm"},
     ]
-    return render(request, "dashboard.html", user, tiles=tiles)
+    health = [last_scheduled_run_tile()] + [
+        {"label": "Failed emails", "count": d["failed_emails"], "href": "/emails?disposition=error",
+         "note": "processing error"},
+        {"label": "Never classified", "count": d.get("never_classified", 0),
+         "href": "/emails?disposition=never_classified",
+         "note": "fetched >1 day ago, no run ever processed it"},
+        {"label": "Bills with no live copy", "count": d.get("no_live_copy", 0), "href": "/no-live-copy",
+         "note": "every copy marked a duplicate, none entered"},
+        {"label": "Orphaned ledger rows", "count": d.get("orphaned_history", 0), "href": "/reconcile",
+         "note": "extracted but never recorded"},
+        {"label": "Cards → store", "count": d["cards"], "href": "/cards",
+         "note": "card last-4 with no store mapping"},
+    ] if user["role"] == "admin" else []
+    return render(request, "dashboard.html", user, work=work, health=health)
+
+
+SCHEDULED_LOG = BASE_DIR / "logs" / "scheduled_runs.log"
+_RUN_START = re.compile(r"^===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) =====", re.M)
+_RUN_RESULT = re.compile(r"^===== Result: (.+?) -- ([\d.]+) min =====", re.M)
+
+
+def last_scheduled_run(now=None):
+    """The last scheduled_run.py block in logs/scheduled_runs.log: {started, result, minutes, running,
+    stale, alert} or None when there's no log. stale = no run started for 75+ minutes inside the
+    7 AM-9 PM schedule window (the task stopped: the PC is off or signed out). alert = stale, or the last
+    run FAILED / TIMED OUT."""
+    try:
+        text = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace")[-200_000:]
+    except OSError:
+        return None
+    starts = list(_RUN_START.finditer(text))
+    if not starts:
+        return None
+    last = starts[-1]
+    started = datetime.strptime(last.group(1), "%Y-%m-%d %H:%M:%S")
+    res = _RUN_RESULT.search(text, last.end())
+    now = now or datetime.now()
+    in_window = now.replace(hour=7, minute=45, second=0) <= now <= now.replace(hour=21, minute=15, second=0)
+    stale = in_window and (now - started).total_seconds() > 75 * 60
+    result = res.group(1) if res else "Running"
+    return {"started": started, "result": result, "minutes": float(res.group(2)) if res else None,
+            "running": res is None, "stale": stale,
+            "alert": stale or result.startswith(("FAILED", "TIMED OUT"))}
+
+
+def last_scheduled_run_tile():
+    run = last_scheduled_run()
+    if not run:
+        return {"label": "Last scheduled run", "count": "—", "href": "/scheduled-runs",
+                "note": "no scheduled run has happened yet (setup_scheduled_run.ps1)", "alert": False}
+    s = run["started"]
+    when = f"{s.month}/{s.day} {s.strftime('%I:%M %p').lstrip('0')}"
+    note = (f"started {when}" + (f", took {run['minutes']:.0f} min" if run["minutes"] is not None else ", still going")
+            + (" — none since; is the PC on and signed in?" if run["stale"] else ""))
+    return {"label": "Last scheduled run", "count": run["result"].split(" (")[0], "href": "/scheduled-runs",
+            "note": note, "alert": run["alert"]}
+
+
+@app.get("/scheduled-runs", response_class=HTMLResponse)
+def scheduled_runs(request: Request, lines: int = 300):
+    """Admins: the end of logs/scheduled_runs.log, newest at the bottom."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    if user["role"] != "admin":
+        return render(request, "message.html", user, message="Admins only.")
+    try:
+        tail = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-max(20, min(lines, 5000)):]
+    except OSError:
+        tail = []
+    return render(request, "scheduled_runs.html", user, tail="\n".join(tail), run=last_scheduled_run())
 
 
 @app.get("/reconcile", response_class=HTMLResponse)

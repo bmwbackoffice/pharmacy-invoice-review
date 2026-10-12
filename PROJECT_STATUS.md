@@ -5609,3 +5609,24 @@ Tests: `tests/test_readonly_and_payments.py` (viewer can open pages; changes ref
 the DB layer — tripwires on submit_review_answer / set_record_ignored; JSON 403 for fetch; reviewer not
 blocked; admin sees the read-only option; each search filter on a real payment, read-only). Suite: 68 pass.
 Restart the web app to apply.
+
+### Dashboard split + clearer "Ignore" labels (2026-10-12)
+
+**Dashboard.** `/dashboard` now has two sections. **Work** (everyone): Review queue, Statement exceptions,
+Possible duplicates, QB entry, Payments to enter, Flags, Change requests, Sales orders (held), QB match
+review. **System health** (admins only; `health` is empty for other roles): a new **Last scheduled run**
+tile, Failed emails, Never classified, Bills with no live copy, Orphaned ledger rows, Cards → store.
+`review_app.last_scheduled_run()` reads the last block of `logs/scheduled_runs.log` (result, minutes,
+running, `stale` = no run started for 75+ min between 7:45 AM and 9:15 PM, `alert` = stale or
+FAILED/TIMED OUT); the tile turns red on alert. New admin page `GET /scheduled-runs` (template
+`scheduled_runs.html`) shows the status and the log tail (`?lines=`). Tiles may carry a text count and an
+`alert` flag (`dashboard.html` macro `tile_grid`).
+
+**Labels** (visible text only; routes, form values, the `.ignore-btn` JS hook and DB columns unchanged):
+review item → **Dismiss** / nav tab **Dismissed** (page "Dismissed review items"); duplicate →
+**mark duplicate** / **Duplicate** / "Duplicate — kept out of QB" / column "Duplicate (kept out)"; manual
+per-record → **don't enter (in QB)** / **Allow in QB(QuickBooks)** / outcome "Kept out of QB by …";
+vendor → **Exclude vendor** / **Exclude this vendor**; sales order → **Drop order**; filters "show
+duplicates kept out of QB". CSV export values unchanged. Tests: `tests/test_dashboard_labels.py` (log
+parsing incl. stale window; admin sees both sections, reviewer only Work and no log page; old labels gone,
+new ones used, behaviour hooks intact). Suite: 79 pass.

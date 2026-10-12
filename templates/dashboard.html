@@ -12,17 +12,18 @@
   .dashnote { font-size:12.5px; margin-top:2px; }
   .dashbreak { font-size:12px; margin-top:8px; padding-top:7px; border-top:1px solid var(--line);
                display:flex; gap:4px 10px; flex-wrap:wrap; }
+  .dashtile.alert { border-color:#dc2626; background:#fef2f2; }
+  .dashtile.alert .dashcount { color:#b91c1c; }
+  .dashtile .dashcount.word { font-size:22px; }
+  .dashsection { margin:22px 0 2px; }
+  .dashsection + p { margin:0 0 4px; }
 </style>
 
-<h2>To-do dashboard</h2>
-<p class="muted">Everything that currently needs action, in one place — counts are live on each load.
-  Only the review queue is split by assignee (the one queue with per-user ownership); the rest are
-  shared pools any user can work.</p>
-
+{% macro tile_grid(tiles) %}
 <div class="dashgrid">
   {% for t in tiles %}
-  <a class="dashtile{{ ' zero' if t.count == 0 }}" href="{{ t.href }}">
-    <div class="dashcount">{{ t.count }}</div>
+  <a class="dashtile{{ ' zero' if t.count == 0 }}{{ ' alert' if t.alert }}" href="{{ t.href }}">
+    <div class="dashcount{{ ' word' if t.count is string }}">{{ t.count }}</div>
     <div class="dashlabel">{{ t.label }}</div>
     <div class="dashnote muted">{{ t.note }}</div>
     {% if t.breakdown %}
@@ -33,6 +34,19 @@
   </a>
   {% endfor %}
 </div>
+{% endmacro %}
+
+<h2>To-do dashboard</h2>
+<h3 class="dashsection">Work</h3>
+<p class="muted">The queues waiting on a person — counts are live on each load. Only the review queue is
+  split by assignee; the rest are shared pools anyone can work.</p>
+{{ tile_grid(work) }}
+
+{% if health %}
+<h3 class="dashsection">System health <span class="muted" style="font-weight:400; font-size:13px;">(admins only)</span></h3>
+<p class="muted">Signs that something went wrong in the system itself. These should normally sit at zero.</p>
+{{ tile_grid(health) }}
+{% endif %}
 
 {% if user and user.role == 'admin' %}
 <div class="card" style="margin-top:16px;">

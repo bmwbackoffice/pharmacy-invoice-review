@@ -37,7 +37,7 @@
             <div class="muted">answered — awaiting the next classify run</div>
           {% else %}
             <span class="pill" style="background:#e5e7eb;color:#374151;">No record</span>
-            <div class="muted">dropped or ignored (not recorded)</div>
+            <div class="muted">dropped or dismissed (not recorded)</div>
             {% if it.elsewhere_email %}<div class="muted">the same vendor and # is recorded from
               <a href="/browse?email={{ it.elsewhere_email|urlencode }}" title="{{ it.elsewhere_email }}">another email</a></div>{% endif %}
           {% endif %}

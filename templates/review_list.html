@@ -4,7 +4,7 @@
 {% set answered_in_list = items|selectattr('answer')|list|length %}
 {% set needs_shown = items|length - answered_in_list %}
 <h2>Review queue <span class="muted">({{ needs_shown }} needs-review shown{% if answered_in_list %} · {{ answered_in_list }} answered{% elif answered_n %} · {{ answered_n }} answered hidden{% endif %})</span>
-  {% if ignored_n %}<a class="muted" href="/ignored" style="font-size:14px;font-weight:400;margin-left:10px;">View ignored ({{ ignored_n }})</a>{% endif %}</h2>
+  {% if ignored_n %}<a class="muted" href="/ignored" style="font-size:14px;font-weight:400;margin-left:10px;">View dismissed ({{ ignored_n }})</a>{% endif %}</h2>
 <div class="card">
   <form method="get" action="/review" style="margin:0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
     {# preserve the active column sort across filter changes #}
@@ -113,9 +113,9 @@
         <td style="white-space:nowrap;">
           <a class="btn {{ 'secondary' if answered else '' }}" href="/review/{{ it.id }}">{{ 'View / edit' if answered else 'Review' }}</a>
           <form method="post" action="/review/{{ it.id }}/ignore" style="display:inline;margin:0;"
-                onsubmit="return confirm('Ignore this item? It leaves the queue but can be restored from Ignored.');">
-            <button class="btn secondary" type="submit" title="Dismiss without reprocessing"
-                    style="padding:4px 10px;">Ignore</button>
+                onsubmit="return confirm('Dismiss this item? It leaves the queue without being recorded, and can be restored from Dismissed.');">
+            <button class="btn secondary" type="submit" title="Remove from the queue without recording it"
+                    style="padding:4px 10px;">Dismiss</button>
           </form>
         </td>
       </tr>
