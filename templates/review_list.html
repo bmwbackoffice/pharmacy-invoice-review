@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options, sort_th, money %}
+{% block content %}
+{% set answered_in_list = items|selectattr('answer')|list|length %}
+{% set needs_shown = items|length - answered_in_list %}
+<h2>Review queue <span class="muted">({{ needs_shown }} needs-review shown{% if answered_in_list %} · {{ answered_in_list }} answered{% elif answered_n %} · {{ answered_n }} answered hidden{% endif %})</span>
+  {% if ignored_n %}<a class="muted" href="/ignored" style="font-size:14px;font-weight:400;margin-left:10px;">View ignored ({{ ignored_n }})</a>{% endif %}</h2>
+<div class="card">
+  <form method="get" action="/review" style="margin:0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+    {# preserve the active column sort across filter changes #}
+    <input type="hidden" name="sort" value="{{ params.sort or '' }}">
+    <input type="hidden" name="direction" value="{{ params.direction or '' }}">
+    <div>
+      <label>Run</label><br>
+      <select name="run" onchange="this.form.submit()" style="max-width:240px;">{{ run_options(runs, run) }}</select>
+    </div>
+    <div>
+      <label>Store</label><br>
+      <select name="store" onchange="this.form.submit()">
+        <option value="">all stores</option>
+        {% for s in stores %}<option value="{{ s }}" {{ 'selected' if store == s }}>{{ s | store_label }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Vendor</label><br>
+      <select name="vendor" onchange="this.form.submit()">
+        <option value="">all vendors</option>
+        {% for v in vendors %}<option value="{{ v }}" {{ 'selected' if vendor == v }}>{{ v }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Search</label><br>
+      <input name="search" value="{{ search or '' }}" placeholder="vendor / store / # / reason">
+    </div>
+    <div>
+      <label>Assigned to</label><br>
+      <select name="assigned" onchange="this.form.submit()">
+        <option value="">anyone</option>
+        <option value="__unassigned__" {{ 'selected' if assigned == '__unassigned__' }}>unassigned</option>
+        {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if assigned == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
+      </select>
+    </div>
+    <div><button class="btn secondary" type="submit" style="padding:5px 12px;">Search</button></div>
+    <div style="padding-bottom:8px;">
+      <label style="font-weight:400;display:inline;margin:0;white-space:nowrap;cursor:pointer;">
+        <input type="checkbox" name="show_answered" value="1" onchange="this.form.submit()"
+          style="width:auto;padding:0;margin:0 6px 0 0;vertical-align:middle;"
+          {{ 'checked' if show_answered }}> Show answered ({{ answered_n }})</label>
+    </div>
+    {% if run or store or vendor or search or show_answered or assigned %}<div><a class="btn secondary" href="/review" style="padding:5px 12px;">clear</a></div>{% endif %}
+    <noscript><button class="btn" type="submit">Apply</button></noscript>
+  </form>
+</div>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      {{ sort_th('Flagged', 'flagged', params) }}
+      {{ sort_th('Vendor', 'vendor', params) }}
+      {{ sort_th('Store', 'store', params) }}
+      {{ sort_th('Invoice #', 'number', params) }}
+      {{ sort_th('Amount', 'amount', params, numeric=True) }}
+      <th>Status</th><th>Why flagged</th><th>Source email</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for it in items %}
+      {% set answered = (it.answer or '').strip() %}
+      <tr{% if answered %} style="background:#f7fbff;"{% endif %}>
+        <td class="muted" style="white-space:nowrap;">
+          <span title="review item id">#{{ it.id }}</span><br>
+          {% if it.email_received_at %}
+            <span title="Gmail receive time">{{ it.email_received_at | us_datetime }}</span>
+          {% else %}
+            <span title="Gmail receive time not captured for this email">—</span>
+          {% endif %}
+          {% if it.run_id %}<br><span title="classify run">{{ it.run_id }}</span>{% endif %}
+        </td>
+        <td>{{ it.vendor_matched or '—' }}</td>
+        <td>{{ (it.store_matched | store_label) or '—' }}</td>
+        <td style="white-space:nowrap; width:1%;">{{ it.invoice_number or '—' }}</td>
+        <td class="num">{{ money(it.amount) }}</td>
+        <td style="white-space:nowrap;">
+          {% if answered %}
+            <span class="pill" style="background:#dbeafe;color:#1e40af;">Answered — pending reprocess</span>
+            {% if it.reviewed_by %}<div class="muted">{{ it.reviewed_by }}{% if it.reviewed_at %} · {{ it.reviewed_at | us_datetime }}{% endif %}</div>{% endif %}
+          {% endif %}
+          {% if it.has_pending_upload %}
+            <span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded — pending reprocess</span>
+          {% endif %}
+          {% if not answered and not it.has_pending_upload %}
+            <span class="pill rev">Needs review</span>
+          {% endif %}
+          {% if it.note_count %}<div><span class="pill" style="background:#fef3c7;color:#92400e;" title="internal notes logged">📝 {{ it.note_count }}</span></div>{% endif %}
+          {% if it.assigned_to %}<div><span class="pill" style="background:#ecfdf5;color:#065f46;">👤 {{ it.assigned_to }}</span></div>{% endif %}
+          <form method="post" action="/review/{{ it.id }}/assign" style="margin-top:4px;">
+            <select name="assigned_to" onchange="this.form.submit()" style="font-size:12px;padding:2px 4px;">
+              <option value="">— unassigned —</option>
+              {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if it.assigned_to == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
+            </select>
+          </form>
+        </td>
+        <td class="muted">
+          <div style="white-space: pre-line; max-height: 140px; overflow-y: auto;">{{ it['question'] or '' }}</div>
+          {% if it.duplicate_group_id %}
+            <div style="margin-top:4px;"><a class="pill" style="background:#eef2ff;color:#4338ca;"
+               href="/browse?group={{ it.duplicate_group_id|urlencode }}"
+               title="Show all versions of this invoice">Group {{ it.duplicate_group_id }}</a></div>
+          {% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          {% if it.source_email %}<a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">records</a>{% endif %}
+          {% if it.gmail_link %}<br><a href="{{ it.gmail_link }}" target="_blank">Email link</a>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          <a class="btn {{ 'secondary' if answered else '' }}" href="/review/{{ it.id }}">{{ 'View / edit' if answered else 'Review' }}</a>
+          <form method="post" action="/review/{{ it.id }}/ignore" style="display:inline;margin:0;"
+                onsubmit="return confirm('Ignore this item? It leaves the queue but can be restored from Ignored.');">
+            <button class="btn secondary" type="submit" title="Dismiss without reprocessing"
+                    style="padding:4px 10px;">Ignore</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="9" class="muted" style="padding:18px;">Nothing to review. 🎉</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

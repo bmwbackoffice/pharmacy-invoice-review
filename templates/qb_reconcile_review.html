@@ -1,0 +1,92 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<style>
+  /* Side-by-side QB row vs app record — same feel as the /duplicates comparison table. */
+  .qbtable { width:auto; border-collapse:collapse; font-size:12.5px; }
+  .qbtable th, .qbtable td { border:1px solid var(--line); padding:4px 10px; text-align:left;
+                             vertical-align:top; white-space:nowrap; }
+  .qbtable th { position:static; top:auto; background:#fafbfc; font-weight:600; }
+  .qbtable tbody tr:nth-child(even) { background:transparent; }
+  .qbtable td.rowlabel, .qbtable th.rowlabel { background:#fafbfc; color:var(--muted); font-weight:600; }
+  .qbtable td.amt { font-variant-numeric:tabular-nums; font-weight:700; }
+  /* Character-level diff: only the differing characters are reddened (see qb.html diff_against). */
+  .qbtable .diffchar { color:#dc2626; font-weight:700; background:#fee2e2; border-radius:2px; padding:0 1px; }
+  /* Arrow in the left label column marking which row is the mismatch. */
+  .qbtable td.rowlabel.flagged { color:#dc2626; }
+  .qbtable .diffarrow { color:#dc2626; font-weight:700; margin-right:3px; }
+</style>
+<h2>QB match review{% if batch %} <span class="muted">— {{ batch.filename }}</span>{% endif %}</h2>
+{% if batch %}
+<p class="muted">Batch {{ batch.id }}: {{ batch.n_rows }} row(s) · <strong>{{ batch.n_auto_matched }}</strong>
+  auto-matched (marked entered in QB) · <strong>{{ batch.n_doubtful }}</strong> doubtful ·
+  <strong>{{ batch.n_statement_resolved }}</strong> statement flag(s) resolved ·
+  {{ batch.n_no_match }} no match. <a href="/qb-reconcile">All imports</a></p>
+{% endif %}
+<p class="muted">Each card is a QuickBooks row the auto-match wasn't sure about. <strong>Confirm match</strong>
+marks the app record entered in QB (so it won't be entered again); <strong>Not a match</strong> leaves
+the record alone.</p>
+
+{% set msg = request.query_params.get('msg') %}
+{% if msg %}<div class="ok-msg">{{ msg }}</div>{% endif %}
+{% if candidates %}
+<form method="post" action="/qb-reconcile/review/recheck" style="margin-bottom:12px;">
+  <button class="btn secondary" type="submit"
+          title="Re-run the exact-match rule on every pending candidate using the current vendor list — resolves matches a vendor-list fix now covers, without re-uploading">Re-check pending matches against current vendor list</button>
+</form>
+{% endif %}
+
+{% if not candidates %}
+  <div class="card muted">No doubtful matches to review{% if batch %} in this batch{% endif %}.</div>
+{% endif %}
+
+{% for c in candidates %}
+<div class="card">
+  <div class="muted" style="font-size:12.5px; margin-bottom:6px; font-weight:700;">⚠️ {{ c.confidence_reason }}</div>
+  <div style="overflow-x:auto;">
+    <table class="qbtable">
+      <thead><tr>
+        <th class="rowlabel"></th>
+        <th>QuickBooks row</th>
+        <th>App record — {{ c.record_type.replace('_',' ') }} #{{ c.record_id }}</th>
+      </tr></thead>
+      <tbody>
+        <tr><td class="rowlabel">Store</td><td>{{ c.qb_store or '—' }}</td>
+            <td>{{ (c.rec_store | store_label) or '—' }}</td></tr>
+        {# Each Tier-2 reason names exactly one differing field; redden only the characters that
+           actually differ between the QB value and the app value (both directions). #}
+        {% set vendor_mismatch = 'vendor did not resolve' in c.confidence_reason %}
+        {% set number_mismatch = 'number missing/mismatched' in c.confidence_reason %}
+        {% set amount_mismatch = 'amount differs beyond tolerance' in c.confidence_reason %}
+        {% set qb_name = c.qb_name or '—' %}{% set rec_vendor = c.rec_vendor or '—' %}
+        {% set qb_num = c.qb_num or '—' %}{% set rec_number = c.rec_number or '—' %}
+        {% set qa = money(c.qb_amount) %}{% set ra = money(c.rec_amount) %}
+        {% set arrow %}<span class="diffarrow" title="This field differs">▶</span>{% endset %}
+        <tr><td class="rowlabel {{ 'flagged' if vendor_mismatch }}">{% if vendor_mismatch %}{{ arrow }}{% endif %}Vendor</td>
+            <td>{% if vendor_mismatch %}{{ qb_name | diff_against(rec_vendor) }}{% else %}{{ qb_name }}{% endif %}</td>
+            <td>{% if vendor_mismatch %}{{ rec_vendor | diff_against(qb_name) }}{% else %}{{ rec_vendor }}{% endif %}{% if c.rec_std_vendor %} <span class="muted">({{ c.rec_std_vendor }})</span>{% endif %}</td></tr>
+        <tr><td class="rowlabel {{ 'flagged' if number_mismatch }}">{% if number_mismatch %}{{ arrow }}{% endif %}Number</td>
+            <td>{% if number_mismatch %}{{ qb_num | diff_against(rec_number) }}{% else %}{{ qb_num }}{% endif %}</td>
+            <td>{% if number_mismatch %}{{ rec_number | diff_against(qb_num) }}{% else %}{{ rec_number }}{% endif %}</td></tr>
+        <tr><td class="rowlabel {{ 'flagged' if amount_mismatch }}">{% if amount_mismatch %}{{ arrow }}{% endif %}Amount</td>
+            <td class="amt">{% if amount_mismatch %}{{ qa | diff_against(ra) }}{% else %}{{ qa }}{% endif %}</td>
+            <td class="amt">{% if amount_mismatch %}{{ ra | diff_against(qa) }}{% else %}{{ ra }}{% endif %}</td></tr>
+        <tr><td class="rowlabel">Date</td><td>{{ (c.qb_date | us_date) or '—' }}</td>
+            <td>{{ (c.rec_date | us_date) or '—' }}</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+    <form method="post" action="/qb-reconcile/review/{{ c.id }}/confirm" style="margin:0;"
+          onsubmit="return confirm('Confirm this is the same document and mark the {{ c.record_type.replace('_',' ') }} as entered in QuickBooks?');">
+      <button class="btn ok" type="submit" style="padding:4px 11px; font-size:12px;">Confirm match</button>
+    </form>
+    <form method="post" action="/qb-reconcile/review/{{ c.id }}/reject" style="margin:0;">
+      <button class="btn secondary" type="submit" style="padding:4px 11px; font-size:12px;">Not a match</button>
+    </form>
+    <a class="btn secondary" href="/records/{{ c.record_type }}/{{ c.record_id }}"
+       style="padding:4px 11px; font-size:12px;">Open record</a>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

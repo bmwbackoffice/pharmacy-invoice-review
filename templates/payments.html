@@ -1,0 +1,233 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options, sort_th, money %}
+{% block content %}
+<h2>Payments <span class="muted">({{ pg.total }} total{% if pg.page_size != 'all' and pg.pages > 1 %} · page {{ pg.page }}/{{ pg.pages }}{% endif %})</span></h2>
+<p class="muted">Payments are always entered in QuickBooks (never excluded). Mark them entered as you go.</p>
+
+{# Payments saved before the store/date/amount review checks existed can still lack one. #}
+{% if params.missing == '1' %}
+<div class="card" style="border-color:#f59e0b; background:#fffbeb;">
+  Showing only payments missing a store, date or amount. Fix each one on its <b>edit</b> page before entering it.
+  <a href="#" onclick="event.preventDefault(); var u=new URL(location.href); u.searchParams.delete('missing'); location.href=u.pathname+u.search;">✕ show all</a>
+</div>
+{% elif missing_count %}
+<div class="card" style="border-color:#f59e0b; background:#fffbeb;">
+  ⚠ {{ missing_count }} payment{{ '' if missing_count == 1 else 's' }} waiting for QuickBooks entry
+  {{ 'is' if missing_count == 1 else 'are' }} missing a store, date or amount — saved before those checks existed.
+  <a class="btn secondary" style="padding:2px 8px;" href="/payments?missing=1&entered=no&dup=all">Show them</a>
+</div>
+{% endif %}
+
+{% if params.group %}
+<div class="card" style="background:#eef2ff;">
+  Filtered to duplicate group <strong>{{ params.group }}</strong> — every payment tied to this cluster.
+  <a class="btn secondary" href="/payments" style="padding:2px 8px;">clear</a>
+</div>
+{% endif %}
+
+<div class="card">
+  <form method="get" action="/payments">
+    {% if params.group %}<input type="hidden" name="group" value="{{ params.group }}">{% endif %}
+    <div class="row">
+      <div><label>Entered in QB</label>
+        <select name="entered">
+          <option value="" {{ 'selected' if not params.entered }}>any</option>
+          <option value="yes" {{ 'selected' if params.entered=='yes' }}>entered</option>
+          <option value="no" {{ 'selected' if params.entered=='no' }}>not entered</option>
+        </select></div>
+      <div><label>Store</label>
+        <select name="store"><option value="">any</option>
+          {% for s in stores %}<option value="{{ s }}" {{ 'selected' if params.store==s }}>{{ s | store_label }}</option>{% endfor %}
+        </select></div>
+      <div><label>Possible dup</label>
+        <select name="dup">
+          <option value="" {{ 'selected' if not params.dup }}>hide flagged (default)</option>
+          <option value="yes" {{ 'selected' if params.dup=='yes' }}>only flagged</option>
+          <option value="all" {{ 'selected' if params.dup=='all' }}>all (include flagged)</option>
+        </select></div>
+      <div><label>Run</label>
+        <select name="run">{{ run_options(runs, params.run) }}</select></div>
+      <div><label>Payment date from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
+      <div><label>Payment date to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
+      <div><label>Ignored duplicates</label>
+        <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
+          <input type="checkbox" name="ignored" value="1" {{ 'checked' if params.ignored=='1' }} onchange="this.form.submit()" style="width:auto;">
+          show auto-ignored duplicates
+        </label></div>
+      <div><label>Reference-only</label>
+        <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
+          <input type="checkbox" name="skipped" value="1" {{ 'checked' if params.skipped=='1' }} onchange="this.form.submit()" style="width:auto;">
+          show skip-QB (reference-only) payments
+        </label></div>
+      <div><label>Missing info</label>
+        <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
+          <input type="checkbox" name="missing" value="1" {{ 'checked' if params.missing=='1' }} onchange="this.form.submit()" style="width:auto;">
+          only missing store / date / amount
+        </label></div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn secondary" href="/payments">Reset</a>
+    </div>
+  </form>
+</div>
+
+{# Bulk action bar — checkboxes below belong to this form via form="paybulk" (HTML5). #}
+{% set exportq = [] %}
+{% for k in ['store','entered','dup','ignored','skipped','missing','run','date_from','date_to','sort','direction'] %}
+  {% if params[k] %}{% set _ = exportq.append(k ~ '=' ~ (params[k]|urlencode)) %}{% endif %}
+{% endfor %}
+{% set filterq = exportq|join('&') %}
+<form id="paybulk" method="post" action="/qb/bulk_entered"></form>
+<div class="card" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+  <button class="btn" type="submit" form="paybulk" onclick="return confirmBulk()">Mark selected as Entered in QB</button>
+  <button class="btn secondary" type="button" onclick="copyPay(this)">Copy Selected</button>
+  <a class="btn ok" href="/payments/export.csv{{ ('?' ~ filterq) if filterq else '' }}">Export CSV</a>
+  <span class="muted">tick rows (or the header box to select all), then Copy Selected and/or mark entered — both act on the same ticked rows. Export CSV covers the full filtered set.</span>
+</div>
+
+<div class="card" style="padding:0;">
+  <table id="paytable">
+    <thead><tr>
+      <th><input type="checkbox" onclick="toggleAll(this)" title="select all visible"></th>
+      {{ sort_th('Entered', 'entered', params) }}
+      {{ sort_th('Store', 'store', params) }}
+      {{ sort_th('Vendor', 'vendor', params) }}
+      {{ sort_th('Amount', 'amount', params, numeric=True) }}
+      {{ sort_th('Payment date', 'date', params) }}
+      {{ sort_th('Reference / method', 'reference', params) }}
+      <th>Flags</th><th>Source email</th><th>Links</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      {% set url = file_url(r.file_path) %}
+      <tr data-vendor="{{ r.vendor_matched or '' }}" data-store="{{ (r.store_matched | store_label) or '' }}"
+          data-amount="{{ '' if r.amount is none else '%.2f'|format(r.amount) }}"
+          data-date="{{ (r.payment_date | us_date) or '' }}" data-ref="{{ r.reference_number or '' }}"
+          data-dup="{{ 'Duplicate — ignored' if r.duplicate_ignored else ('Possible' if r.duplicate_suspect else '') }}"
+          data-file="{{ url or '' }}" data-gmail="{{ r.gmail_link or '' }}">
+        <td><input type="checkbox" class="rowchk" name="selected" value="payment:{{ r.record_id }}" form="paybulk"></td>
+        <td>
+          <button class="btn {{ 'ok' if r.entered_in_qb else 'secondary' }} entered-btn" type="button"
+                  data-rt="payment" data-rid="{{ r.record_id }}" data-entered="{{ '0' if r.entered_in_qb else '1' }}"
+                  style="padding:4px 10px;">{{ '✓ entered' if r.entered_in_qb else 'mark entered' }}</button>
+          {% if r.entered_in_qb and r.entered_qb_by %}<div class="muted">{{ r.entered_qb_by }} · {{ r.entered_qb_at | us_date }}</div>{% endif %}
+        </td>
+        <td>{{ (r.store_matched | store_label) or '—' }}{% if 'store' in (r.missing_info or '') %} <span class="pill" style="background:#fee2e2;color:#b91c1c;">no store</span>{% endif %}</td>
+        <td>{{ r.vendor_matched or '—' }}</td>
+        <td class="num">{{ money(r.amount) }}{% if 'amount' in (r.missing_info or '') %} <span class="pill" style="background:#fee2e2;color:#b91c1c;">no amount</span>{% endif %}</td>
+        <td>{{ r.payment_date | us_date }}{% if 'date' in (r.missing_info or '') %}<span class="pill" style="background:#fee2e2;color:#b91c1c;">no date</span>{% endif %}</td>
+        <td>{{ r.reference_number or '—' }}{% if r.applied_invoice %}<div class="muted" title="The invoice the remittance says this payment settles">for invoice #{{ r.applied_invoice }}</div>{% endif %}</td>
+        <td>
+          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — ignored</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the payment this duplicates">↗</a>{% endif %}
+            <form method="post" action="/records/payment/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+              <input type="hidden" name="action" value="restore">
+              <button type="submit" class="linklike" title="not actually a duplicate — restore">undo</button>
+            </form>
+          {% elif r.duplicate_suspect %}<span class="pill dup" title="{{ r.duplicate_reason or '' }}">possible duplicate</span>
+            <form method="post" action="/records/payment/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+              <input type="hidden" name="action" value="ignore">
+              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">ignore this one</button>
+            </form>
+          {% endif %}
+          {% if r.duplicate_group_id %}<a class="pill" style="background:#eef2ff;color:#4338ca;" href="?group={{ r.duplicate_group_id|urlencode }}" title="Show all records in this duplicate group">Group {{ r.duplicate_group_id }}</a>{% endif %}
+        </td>
+        <td class="muted" style="white-space:nowrap;">
+          {% if r.email_filename %}<a href="/browse?email={{ r.email_filename|urlencode }}" title="{{ r.email_filename }}">records</a>{% endif %}
+          {% if r.run_id %}<br><span class="muted" title="classify run">{{ r.run_id }}</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          {% set url = file_url(r.file_path) %}
+          {% if url %}<a href="{{ url }}" target="_blank">File link</a>{% endif %}
+          {% if r.gmail_link %} · <a href="{{ r.gmail_link }}" target="_blank">Email link</a>{% endif %}
+          · <a href="/edit/payment/{{ r.record_id }}">edit</a>
+          {% if not r.skip_qb_import %}
+          <button class="btn secondary ignore-btn" type="button"
+                  data-rt="payment" data-rid="{{ r.record_id }}"
+                  style="padding:4px 10px;" title="exclude this one payment from QB">ignore</button>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted" style="padding:18px;">No payments match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if pg.pages > 1 or pg.page_size == 'all' %}
+<div class="card" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+  <span class="muted">
+    {% if pg.page_size == 'all' %}Showing all {{ pg.total }}{% else %}Showing {{ (pg.page-1)*pg.size + (1 if pg.total else 0) }}–{{ [pg.page*pg.size, pg.total]|min }} of {{ pg.total }}{% endif %}</span>
+  {% if pg.page_size != 'all' and pg.pages > 1 %}
+    {% if pg.page > 1 %}<a class="btn secondary" style="padding:3px 10px;" href="/payments?{% if filterq %}{{ filterq }}&{% endif %}page_size={{ pg.page_size }}&page={{ pg.page-1 }}">← Prev</a>{% endif %}
+    <span class="muted">page {{ pg.page }} / {{ pg.pages }}</span>
+    {% if pg.page < pg.pages %}<a class="btn secondary" style="padding:3px 10px;" href="/payments?{% if filterq %}{{ filterq }}&{% endif %}page_size={{ pg.page_size }}&page={{ pg.page+1 }}">Next →</a>{% endif %}
+  {% endif %}
+  <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+    <span class="muted">Rows/page:</span>
+    {% for sz in page_size_options %}<a class="btn {{ '' if pg.page_size == (sz|string) else 'secondary' }}" style="padding:3px 10px;" href="/payments?{% if filterq %}{{ filterq }}&{% endif %}page_size={{ sz }}">{{ sz }}</a>{% endfor %}
+    <a class="btn {{ '' if pg.page_size == 'all' else 'secondary' }}" style="padding:3px 10px;" href="/payments?{% if filterq %}{{ filterq }}&{% endif %}page_size=all">All</a>
+  </span>
+</div>
+{% endif %}
+
+<script>
+function toggleAll(master) {
+  document.querySelectorAll('#paytable tbody input.rowchk').forEach(function (c) { c.checked = master.checked; });
+}
+// Per-row "mark entered" without one <form> per row: a delegated handler that POSTs the
+// same endpoint (server redirects back), so the DOM stays light on big pages.
+document.getElementById('paytable').addEventListener('click', function (e) {
+  var b = e.target.closest('.entered-btn'); if (!b) return;
+  var f = document.createElement('form'); f.method = 'post';
+  f.action = '/qb/' + b.dataset.rt + '/' + b.dataset.rid + '/entered';
+  var i = document.createElement('input'); i.type = 'hidden'; i.name = 'entered'; i.value = b.dataset.entered;
+  f.appendChild(i); document.body.appendChild(f); f.submit();
+});
+// Per-row manual "ignore" (exclude this one payment from QB). One-way from /payments — Restore lives
+// on /browse and the record detail page.
+document.getElementById('paytable').addEventListener('click', function (e) {
+  var b = e.target.closest('.ignore-btn'); if (!b) return;
+  if (!confirm('Exclude this one payment from QuickBooks import?')) return;
+  var f = document.createElement('form'); f.method = 'post';
+  f.action = '/records/' + b.dataset.rt + '/' + b.dataset.rid + '/ignore';
+  var i = document.createElement('input'); i.type = 'hidden'; i.name = 'ignored'; i.value = '1';
+  f.appendChild(i); document.body.appendChild(f); f.submit();
+});
+function confirmBulk() {
+  var n = document.querySelectorAll('#paytable tbody input.rowchk:checked').length;
+  if (!n) { alert('Tick at least one row first.'); return false; }
+  return confirm('Mark ' + n + ' selected payment(s) as Entered in QB?');
+}
+// Copy the SELECTED (ticked) rows as TSV (same columns as the CSV export) — the same rows
+// the bulk 'Mark entered' acts on — for paste into QuickBooks/Excel.
+function copyPay(btn) {
+  var cols = ["Vendor","Store","Amount","Payment Date","Reference / Method","Possible Duplicate","File Link","Gmail Link"];
+  var rows = Array.from(document.querySelectorAll('#paytable tbody input.rowchk:checked'))
+    .map(function (c) { return c.closest('tr'); });
+  if (!rows.length) { alert('Tick at least one row first.'); return; }
+  var lines = [cols.join('\t')];
+  rows.forEach(function (tr) {
+    var d = tr.dataset;
+    var file = d.file || '';
+    if (file.charAt(0) === '/') file = window.location.origin + file;
+    lines.push([d.vendor, d.store, d.amount, d.date, d.ref, d.dup, file, d.gmail].join('\t'));
+  });
+  var tsv = lines.join('\n');
+  var done = function () { var t = btn.textContent; btn.textContent = 'Copied ' + rows.length + ' rows'; setTimeout(function () { btn.textContent = t; }, 1500); };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(tsv).then(done, function () { fallbackCopy(tsv, done); });
+  } else {
+    fallbackCopy(tsv, done);
+  }
+}
+function fallbackCopy(text, done) {
+  var ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { alert('Copy failed — select the table manually.'); }
+  document.body.removeChild(ta);
+}
+</script>
+{% endblock %}

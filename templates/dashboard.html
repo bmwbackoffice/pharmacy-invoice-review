@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .dashgrid { display:grid; grid-template-columns:repeat(auto-fill, minmax(230px, 1fr)); gap:12px; margin-top:8px; }
+  .dashtile { display:block; background:var(--card, #fff); border:1px solid var(--line); border-radius:8px;
+              padding:14px 16px; text-decoration:none; color:inherit; }
+  .dashtile:hover { border-color:var(--brand); box-shadow:0 1px 5px rgba(0,0,0,.07); }
+  .dashtile.zero { opacity:.5; }
+  .dashcount { font-size:30px; font-weight:800; line-height:1; color:var(--brand); }
+  .dashtile.zero .dashcount { color:var(--muted); }
+  .dashlabel { font-weight:700; margin-top:7px; }
+  .dashnote { font-size:12.5px; margin-top:2px; }
+  .dashbreak { font-size:12px; margin-top:8px; padding-top:7px; border-top:1px solid var(--line);
+               display:flex; gap:4px 10px; flex-wrap:wrap; }
+</style>
+
+<h2>To-do dashboard</h2>
+<p class="muted">Everything that currently needs action, in one place — counts are live on each load.
+  Only the review queue is split by assignee (the one queue with per-user ownership); the rest are
+  shared pools any user can work.</p>
+
+<div class="dashgrid">
+  {% for t in tiles %}
+  <a class="dashtile{{ ' zero' if t.count == 0 }}" href="{{ t.href }}">
+    <div class="dashcount">{{ t.count }}</div>
+    <div class="dashlabel">{{ t.label }}</div>
+    <div class="dashnote muted">{{ t.note }}</div>
+    {% if t.breakdown %}
+    <div class="dashbreak muted">
+      {% for who, cnt in t.breakdown %}<span>{{ who }} · {{ cnt }}</span>{% endfor %}
+    </div>
+    {% endif %}
+  </a>
+  {% endfor %}
+</div>
+
+{% if user and user.role == 'admin' %}
+<div class="card" style="margin-top:16px;">
+  <strong>Maintenance notice</strong>
+  <p class="muted" style="margin:4px 0 8px; font-size:12.5px;">
+    Shows a sitewide banner to warn active users before a restart or a bulk reprocess that
+    touches existing records. Leave the box blank and just click <strong>Show</strong> for a generic
+    warning. (Also settable from the CLI: <code>python notice.py set "…" --minutes 1</code>.)
+    {% if notice %}<br><strong>Currently showing:</strong> {{ notice.message }}{% endif %}
+  </p>
+  <form method="post" action="/admin/notice" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+    <input type="text" name="message"
+           placeholder="Optional — blank uses a generic maintenance-alert message"
+           style="flex:1; min-width:280px; padding:5px 9px;">
+    <label class="muted" style="font-size:12.5px;">minutes
+      <input type="number" name="minutes" value="1" min="0" style="width:62px; padding:5px 6px;"
+             title="0 = show until explicitly cleared"></label>
+    <button class="btn" type="submit" style="padding:5px 12px;">Show</button>
+  </form>
+  {% if notice %}
+  <form method="post" action="/admin/notice/clear" style="margin-top:6px;">
+    <button class="btn secondary" type="submit" style="padding:4px 11px; font-size:12px;">Clear notice</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,288 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<p><a href="/review">&larr; back to queue</a></p>
+<div class="row">
+  <div class="card" style="flex:1 1 420px;">
+    <h3 style="margin-top:0;">Review item <span class="muted">#{{ item.id }}</span></h3>
+    {% if (item.answer or '').strip() %}
+      <span class="pill" style="background:#dbeafe;color:#1e40af;">Answered — pending reprocess</span>
+      {% if item.reviewed_by %}<span class="muted"> by {{ item.reviewed_by }}{% if item.reviewed_at %} · {{ item.reviewed_at | us_datetime }}{% endif %}</span>{% endif %}
+      <p class="muted" style="margin-top:6px;">This stays in the queue until the next <code>classify_emails.py</code> run reprocesses it. You can revise the answer below.</p>
+    {% elif has_pending_upload %}
+      <span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded — pending reprocess</span>
+      <p class="muted" style="margin-top:6px;">Uploaded document(s) below will be used to reprocess this record on the next <code>classify_emails.py</code> run.</p>
+    {% else %}
+      <div class="pill rev">Needs review</div>
+    {% endif %}
+    {% if item.gmail_link %} · <a href="{{ item.gmail_link }}" target="_blank">open source email in Gmail</a>{% endif %}
+    <p class="muted" style="margin-top:12px;">Why the AI flagged this:</p>
+    <div class="card" style="background:#fffdf5;">{{ item['question'] or '—' }}
+      {% if item.duplicate_group_id %}
+        <div style="margin-top:8px;"><a class="pill" style="background:#eef2ff;color:#4338ca;"
+           href="/browse?group={{ item.duplicate_group_id|urlencode }}"
+           title="Show all versions of this invoice">Group {{ item.duplicate_group_id }}</a></div>
+      {% endif %}
+    </div>
+
+    <table>
+      <tr><th>Vendor</th><td>{{ item.vendor_matched or '—' }}</td></tr>
+      <tr><th>Store</th><td>{{ (item.store_matched | store_label) or '—' }}</td></tr>
+      <tr><th>Invoice #</th><td>{{ item.invoice_number or '—' }}</td></tr>
+      <tr><th>Amount</th><td>{{ money(item.amount) }}</td></tr>
+      <tr><th>Source email</th><td>
+        {% if item.source_email %}<a href="/browse?email={{ item.source_email|urlencode }}">{{ item.source_email }}</a>{% else %}—{% endif %}
+      </td></tr>
+      <tr><th>Received (Gmail)</th><td>
+        {% if item.email_received_at %}{{ item.email_received_at | us_datetime }}
+        {% else %}<span class="muted">not captured for this email — run backfill_received_at.py --commit</span>{% endif %}
+      </td></tr>
+      <tr><th>Run</th><td>{% if item.run_id %}<a href="/review?run={{ item.run_id }}">{{ item.run_id }}</a>{% else %}<span class="muted">pre-tracking</span>{% endif %}</td></tr>
+      <tr><th>Assigned to</th><td>
+        <form method="post" action="/review/{{ item.id }}/assign" style="margin:0;">
+          <select name="assigned_to" onchange="this.form.submit()">
+            <option value="">— unassigned —</option>
+            {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if item.assigned_to == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
+          </select>
+        </form>
+      </td></tr>
+    </table>
+
+    {% if siblings %}
+    <p class="muted" style="margin-top:14px;">Other records from this email (already recorded, not in the queue):</p>
+    <table style="font-size:13px;">
+      <thead><tr><th>Vendor</th><th>#</th><th class="num">Amount</th><th>Status</th></tr></thead>
+      <tbody>
+      {% for s in siblings %}
+        <tr>
+          <td><a href="/browse?email={{ item.source_email|urlencode }}">{{ s.vendor_matched or '—' }}</a></td>
+          <td>{{ s.number or '—' }}</td>
+          <td class="num">{{ money(s.amount) }}</td>
+          <td>{% if s.skip_qb_import %}<span class="pill skip">excluded — in Browse</span>{% else %}<span class="muted">recorded{% if s.entered_in_qb %} · in QB{% endif %}</span>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% endif %}
+
+    <div class="card" id="ai-assist" style="background:#f5f8ff;border:1px solid #dbe4f5;margin-top:14px;">
+      <label style="font-weight:700;">AI assist — draft answer + learning ✨</label>
+      <p class="muted" style="margin:4px 0 8px;">Describe the decision in your own words; Claude drafts
+        both a record-specific <b>Answer</b> and a general <b>Learning</b> rule from this record's
+        context. Nothing is saved until you use it in your answer or click “Save as learning now”.</p>
+      <textarea id="ai-rough" rows="2" placeholder="e.g. this is 3M — 112 Hillside is Braun's default billing address"></textarea>
+      <div style="margin-top:8px;">
+        <button class="btn secondary" type="button" id="ai-draft-btn" style="padding:5px 12px;">Draft</button>
+        <span class="muted" id="ai-status" style="margin-left:8px;"></span>
+      </div>
+      <div id="ai-draft-box" style="display:none;margin-top:12px;">
+        <label style="font-weight:700;">Proposed answer (for this record)</label>
+        <div id="ai-answer-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
+        <label style="font-weight:700;margin-top:8px;">Proposed learning (general rule)</label>
+        <div id="ai-learning-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+          <input id="ai-refine" placeholder="Refine: e.g. also mention credit memos" style="flex:1 1 220px;">
+          <button class="btn secondary" type="button" id="ai-refine-btn" style="padding:5px 12px;">Refine</button>
+        </div>
+        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
+          <button class="btn" type="button" id="ai-use-btn" style="padding:5px 12px;">Use in my answer</button>
+          <button class="btn secondary" type="button" id="ai-save-btn" style="padding:5px 12px;">Save as learning now</button>
+        </div>
+        <p class="muted" style="margin:8px 0 0;">“Use in my answer” fills both fields below — edit or clear
+          either before submitting. “Save as learning now” saves only the learning.</p>
+      </div>
+    </div>
+
+    <form method="post" action="/review/{{ item.id }}/answer">
+      <label>Answer (your decision for this record)</label>
+      <textarea name="answer" id="answer_box" rows="3" required>{{ item.answer or '' }}</textarea>
+      <label>Notes to Learn (a general rule the AI should remember — optional)</label>
+      <textarea name="notes_to_learn" id="notes_to_learn" rows="3">{{ item.notes_to_learn or '' }}</textarea>
+      <p class="muted">Submitting records your answer. The next <code>classify_emails.py</code> run
+        applies it: appends the note to learnings, reprocesses this split file, and moves it to results.</p>
+      <label style="font-weight:400;display:inline;margin:0 0 8px;white-space:normal;cursor:pointer;">
+        <input type="checkbox" name="track_outcome" value="1"
+          style="width:auto;padding:0;margin:0 6px 0 0;vertical-align:middle;">
+        Track outcome — keep this record in the <a href="/tracked">Tracked</a> tab after it reprocesses,
+        so you can confirm the result before writing a rule.</label>
+      <div><button class="btn" type="submit">Submit answer</button></div>
+    </form>
+    {% if item.reviewed_by %}<p class="muted">Last reviewed by {{ item.reviewed_by }} at {{ item.reviewed_at | us_datetime }}</p>{% endif %}
+
+    <div class="card" style="background:#f5faf5;border:1px solid #d7ead7;margin-top:14px;">
+      <label style="font-weight:700;">Add PDFs (from the zip) &amp; reprocess</label>
+      <p class="muted" style="margin:4px 0 8px;">If the pipeline couldn't open the original attachment
+        (e.g. a zip), upload the extracted PDF(s)/image(s) here. These will be used to reprocess this
+        record on the next classifier run. PDF and image files only.</p>
+      {% if manual_attachments %}
+      <ul style="list-style:none;padding:0;margin:0 0 10px;">
+        {% for m in manual_attachments %}
+        <li style="padding:3px 0;{% if m.consumed_at %}opacity:.6;{% endif %}">
+          📄 {% if m.preview_url %}<a href="{{ m.preview_url }}" target="_blank">{{ m.original_name or 'file' }}</a>{% else %}{{ m.original_name or 'file' }}{% endif %}
+          <span class="muted" style="font-size:12px;">· {{ m.uploaded_by or 'someone' }}{% if m.uploaded_at %} · {{ m.uploaded_at | us_datetime }}{% endif %}
+            {% if m.consumed_at %}· used ✓{% else %}· pending next run{% endif %}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      <form method="post" action="/review/{{ item.id }}/attach" enctype="multipart/form-data" style="margin:0;">
+        <input type="file" name="files" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp,application/pdf,image/*" multiple>
+        <div style="margin-top:8px;"><button class="btn" type="submit">Upload &amp; queue for reprocess</button></div>
+      </form>
+    </div>
+
+    <div class="card" style="background:#fdf6f6;border:1px solid #f0d9d9;margin-top:14px;">
+      <label style="font-weight:700;">Not an actionable record?</label>
+      <p class="muted" style="margin:4px 0 8px;">Dismiss and remove it from the queue — no reprocess,
+        no API call. It's snapshotted and restorable from <a href="/ignored">Ignored</a>.</p>
+      <form method="post" action="/review/{{ item.id }}/ignore" style="margin:0;">
+        <input name="reason" placeholder="Reason (optional)">
+        <div style="margin-top:8px;">
+          <button class="btn" type="submit" style="background:#b45309;">Ignore item</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0;">Flag for review</h3>
+      {% if flagged %}<div class="ok-msg">Flagged for review — an admin will see it on the
+        <a href="/flags">Flags</a> page.</div>{% endif %}
+      <p class="muted" style="margin-top:4px;">See something wrong with this item, or want it
+        looked into? Describe it below. An admin can then review it and, if useful, run an
+        automated read-only investigation.</p>
+      <form method="post" action="/records/review/{{ item.id }}/flag">
+        <textarea name="note" rows="3" required
+                  style="width:100%; max-width:620px; display:block;"
+                  placeholder="What looks wrong, or what should be looked at?"></textarea>
+        <div style="margin-top:8px;">
+          <button class="btn" type="submit">Flag for review</button>
+          <a class="btn secondary" href="/flags">View flags</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card preview" style="flex:1 1 560px;">
+    <h3 style="margin-top:0;">Source document</h3>
+    {% if preview %}
+      <div class="preview-actions"><a class="btn secondary" href="{{ preview }}" target="_blank" style="padding:4px 10px;">Open full size ↗</a>
+        <span class="muted"> · drag the preview's bottom edge to resize</span></div>
+      {% if preview.lower().endswith('.pdf') %}
+        <iframe src="{{ preview }}"></iframe>
+      {% elif preview.lower().endswith('.png') or preview.lower().endswith('.jpg') or preview.lower().endswith('.jpeg') or preview.lower().endswith('.gif') or preview.lower().endswith('.webp') %}
+        <img src="{{ preview }}" alt="source document">
+      {% else %}
+        <a href="{{ preview }}" target="_blank">open document</a>
+      {% endif %}
+    {% else %}
+      <p class="muted">No source file recorded for this item.</p>
+    {% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Notes <span class="muted">({{ notes|length }})</span></h3>
+  <p class="muted">Free-form notes on this item — kept attached even after it's reprocessed (keyed by
+    the file, not the run). Separate from “Notes to Learn” above, which trains the AI.</p>
+  {% for n in notes %}
+    <div style="border-bottom:1px solid var(--line); padding:6px 0;">
+      <div style="white-space:pre-wrap;">{{ n.note }}</div>
+      <div class="muted" style="font-size:12px;">{{ n.author or 'someone' }}{% if n.created_at %} · {{ n.created_at | us_datetime }}{% endif %}
+        {% if user.role == 'admin' %}
+        <form method="post" action="/review/{{ item.id }}/note/{{ n.id }}/delete" style="display:inline;margin:0 0 0 8px;"
+              onsubmit="return confirm('Delete this internal note? This cannot be undone.');">
+          <button class="btn" style="background:#b91c1c;padding:2px 8px;font-size:12px;" type="submit">Delete</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+  {% else %}
+    <p class="muted">No notes yet.</p>
+  {% endfor %}
+  <form method="post" action="/review/{{ item.id }}/note" style="margin-top:10px;">
+    <textarea name="note" rows="2" placeholder="Add a note…" required></textarea>
+    <div style="margin-top:8px;"><button class="btn" type="submit">Add note</button></div>
+  </form>
+</div>
+
+<script>
+(function () {
+  var DRAFT_URL = "/review/{{ item.id }}/draft-learning";
+  var SAVE_URL  = "/review/{{ item.id }}/save-learning";
+  var rough = document.getElementById("ai-rough");
+  var refine = document.getElementById("ai-refine");
+  var draftBtn = document.getElementById("ai-draft-btn");
+  var refineBtn = document.getElementById("ai-refine-btn");
+  var useBtn = document.getElementById("ai-use-btn");
+  var saveBtn = document.getElementById("ai-save-btn");
+  var box = document.getElementById("ai-draft-box");
+  var answerText = document.getElementById("ai-answer-text");
+  var learningText = document.getElementById("ai-learning-text");
+  var status = document.getElementById("ai-status");
+  var notes = document.getElementById("notes_to_learn");
+  var answerBox = document.getElementById("answer_box");
+  var history = [];        // running {role, content} conversation for refinement
+  var curAnswer = "";      // latest proposed answer
+  var curLearning = "";    // latest proposed learning
+
+  function busy(on, msg) {
+    draftBtn.disabled = refineBtn.disabled = on;
+    status.textContent = msg || "";
+  }
+
+  async function callDraft(text) {
+    busy(true, "Drafting…");
+    try {
+      var res = await fetch(DRAFT_URL, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({rough: text, history: history})
+      });
+      var data = await res.json();
+      if (!res.ok || data.error) { busy(false, data.error || ("Error " + res.status)); return; }
+      curAnswer = (data.answer || "").trim();
+      curLearning = (data.learning || "").trim();
+      answerText.textContent = curAnswer || "(none)";
+      learningText.textContent = curLearning || "(none)";
+      box.style.display = "";
+      history.push({role: "user", content: text});
+      // store the pair as the assistant turn so a refine keeps the model's format
+      history.push({role: "assistant", content: JSON.stringify({answer: curAnswer, learning: curLearning})});
+      busy(false, "");
+    } catch (e) { busy(false, "Network error — try again."); }
+  }
+
+  draftBtn.addEventListener("click", function () {
+    var t = (rough.value || "").trim();
+    if (!t) { status.textContent = "Describe the decision first."; return; }
+    callDraft(t);
+  });
+  refineBtn.addEventListener("click", function () {
+    var t = (refine.value || "").trim();
+    if (!t) { status.textContent = "Type a refinement first."; return; }
+    refine.value = "";
+    callDraft(t);
+  });
+  useBtn.addEventListener("click", function () {
+    if (!curAnswer && !curLearning) return;
+    if (curAnswer) answerBox.value = curAnswer;      // fills the Answer field
+    if (curLearning) notes.value = curLearning;      // fills Notes to Learn
+    answerBox.scrollIntoView({behavior: "smooth", block: "center"});
+    status.textContent = "Filled Answer + Notes to Learn — edit or clear either, then submit.";
+  });
+  saveBtn.addEventListener("click", async function () {
+    if (!curLearning) { status.textContent = "No learning to save."; return; }
+    saveBtn.disabled = true; status.textContent = "Saving…";
+    try {
+      var res = await fetch(SAVE_URL, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({rule: curLearning})   // saves only the learning
+      });
+      var data = await res.json();
+      status.textContent = (res.ok && data.ok) ? "Saved to learnings ✓"
+                                               : (data.error || ("Error " + res.status));
+    } catch (e) { status.textContent = "Network error — try again."; }
+    saveBtn.disabled = false;
+  });
+})();
+</script>
+{% endblock %}

@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Change requests <span class="muted">({{ requests|length }})</span></h2>
+<p class="muted">
+  Ask for a change, a new feature, or report a bug in this app. {% if is_admin %}Admins can dismiss,
+  approve for build, run a read-only automated investigation, or mark done.{% else %}You see the
+  requests you've submitted and any investigation result.{% endif %}
+</p>
+
+{% set msg = request.query_params.get('msg') %}
+{% if msg %}<div class="ok-msg">{{ msg }}</div>{% endif %}
+{% if is_admin and busy %}<div class="muted" style="margin-bottom:10px;">⏳ An investigation is
+  currently running — only one runs at a time.</div>{% endif %}
+
+{# Submission form — visible to everyone. #}
+<div class="card" style="margin-bottom:14px;">
+  <form method="post" action="/requests/submit" style="margin:0; display:flex; flex-direction:column; gap:8px;">
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:flex-end;">
+      <div style="flex:1; min-width:260px;">
+        <label>Title</label><br>
+        <input name="title" required placeholder="Short summary of the change" style="width:100%; box-sizing:border-box;">
+      </div>
+      <div>
+        <label>Category</label><br>
+        <select name="category">
+          <option value="feature">feature</option>
+          <option value="change">change</option>
+          <option value="bug">bug</option>
+        </select>
+      </div>
+    </div>
+    <div>
+      <label>Description</label><br>
+      <textarea name="description" required rows="4" placeholder="What do you want, and why? Include examples if helpful."
+                style="width:100%; box-sizing:border-box;"></textarea>
+    </div>
+    <div><button class="btn" type="submit">Submit request</button></div>
+  </form>
+</div>
+
+{% if not requests %}
+  <div class="card"><p class="muted" style="margin:0;">No requests yet.</p></div>
+{% endif %}
+
+{% for r in requests %}
+<details class="card" style="padding:8px 12px; margin-bottom:8px;">
+  <summary style="cursor:pointer;">
+    <strong>{{ r.title or '(untitled)' }}</strong>
+    {% if r.category %}<span class="pill" style="background:#eef2ff;color:#4338ca;">{{ r.category }}</span>{% endif %}
+    <span class="muted" style="font-size:13px;"> · {{ r.submitted_by or 'someone' }}{% if r.created_at %} · {{ r.created_at | us_datetime }}{% endif %}</span>
+    <span style="float:right; white-space:nowrap;">
+      {% if r.status == 'pending' %}<span class="pill">pending</span>
+      {% elif r.status == 'dismissed' %}<span class="pill" style="background:#e2e8f0;color:#475569;">dismissed</span>
+      {% elif r.status == 'approved_for_build' %}<span class="pill" style="background:#dcfce7;color:#166534;">approved for build</span>
+      {% elif r.status == 'done' %}<span class="pill" style="background:#d1fae5;color:#065f46;">✓ done</span>{% endif %}
+      {% if r.inv_status == 'running' %}<span class="pill" style="background:#fef9c3;color:#854d0e;">investigating…</span>
+      {% elif r.inv_status == 'completed' %}<span class="pill" style="background:#e0e7ff;color:#3730a3;">investigated</span>
+      {% elif r.inv_status == 'failed' %}<span class="pill" style="background:#fee2e2;color:#b91c1c;">inv. failed</span>{% endif %}
+    </span>
+  </summary>
+
+  <div style="margin-top:10px;">
+    <div style="white-space:pre-wrap; padding:8px 10px; background:#f8fafc; border-radius:6px;">{{ r.description }}</div>
+
+    {% if r.inv_id %}
+      <div style="margin-top:10px; border-left:3px solid #4338ca; padding:4px 0 4px 10px;">
+        <div style="font-weight:600;">Automated investigation</div>
+        {% if r.inv_status == 'running' %}
+          <div class="muted" style="font-size:13px;">Started {{ r.inv_started | us_datetime }} by {{ r.inv_by }} — refresh to see the result.</div>
+        {% elif r.inv_status == 'completed' %}
+          <div style="white-space:pre-wrap; margin-top:4px;">{{ r.inv_findings }}</div>
+          <div class="muted" style="font-size:12px; margin-top:4px;">
+            {{ r.inv_finished | us_datetime }} · {{ r.inv_turns or '?' }} turns
+            {% if r.inv_cost is not none %} · ${{ '%.4f'|format(r.inv_cost) }}{% endif %}
+            {% if r.inv_in %} · {{ r.inv_in }} in / {{ r.inv_out }} out tokens{% endif %}</div>
+        {% elif r.inv_status == 'failed' %}
+          <div style="color:#b91c1c; white-space:pre-wrap; font-size:13px;">{{ r.inv_error }}</div>
+        {% endif %}
+      </div>
+    {% endif %}
+
+    {# Approved-for-build: a re-copyable, copy-paste-ready prompt for Claude Code. Pure text. #}
+    {% if r.status == 'approved_for_build' and r.build_prompt %}
+    <div style="margin-top:10px; border-left:3px solid #166534; padding:4px 0 4px 10px;">
+      <div style="font-weight:600; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+        Build prompt for Claude Code
+        <button class="btn secondary" type="button" style="padding:2px 10px;"
+                onclick="copyFixPrompt(this)">Copy build prompt</button>
+        <span class="copied-note muted" style="display:none; color:#166534; font-size:12px;">copied ✓</span>
+      </div>
+      <p class="muted" style="font-size:12px; margin:4px 0;">Paste this into Claude Code. It doesn't
+        run anything automatically — it's the prompt you'd otherwise type by hand.</p>
+      <textarea readonly rows="12" class="fixprompt" onclick="this.select();"
+        style="width:100%; box-sizing:border-box; font-family:ui-monospace,Consolas,monospace;
+               font-size:12px; white-space:pre; background:#f8fafc;">{{ r.build_prompt }}</textarea>
+    </div>
+    {% endif %}
+
+    {% if is_admin %}
+    <div style="margin-top:10px; display:flex; gap:6px; flex-wrap:wrap;">
+      <form method="post" action="/requests/{{ r.id }}/investigate" style="display:inline; margin:0;">
+        <button class="btn" type="submit" {{ 'disabled' if (busy or r.inv_status == 'running') }}
+                title="Run a read-only automated investigation">Investigate</button>
+      </form>
+      {% if r.status not in ('approved_for_build', 'done') %}
+      <form method="post" action="/requests/{{ r.id }}/approve" style="display:inline; margin:0;">
+        <button class="btn secondary" type="submit"
+                title="Label as approved for build (does not auto-build)">Approve for build</button>
+      </form>{% endif %}
+      {% if r.status != 'done' %}
+      <form method="post" action="/requests/{{ r.id }}/done" style="display:inline; margin:0;">
+        <button class="btn secondary" type="submit" title="Mark this request completed">Mark done</button>
+      </form>{% endif %}
+      {% if r.status != 'dismissed' %}
+      <form method="post" action="/requests/{{ r.id }}/dismiss" style="display:inline; margin:0;"
+            onsubmit="return confirm('Dismiss this request?');">
+        <button class="btn secondary" type="submit" style="color:#b91c1c;">Dismiss</button>
+      </form>{% endif %}
+    </div>
+    {% endif %}
+  </div>
+</details>
+{% endfor %}
+
+<script>
+// Copy a request's build prompt to the clipboard (same helper as Flags).
+function copyFixPrompt(btn){
+  var block = btn.closest('div').parentNode;
+  var box = block.querySelector('textarea.fixprompt');
+  if(!box) return;
+  var note = btn.parentNode.querySelector('.copied-note');
+  var done = function(){ if(note){ note.style.display=''; setTimeout(function(){ note.style.display='none'; }, 1500); } };
+  box.select(); box.setSelectionRange(0, box.value.length);
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(box.value).then(done, function(){ try{ document.execCommand('copy'); }catch(e){} done(); });
+  } else { try{ document.execCommand('copy'); }catch(e){} done(); }
+}
+</script>
+{% endblock %}

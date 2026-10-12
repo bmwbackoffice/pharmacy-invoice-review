@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block content %}
+<p><a href="/browse">&larr; back to browse</a></p>
+{% if saved %}<div class="ok-msg">Saved. Skip-QB and possible-duplicate were re-evaluated where relevant.</div>{% endif %}
+<div class="row">
+  <div class="card" style="flex:1 1 420px;">
+    <h3 style="margin-top:0;">Edit {{ record_type.replace('_',' ') }}</h3>
+    <p class="muted">{{ record.email_filename }}</p>
+    <form method="post" action="/edit/{{ record_type }}/{{ record.id }}">
+      {% for ui_field, col in fields.items() %}
+        <label>{{ ui_field.replace('_',' ')|title }}</label>
+        {% if ui_field == 'store' %}
+          {% set cur = record[col] if record[col] is not none else '' %}
+          <select name="{{ ui_field }}">
+            <option value=""></option>
+            {% for s in stores %}<option value="{{ s }}" {{ 'selected' if s == cur }}>{{ s | store_label }}</option>{% endfor %}
+            {% if cur and cur not in stores %}<option value="{{ cur }}" selected>{{ cur }} (not in list)</option>{% endif %}
+          </select>
+        {% elif ui_field == 'date' %}
+          <input type="date" name="{{ ui_field }}" value="{{ record[col] if record[col] is not none else '' }}">
+        {% else %}
+          <input name="{{ ui_field }}" value="{{ record[col] if record[col] is not none else '' }}">
+        {% endif %}
+      {% endfor %}
+      <div style="margin-top:14px;"><button class="btn" type="submit">Save changes</button></div>
+    </form>
+
+    <p class="muted" style="margin-top:14px;">
+      Skip QB import: <b>{{ 'Yes' if record.skip_qb_import else 'No' }}</b>
+      {% if 'duplicate_suspect' in record %} · Possible duplicate:
+        <b>{{ 'Yes' if record.duplicate_suspect else 'No' }}</b>{% endif %}
+      {% if record.edited_by %} · last edited by {{ record.edited_by }} at {{ record.edited_at | us_datetime }}{% endif %}
+    </p>
+
+    <h4>Change history</h4>
+    <table>
+      <thead><tr><th>When</th><th>Field</th><th>Old</th><th>New</th><th>By</th></tr></thead>
+      <tbody>
+      {% for e in log %}
+        <tr><td class="muted">{{ e.changed_at | us_datetime }}</td>
+            <td>{{ e.field }}</td><td>{{ e.old_value or '' }}</td>
+            <td>{{ e.new_value or '' }}</td><td>{{ e.changed_by }}</td></tr>
+      {% else %}
+        <tr><td colspan="5" class="muted">No edits yet.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card preview" style="flex:1 1 560px;">
+    <h3 style="margin-top:0;">Source document</h3>
+    {% if preview %}
+      <div class="preview-actions"><a class="btn secondary" href="{{ preview }}" target="_blank" style="padding:4px 10px;">Open full size ↗</a>
+        <span class="muted"> · drag the preview's bottom edge to resize</span></div>
+      {% if preview.lower().endswith('.pdf') %}<iframe src="{{ preview }}"></iframe>
+      {% elif preview.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp')) %}<img src="{{ preview }}">
+      {% else %}<a href="{{ preview }}" target="_blank">open document</a>{% endif %}
+    {% else %}<p class="muted">No source file.</p>{% endif %}
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<p><a href="/review">&larr; back to review queue</a></p>
+<h2>Ignored items <span class="muted">({{ items|length }})</span></h2>
+<p class="muted">Dismissed review items. They were removed from the queue without reprocessing; the
+  original snapshot is kept so any one can be restored back into the queue.</p>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Received</th><th>Ignored</th><th>Vendor</th><th>Store</th><th>Invoice #</th>
+      <th class="num">Amount</th><th>Why flagged</th><th>By</th><th>Reason</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for it in items %}
+      <tr>
+        <td class="muted" style="white-space:nowrap;">{{ (it.email_received_at | us_datetime) or '—' }}</td>
+        <td class="muted" style="white-space:nowrap;">
+          {{ (it.ignored_at | us_datetime) or '—' }}</td>
+        <td>{{ it.vendor_matched or '—' }}</td>
+        <td>{{ (it.store_matched | store_label) or '—' }}</td>
+        <td style="white-space:nowrap;">{{ it.invoice_number or '—' }}</td>
+        <td class="num">{% if it.amount not in (none, '') %}{{ money(it.amount|float) }}{% else %}—{% endif %}</td>
+        <td class="muted">{{ it.question or '' }}
+          {% if it.source_email %}<br><a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">records</a>{% endif %}
+          {% if it.gmail_link %} · <a href="{{ it.gmail_link }}" target="_blank">Email link</a>{% endif %}
+        </td>
+        <td>{{ it.ignored_by or '—' }}</td>
+        <td>{{ it.ignore_reason or '' }}</td>
+        <td style="white-space:nowrap;">
+          <form method="post" action="/ignored/{{ it.id }}/restore" style="margin:0;">
+            <button class="btn" type="submit">Restore</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="10" class="muted" style="padding:18px;">Nothing ignored.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Learnings <span class="muted">({{ items|length }} rules)</span></h2>
+<p class="muted">These durable rules are injected into the model on every <code>classify_emails.py</code> run.
+  Edits here take effect on the next run.</p>
+
+<div class="card">
+  <h3 style="margin-top:0;">Add a rule</h3>
+  <form method="post" action="/learnings/add">
+    <textarea name="rule" rows="2" placeholder="e.g. Invoices billed to 'Lakewood Pharmacy' at 911 E County Line Rd = Refuah Pharmacy" required></textarea>
+    <div style="margin-top:10px;"><button class="btn" type="submit">Add rule</button></div>
+  </form>
+</div>
+
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr><th style="width:52%;">Rule</th><th>Origin</th><th>Last changed</th><th></th></tr></thead>
+    <tbody>
+    {% for it in items %}
+      <tr>
+        <td>
+          <form method="post" action="/learnings/edit" style="margin:0;">
+            <input type="hidden" name="old_rule" value="{{ it.learned_rule }}">
+            <textarea name="rule" rows="2">{{ it.learned_rule }}</textarea>
+            <div style="margin-top:6px;"><button class="btn secondary" type="submit" style="padding:4px 10px;">Save edit</button></div>
+          </form>
+        </td>
+        <td class="muted">
+          {{ it.from_email or '—' }}<br>
+          {% if it.created_by %}created by {{ it.created_by }}{% if it.created_at %} · {{ it.created_at | us_date }}{% endif %}{% endif %}
+        </td>
+        <td class="muted">
+          {% if it.edited_by %}{{ it.edited_by }}{% if it.edited_at %} · {{ it.edited_at | us_datetime }}{% endif %}{% else %}—{% endif %}
+        </td>
+        <td>
+          {% if user.role == 'admin' %}
+          <form method="post" action="/learnings/delete" style="margin:0;"
+                onsubmit="return confirm('Delete this learning? It will no longer be applied on future runs.');">
+            <input type="hidden" name="rule" value="{{ it.learned_rule }}">
+            <button class="btn" style="background:#b91c1c;padding:4px 10px;" type="submit">Delete</button>
+          </form>
+          {% else %}<span class="muted">admin only</span>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="4" class="muted" style="padding:18px;">No learnings yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

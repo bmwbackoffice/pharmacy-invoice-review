@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money, outcome, ignore_vendor_button %}
+{% block content %}
+<p><a href="/browse">&larr; back to Records</a></p>
+<h2>{{ rec.record_type|replace('_',' ')|capitalize }} details
+  <span class="muted">· {{ outcome(rec) }}</span></h2>
+
+<div class="row">
+  <div class="card" style="flex:1 1 420px;">
+    <h3 style="margin-top:0;">Record</h3>
+    <table>
+      <tr><th>Type</th><td>{{ rec.record_type }}{% if rec.record_type == 'review' %} · <a href="/review/{{ rec.id }}">open in review</a>{% endif %}</td></tr>
+      <tr><th>Vendor</th><td>{{ rec.vendor or '—' }}</td></tr>
+      {% if rec.record_type in ('invoice','credit_memo') %}
+      <tr><th>QuickBooks vendor</th>
+          <td>
+            {{ rec.qb_vendor or '—' }}
+            {# Only when the matched name isn't one of the spellings Setup lists for this standard vendor
+               (a fuzzy guess or a stale mapping) — not for ordinary spelling differences. #}
+            {% if rec.vendor_mapping_doubt and rec.qb_vendor %}
+              <span class="pill" style="background:#fef3c7;color:#92400e;" title="“{{ rec.vendor }}” isn't one of the spellings listed for “{{ rec.standard_vendor }}” in Setup › Vendor names — it was matched by a close guess or an older mapping. Check it's the right vendor; if it is, add the spelling in Setup.">⚠ differs from matched vendor</span>
+            {% endif %}
+          </td></tr>
+      {% endif %}
+      <tr><th>Store</th><td>{{ (rec.store | store_label) or '—' }}</td></tr>
+      <tr><th>Number</th><td>{{ rec.number or '—' }}</td></tr>
+      {% if rec.record_type == 'payment' %}
+      <tr><th>Applied to invoice</th><td>{{ rec.applied_invoice or '—' }}</td></tr>
+      {% endif %}
+      <tr><th>Amount</th><td>{{ money(rec.amount) or '—' }}
+        {% if rec.total_source == 'derived' %}<span class="muted">· added up from line items (no printed total)</span>
+        {% elif rec.total_source == 'stated' %}<span class="muted">· printed total</span>{% endif %}</td></tr>
+      <tr><th>Record date</th><td>{{ (rec.record_date | us_date) or '—' }}</td></tr>
+      <tr><th>Class</th><td>{{ rec.klass or '—' }}</td></tr>
+    </table>
+    {# One-click exclude for a non-real vendor (invoices/credit memos only — payments always enter QB
+       regardless of vendor). Returns to this record with a flash. #}
+    {% if rec.record_type in ('invoice','credit_memo') and rec.vendor and not rec.skip_qb_import %}
+    <p class="muted" style="margin:8px 0 0;">Not a real vendor?
+      {{ ignore_vendor_button(rec.vendor, '/records/' ~ rec.record_type ~ '/' ~ rec.id,
+                              'Ignore this vendor', 'linklike') }}
+      — excludes all its invoices from QuickBooks.</p>
+    {% endif %}
+
+    <h3>Source &amp; timing</h3>
+    <table>
+      <tr><th>Sender</th><td>{{ rec.sender or '—' }}</td></tr>
+      <tr><th>Received</th><td>{{ (rec.received_at | us_datetime) or '—' }}</td></tr>
+      <tr><th>Processed / recorded</th><td>{{ (rec.date_added | us_date) or '—' }}</td></tr>
+      <tr><th>Run</th><td>
+        {% if rec.run_id %}<a href="/browse?source=records&run={{ rec.run_id }}">{{ rec.run_id }}</a>
+          {% if rec.run_started_at %}<div class="muted">started {{ rec.run_started_at | us_datetime }}{% if rec.run_finished_at %} · finished {{ rec.run_finished_at | us_datetime }}{% endif %}</div>{% endif %}
+        {% else %}<span class="muted">—</span>{% endif %}
+      </td></tr>
+      <tr><th>Email status</th><td>{{ rec.email_status or '—' }}</td></tr>
+      <tr><th>Source email</th><td>
+        {% if rec.email_filename %}<a href="/browse?email={{ rec.email_filename|urlencode }}" title="{{ rec.email_filename }}">records from this email</a>{% else %}—{% endif %}
+      </td></tr>
+      <tr><th>Links</th><td style="white-space:nowrap;">
+        {% if preview %}<a href="{{ preview }}" target="_blank">File link</a>{% endif %}
+        {% if rec.gmail_link %}{% if preview %} · {% endif %}<a href="{{ rec.gmail_link }}" target="_blank">Email link</a>{% endif %}
+        {% if rec.email_filename %}{% if preview or rec.gmail_link %} · {% endif %}<a href="/browse?email={{ rec.email_filename|urlencode }}">records</a>{% endif %}
+        {% if not preview and not rec.gmail_link and not rec.email_filename %}—{% endif %}
+      </td></tr>
+    </table>
+  </div>
+
+  <div class="card preview" style="flex:1 1 460px;">
+    <h3 style="margin-top:0;">Source document</h3>
+    {% if preview %}
+      <div class="preview-actions"><a class="btn secondary" href="{{ preview }}" target="_blank" style="padding:4px 10px;">Open full size ↗</a></div>
+      {% if preview.lower().endswith('.pdf') %}<iframe src="{{ preview }}"></iframe>
+      {% elif preview.lower().endswith(('.png','.jpg','.jpeg','.gif','.webp')) %}<img src="{{ preview }}" alt="source document">
+      {% else %}<a href="{{ preview }}" target="_blank">open document</a>{% endif %}
+    {% else %}<p class="muted">No source file recorded for this record.</p>{% endif %}
+  </div>
+</div>
+
+<div class="card">
+  <h3 style="margin-top:0;">Outcome</h3>
+  <p style="font-size:15px;"><strong>{{ outcome(rec) }}</strong></p>
+  {% if rec.review_reason and (rec.record_type == 'review' or rec.needs_review) %}
+    <p class="muted">Review reason: {{ rec.review_reason }}</p>{% endif %}
+  {% if rec.duplicate_reason %}
+    <p class="muted">Duplicate check: {{ rec.duplicate_reason }}
+      {% if rec.duplicate_of %} · duplicates <a href="/browse?email={{ rec.duplicate_of|urlencode }}">{{ rec.duplicate_of }}</a>{% endif %}</p>{% endif %}
+  {% if rec.record_type in ('invoice','payment') %}
+    {% if rec.duplicate_ignored %}
+      <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/duplicate" style="display:inline">
+        <input type="hidden" name="action" value="restore">
+        <button class="btn secondary" type="submit">Restore (not a duplicate)</button>
+      </form>
+    {% else %}
+      <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/duplicate"
+            style="display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin-top:6px;">
+        <input type="hidden" name="action" value="ignore">
+        <input type="text" name="duplicate_of" placeholder="email filename of the original (optional)" style="max-width:340px;">
+        <button class="btn secondary" type="submit">Ignore as duplicate</button>
+      </form>
+    {% endif %}
+  {% endif %}
+  {# Manual per-record Ignore / Restore (independent of vendor rules + duplicate detection). #}
+  {% if rec.skip_qb_import and rec.ignored_by %}
+    <p class="muted">Ignored by {{ rec.ignored_by }}{% if rec.ignored_at %} · {{ rec.ignored_at | us_date }}{% endif %} — recorded, not entered in QuickBooks.
+      <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/ignore" style="display:inline">
+        <input type="hidden" name="ignored" value="0">
+        <button class="btn secondary" type="submit">Restore (re-include in QB)</button>
+      </form></p>
+  {% elif rec.skip_qb_import %}
+    <p class="muted">Excluded vendor — recorded for reference, but not entered in QuickBooks.</p>
+  {% elif rec.record_type in ('invoice','credit_memo','payment') %}
+    <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/ignore" style="display:inline">
+      <input type="hidden" name="ignored" value="1">
+      <button class="btn secondary" type="submit">Ignore (exclude from QB)</button>
+    </form>
+  {% endif %}
+  {% if rec.entered_in_qb %}<p class="muted">Marked entered in QuickBooks.</p>{% endif %}
+  {% if rec.notes_field %}<p class="muted">Record notes: {{ rec.notes_field }}</p>{% endif %}
+
+  <h4>Processing timeline</h4>
+  <ul class="muted" style="margin:0; padding-left:18px;">
+    <li>Received {{ (rec.received_at | us_datetime) or '(receive time unknown)' }}{% if rec.sender %} from {{ rec.sender }}{% endif %}</li>
+    <li>Processed{% if rec.run_id %} in run <a href="/browse?source=records&run={{ rec.run_id }}">{{ rec.run_id }}</a>{% endif %}{% if rec.date_added %} · recorded {{ rec.date_added | us_date }}{% endif %}</li>
+    <li>Current outcome: <strong>{{ outcome(rec) }}</strong></li>
+  </ul>
+
+  {% if notes %}
+  <h4>Internal notes ({{ notes|length }})</h4>
+  {% for n in notes %}
+    <div style="border-bottom:1px solid var(--line); padding:4px 0;">
+      <div style="white-space:pre-wrap;">{{ n.note }}</div>
+      <div class="muted" style="font-size:12px;">{{ n.author or 'someone' }}{% if n.created_at %} · {{ n.created_at | us_datetime }}{% endif %}</div>
+    </div>
+  {% endfor %}
+  {% endif %}
+</div>
+
+{% if rec.record_type in ('invoice','credit_memo','payment') %}
+<div class="card">
+  <h3 style="margin-top:0;">Flag for review</h3>
+  {% if flagged %}<div class="ok-msg">Flagged for review — an admin will see it on the
+    <a href="/flags">Flags</a> page.</div>{% endif %}
+  <p class="muted" style="margin-top:4px;">See something wrong with this record, or want it looked
+    into? Describe it below. An admin can then review it and, if useful, run an automated read-only
+    investigation.</p>
+  <form method="post" action="/records/{{ rec.record_type }}/{{ rec.id }}/flag">
+    <textarea name="note" rows="3" required
+              style="width:100%; max-width:620px; display:block;"
+              placeholder="What looks wrong, or what should be looked at?"></textarea>
+    <div style="margin-top:8px;">
+      <button class="btn" type="submit">Flag for review</button>
+      <a class="btn secondary" href="/flags">View flags</a>
+    </div>
+  </form>
+</div>
+{% endif %}
+{% endblock %}

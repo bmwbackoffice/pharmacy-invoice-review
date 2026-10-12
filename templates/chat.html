@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Chat <span class="muted">· ask about invoices, payments &amp; review items</span></h2>
+<p class="muted">Answers are grounded in the database (read-only) and cite real records. It can't change anything.
+  Try: “why is invoice #596 a possible duplicate?”, “total entered in QB for Maple Pharmacy this month”,
+  “what's still in the review queue?”.</p>
+
+<div class="card" id="chatlog" style="height:60vh; overflow-y:auto; display:flex; flex-direction:column; gap:10px;">
+  <div class="muted" id="empty">No messages yet — ask a question below.</div>
+</div>
+
+<div class="card">
+  <div style="display:flex; gap:10px; align-items:flex-end;">
+    <textarea id="q" rows="2" placeholder="Ask a question…  (Enter to send, Shift+Enter for a new line)"
+              style="flex:1;" onkeydown="onKey(event)"></textarea>
+    <button class="btn" id="sendbtn" onclick="send()">Send</button>
+  </div>
+  <div class="muted" id="chips" style="margin-top:8px;">
+    {% set examples = [
+      "What is still in the review queue?",
+      "Which payments are flagged as possible duplicates?",
+      "Total amount recorded per store",
+    ] %}
+    {% for ex in examples %}<a href="#" class="pill skip" style="text-decoration:none; margin-right:6px;"
+        onclick="ask(this.textContent); return false;">{{ ex }}</a>{% endfor %}
+  </div>
+</div>
+
+<script>
+// NB: do NOT name this 'history' — that collides with the read-only window.history
+// global, which silently breaks assignment and throws on .slice()/.push().
+var convo = [];            // [{role, content}] — short context sent with each question
+var busy = false;
+
+function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+function bubble(role, text, tools) {
+  var log = document.getElementById('chatlog');
+  var empty = document.getElementById('empty'); if (empty) empty.remove();
+  var mine = role === 'user';
+  var wrap = document.createElement('div');
+  wrap.style.cssText = 'max-width:82%; align-self:' + (mine ? 'flex-end' : 'flex-start') + ';';
+  var b = document.createElement('div');
+  b.style.cssText = 'padding:9px 12px; border-radius:10px; white-space:pre-wrap; word-wrap:break-word; ' +
+    (mine ? 'background:#2b6cb0; color:#fff;' : 'background:#eef2f7; color:#1f2430; border:1px solid #e5e7eb;');
+  b.innerHTML = esc(text);
+  wrap.appendChild(b);
+  if (tools && tools.length) {
+    var t = document.createElement('div');
+    t.className = 'muted'; t.style.cssText = 'font-size:11px; margin-top:3px;';
+    t.textContent = 'looked up: ' + tools.join(', ');
+    wrap.appendChild(t);
+  }
+  log.appendChild(wrap);
+  log.scrollTop = log.scrollHeight;
+  return b;
+}
+
+function onKey(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); }
+}
+
+function ask(text) { document.getElementById('q').value = text; send(); }
+
+function send() {
+  if (busy) return;
+  var q = document.getElementById('q').value.trim();
+  if (!q) return;
+  busy = true; document.getElementById('sendbtn').disabled = true;
+  document.getElementById('q').value = '';
+  bubble('user', q);
+  var priorHistory = convo.slice(-8);
+  convo.push({ role: 'user', content: q });
+  var thinking = bubble('assistant', '…thinking…');
+  function clearThinking() { if (thinking && thinking.parentNode) { thinking.parentNode.remove(); thinking = null; } }
+
+  // Client-side abort (a bit longer than the server's 60s call timeout) so the UI can
+  // never hang forever waiting on a stalled request.
+  var controller = new AbortController();
+  var timer = setTimeout(function () { controller.abort(); }, 90000);
+
+  fetch('/chat/ask', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question: q, history: priorHistory }), signal: controller.signal
+  }).then(function (r) {
+    if (!r.ok) {                         // non-200 → show it as text, never a silent hang
+      if (r.status === 401) return { answer: 'Your session expired — please sign in again.' };
+      return r.text().then(function (t) { return { answer: 'Request failed (HTTP ' + r.status + '). ' + (t || '').slice(0, 300) }; });
+    }
+    return r.json();
+  }).then(function (d) {
+    clearTimeout(timer); clearThinking();
+    var ans = (d && (d.answer || d.error)) || '(no answer)';
+    bubble('assistant', ans, d && d.tools_used);
+    convo.push({ role: 'assistant', content: ans });
+  }).catch(function (e) {
+    clearTimeout(timer); clearThinking();
+    var msg = (e && e.name === 'AbortError')
+      ? 'The request timed out — please try again or narrow the question.'
+      : ('Sorry — the request failed (' + (e && e.message ? e.message : e) + ').');
+    bubble('assistant', msg);
+  }).finally(function () {
+    busy = false; document.getElementById('sendbtn').disabled = false;
+    document.getElementById('q').focus();
+  });
+}
+</script>
+{% endblock %}

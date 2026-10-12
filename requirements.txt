@@ -1,0 +1,22 @@
+# Pinned 2026-10-08: an auto-update to 0.116.0 made the SDK's messages.create hang indefinitely
+# (ignored its own timeout) on this machine; the pipeline now calls the API via raw httpx
+# (classify_emails._create_message) and only uses the SDK for the client object, so 0.116.0 is fine
+# frozen here. Re-test classify_emails before widening this (test_api.py / test_api_raw.py).
+anthropic==0.116.0
+extract-msg>=0.45.0
+openpyxl>=3.1.0
+pypdf>=4.0.0
+Pillow>=10.0.0
+google-auth>=2.0.0
+google-auth-oauthlib>=1.0.0
+google-api-python-client>=2.0.0
+psycopg2-binary>=2.9.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+jinja2>=3.1.0
+python-multipart>=0.0.9
+bcrypt>=4.1.0
+itsdangerous>=2.1.0
+playwright>=1.40.0
+pymupdf>=1.24.0
+rapidfuzz>=3.0.0

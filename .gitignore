@@ -1,0 +1,29 @@
+# Secrets and machine-specific auth -- never commit
+credentials*.json
+token.json
+.env
+*.env
+ca_bundle.pem
+.claude/
+Internal notes/
+
+# Real financial data (emails, invoices, payments, uploads, exports)
+processed_emails/
+invoice_files/
+payment_files/
+review_pending/
+test_emails/
+qb_imports/
+output/
+Claude outputs/
+Manual Instructions/
+*.pdf
+*.xlsx
+*.docx
+*.wav
+
+# Scratch / generated
+__pycache__/
+*.pyc
+_tmp_view/
+_to_delete/

@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pharmacy Invoice Review</title>
+  <style>
+    :root { --bg:#f6f7f9; --card:#fff; --ink:#1f2430; --muted:#6b7280; --line:#e5e7eb;
+            --brand:#2b6cb0; --ok:#137547; --warn:#b45309; --bad:#b91c1c; --zebra:#e7ecf2; }
+    * { box-sizing: border-box; }
+    body { margin:0; font:14px/1.5 system-ui,Segoe UI,Roboto,Arial,sans-serif; color:var(--ink); background:var(--bg); }
+    header { background:var(--card); border-bottom:1px solid var(--line); padding:10px 18px;
+             display:flex; align-items:center; gap:16px; position:sticky; top:0; z-index:5; }
+    header .brand { font-weight:700; color:var(--brand); }
+    /* ---- Grouped dropdown nav: each group has a primary link (navigates) + an optional
+       caret opening a dropdown of secondary links. Opens on hover, on keyboard focus
+       (:focus-within), and on click/tap (.open toggled by JS). ---- */
+    header nav { display:flex; flex-wrap:wrap; align-items:center; gap:2px; }
+    .navgroup { position:relative; display:inline-flex; align-items:stretch; }
+    .navgroup-head { display:inline-flex; align-items:center; border-radius:6px; }
+    /* Parent-of-current-page: underline the whole group so the section is obvious. */
+    .navgroup-head.active { box-shadow: inset 0 -3px 0 var(--brand); }
+    .navtop { color:var(--ink); text-decoration:none; font-weight:700; padding:6px 8px 6px 10px;
+              border-radius:6px 0 0 6px; display:inline-block; background:none; border:0;
+              font:inherit; cursor:pointer; }
+    .navgroup-head.active .navtop { color:var(--brand); }
+    .navtop:hover { color:var(--brand); background:#eef4fb; }
+    .navtop.current { color:var(--brand); background:#eaf1fb; }   /* exactly on this primary page */
+    .navcaret { color:var(--muted); background:none; border:0; cursor:pointer; font-size:11px;
+                padding:6px 8px; border-radius:0 6px 6px 0; line-height:1; }
+    .navcaret:hover { color:var(--brand); background:#eef4fb; }
+    .navgroup.nocaret .navtop { border-radius:6px; }             /* Users: no dropdown */
+    .navmenu { display:none; position:absolute; top:100%; left:0; min-width:172px;
+               background:var(--card); border:1px solid var(--line); border-radius:8px;
+               box-shadow:0 8px 24px rgba(0,0,0,.12); padding:6px; z-index:20; }
+    .navgroup:hover > .navmenu, .navgroup:focus-within > .navmenu,
+    .navgroup.open > .navmenu { display:block; }
+    .navmenu a { display:block; color:var(--ink); text-decoration:none; font-weight:600;
+                 padding:7px 10px; border-radius:6px; white-space:nowrap; }
+    .navmenu a:hover { color:var(--brand); background:#eef4fb; }
+    .navmenu a.active { color:var(--brand); background:#eaf1fb; box-shadow: inset 0 -3px 0 var(--brand); }
+    header .right { margin-left:auto; color:var(--muted); }
+    /* Wide layout: use most of the viewport (capped) so data tables get room, keeping side padding. */
+    main { max-width:min(96vw, 1800px); margin:20px auto; padding:0 18px; }
+    .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
+    table { width:100%; border-collapse:collapse; background:var(--card); }
+    th, td { text-align:left; padding:4px 10px; border-bottom:1px solid var(--line); vertical-align:top; }
+    th { background:#fafbfc; position:sticky; top:52px; }
+    /* Zebra striping on data rows (row-level bg so per-td hover paints over it). */
+    tbody tr:nth-child(even) { background:var(--zebra); }
+    tr:hover td { background:#eef4fb; }
+    a { color:var(--brand); }
+    .btn { display:inline-block; background:var(--brand); color:#fff; border:0; border-radius:6px;
+           padding:8px 14px; cursor:pointer; text-decoration:none; font-size:14px; }
+    .btn.secondary { background:#e5e7eb; color:var(--ink); }
+    /* Small inline text-button for row actions (looks like a link, submits a form). */
+    .linklike { background:none; border:0; color:var(--brand); cursor:pointer; padding:0;
+                font:inherit; text-decoration:underline; }
+    .linklike:hover { color:#1e4e79; }
+    .btn.ok { background:var(--ok); }
+    input, textarea, select { font:inherit; padding:7px 9px; border:1px solid var(--line); border-radius:6px; width:100%; }
+    label { font-size:12px; color:var(--muted); display:block; margin:8px 0 2px; }
+    .row { display:flex; gap:14px; flex-wrap:wrap; }
+    .row > * { flex:1 1 180px; }
+    .pill { display:inline-block; padding:2px 8px; border-radius:999px; font-size:12px; }
+    .pill.dup { background:#fef3c7; color:var(--warn); }
+    .pill.skip { background:#e5e7eb; color:var(--muted); }
+    .pill.rev { background:#fee2e2; color:var(--bad); }
+    .muted { color:var(--muted); font-size:12px; }
+    /* Inline source-document preview: fills most of the viewport by default and
+       is user-resizable (drag the bottom-right corner); "open full size" opens
+       the raw doc in a new tab. */
+    .preview iframe, .preview img { width:100%; height:82vh; min-height:480px; border:1px solid var(--line); border-radius:6px; background:#fff; object-fit:contain; resize:vertical; overflow:auto; display:block; }
+    .preview .preview-actions { margin-bottom:8px; }
+    .error { background:#fee2e2; color:var(--bad); padding:8px 12px; border-radius:6px; margin-bottom:12px; }
+    .ok-msg { background:#dcfce7; color:var(--ok); padding:8px 12px; border-radius:6px; margin-bottom:12px; }
+    .num { text-align:right; font-variant-numeric:tabular-nums; }
+  </style>
+</head>
+<body>
+  {% if user %}
+  <header>
+    <span class="brand">Invoice Review</span>
+    {% set path = request.url.path %}
+    {# Grouped nav: each group = {href (primary link, or none for Setup), label, admin_only,
+       children:[(href,label)...]}. Routes are unchanged — this only regroups the links. #}
+    {% set nav_groups = [
+        {'href':'/dashboard',   'label':'Dashboard',    'children':[]},
+        {'href':'/review',      'label':'Review queue', 'children':[('/statements','Statements'),('/flags','Flags'),('/requests','Requests'),('/tracked','Tracked'),('/ignored','Ignored'),('/sales-orders','Sales orders')]},
+        {'href':'/qb',          'label':'QB entry',     'children':[('/payments','Payments'),('/qb-reconcile','QB reconcile')]},
+        {'href':'/chat',        'label':'Chat',         'children':[('/learnings','Learnings')]},
+        {'href':'/browse',      'label':'Records',      'children':[('/emails','Emails'),('/duplicates','Duplicates')]},
+        {'href':none,           'label':'Setup',        'children':[('/reference/stores','Stores'),('/reference/sender_store_map','Senders'),('/reference/contact_store_map','Contacts'),('/cards','Cards'),('/reference/class_rules','Class rules'),('/reference/store_scope_rules','Store rules'),('/reference/vendor_name_map','Vendor names'),('/reference/account_name_map','Account names'),('/reference/vendor_account_assignment','Vendor→account')]},
+        {'href':'/admin/users', 'label':'Users',        'admin_only':true, 'children':[]},
+    ] %}
+    {% macro is_here(href) -%}
+      {{ 'y' if href and (path == href or (href != '/' and path.startswith(href ~ '/')) or (href == '/review' and path == '/')) else '' }}
+    {%- endmacro %}
+    <nav id="topnav">
+      {% for g in nav_groups %}
+        {% if not g.get('admin_only') or user.role == 'admin' %}
+          {# active = on the primary page OR on any child page → underline the group #}
+          {% set on_primary = (is_here(g.href) | trim) == 'y' %}
+          {% set ns = namespace(child_here=false) %}
+          {% for chref, chlabel in g.children %}{% if (is_here(chref) | trim) == 'y' %}{% set ns.child_here = true %}{% endif %}{% endfor %}
+          <div class="navgroup{{ ' nocaret' if not g.children }}">
+            <div class="navgroup-head{{ ' active' if on_primary or ns.child_here }}">
+              {% if g.href %}
+                <a href="{{ g.href }}" class="navtop{{ ' current' if on_primary }}">{{ g.label }}</a>
+              {% else %}
+                <button type="button" class="navtop" onclick="toggleNav(this)" aria-haspopup="true">{{ g.label }}</button>
+              {% endif %}
+              {% if g.children %}
+                <button type="button" class="navcaret" onclick="toggleNav(this)"
+                        aria-haspopup="true" aria-label="{{ g.label }} menu">▾</button>
+              {% endif %}
+            </div>
+            {% if g.children %}
+              <div class="navmenu">
+                {% for chref, chlabel in g.children %}
+                  <a href="{{ chref }}" class="{{ 'active' if (is_here(chref) | trim) == 'y' else '' }}">{{ chlabel }}{% if chref == '/tracked' and tracked_open %} ({{ tracked_open }}){% endif %}</a>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        {% endif %}
+      {% endfor %}
+    </nav>
+    <span class="right">{{ user.display_name }} ({{ user.role }}) · <a href="/logout">log out</a></span>
+  </header>
+  {% endif %}
+  <main>
+    {# Sitewide maintenance notice (set via notice.py or Admin). Rendered on first load from
+       render()'s `notice`; the poller below keeps it live for someone already on the page. #}
+    {% if notice %}
+    <div id="notice-banner" class="card" style="background:#fef9c3; border-color:#eab308; margin-bottom:10px;">
+      ⚠️ {{ notice.message }}
+    </div>
+    {% endif %}
+    {# Global one-line flash (e.g. the one-click "Ignore this vendor" confirmation). Any page can
+       receive it via a ?flash=... redirect; shown once on load, not persisted. #}
+    {% set _flash = request.query_params.get('flash') %}
+    {% if _flash %}<div class="ok-msg">{{ _flash }}</div>{% endif %}
+    {% block content %}{% endblock %}
+  </main>
+  {% if user %}
+  <script>
+    // Dropdown nav: click/tap a caret (or the Setup label) to pin a menu open; hover and
+    // keyboard focus (:focus-within) open it too, in CSS. Outside click/tap closes any pinned menu.
+    function toggleNav(btn) {
+      var g = btn.closest('.navgroup'), open = g.classList.contains('open');
+      document.querySelectorAll('#topnav .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
+      if (!open) g.classList.add('open');
+    }
+    document.addEventListener('click', function (e) {
+      if (!e.target.closest('#topnav')) {
+        document.querySelectorAll('#topnav .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
+      }
+    });
+    // Amount filter (see _macros.html amount_filter): flip between a single EXACT field and a
+    // Min/Max range. The hidden group's inputs are disabled so only the active one submits.
+    function amtToggle(link) {
+      var box = link.closest('.amtfilter');
+      var toRange = box.dataset.range !== '1';
+      box.dataset.range = toRange ? '1' : '0';
+      var ex = box.querySelector('.amt-exact'), rg = box.querySelector('.amt-range');
+      ex.style.display = toRange ? 'none' : '';
+      rg.style.display = toRange ? '' : 'none';
+      ex.querySelectorAll('input').forEach(function (i) { i.disabled = toRange; });
+      rg.querySelectorAll('input').forEach(function (i) { i.disabled = !toRange; });
+    }
+    // Poll every 20s so someone already on a page sees a new maintenance notice appear (or
+    // disappear) without having to navigate — a banner that only shows on next page load
+    // defeats the point of warning someone mid-task.
+    setInterval(async () => {
+      try {
+        const r = await fetch('/api/notice');
+        const { notice } = await r.json();
+        let el = document.getElementById('notice-banner');
+        if (notice) {
+          if (!el) {
+            el = document.createElement('div');
+            el.id = 'notice-banner';
+            el.className = 'card';
+            el.style.cssText = 'background:#fef9c3;border-color:#eab308;margin-bottom:10px;';
+            document.querySelector('main, body').prepend(el);
+          }
+          el.textContent = '⚠️ ' + notice.message;
+        } else if (el) {
+          el.remove();
+        }
+      } catch (e) { /* ignore a transient fetch failure */ }
+    }, 20000);
+  </script>
+  {% endif %}
+</body>
+</html>

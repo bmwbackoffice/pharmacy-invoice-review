@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<p><a href="/review">&larr; back to review queue</a></p>
+<h2>Tracked outcomes <span class="muted">({{ items|length }} open)</span></h2>
+<p class="muted">Answered items you chose to track. Each outcome is derived live from the pipeline's
+  own results — no extra API calls — so it updates on its own as classify runs happen. Confirm how an
+  answer resolved before turning it into a general rule, then <b>Mark done</b> to clear it.</p>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Vendor</th><th>Invoice #</th><th>Your answer</th><th>Original flag reason</th>
+      <th>Outcome</th><th>Tracked</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for it in items %}
+      <tr>
+        <td>{{ it.vendor_matched or '—' }}</td>
+        <td style="white-space:nowrap;">{{ it.invoice_number or '—' }}</td>
+        <td class="muted" style="max-width:280px;">{{ it.answer_given or '—' }}</td>
+        <td class="muted" style="max-width:280px;">{{ it.original_question or '—' }}</td>
+        <td style="min-width:220px;">
+          {% if it.outcome == 'resolved' %}
+            <span class="pill" style="background:#dcfce7;color:#166534;">Resolved</span>
+            <div>{% if it.rec_amount not in (none, '') %}{{ money(it.rec_amount|float) }}{% endif %}
+              {% if it.rec_store %}@ {{ it.rec_store }}{% endif %}
+              {% if it.rec_type == 'payment' %}<span class="muted">· payment{% if it.rec_entered %} · entered{% endif %}</span>
+              {% elif it.rec_skip %}<span class="pill skip">skip-QB</span>
+              {% elif it.rec_entered %}<span class="muted">· entered in QB</span>
+              {% else %}<span class="muted">· not yet entered</span>{% endif %}
+            </div>
+          {% elif it.outcome == 'still_flagged' %}
+            <span class="pill rev">Still flagged</span>
+            <div class="muted">{{ it.current_question or 'reprocessed but flagged again' }}</div>
+          {% elif it.outcome == 'pending' %}
+            <span class="pill" style="background:#fef3c7;color:#92400e;">Pending</span>
+            <div class="muted">answered — awaiting the next classify run</div>
+          {% else %}
+            <span class="pill" style="background:#e5e7eb;color:#374151;">No record</span>
+            <div class="muted">dropped or ignored (not recorded)</div>
+            {% if it.elsewhere_email %}<div class="muted">the same vendor and # is recorded from
+              <a href="/browse?email={{ it.elsewhere_email|urlencode }}" title="{{ it.elsewhere_email }}">another email</a></div>{% endif %}
+          {% endif %}
+        </td>
+        <td class="muted" style="white-space:nowrap;">
+          {{ it.tracked_by or '—' }}{% if it.tracked_at %}<br>{{ it.tracked_at | us_datetime }}{% endif %}</td>
+        <td style="white-space:nowrap;">
+          {% if it.source_email %}<a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">records</a> · {% endif %}
+          <a href="/learnings">add rule</a>
+          <form method="post" action="/tracked/{{ it.id }}/done" style="display:inline;margin:0 0 0 6px;">
+            <button class="btn secondary" type="submit" style="padding:4px 10px;">Mark done</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="muted" style="padding:18px;">Nothing tracked. Tick “Track outcome” on a review item to add one.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

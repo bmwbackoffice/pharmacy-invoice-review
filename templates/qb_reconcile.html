@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>QuickBooks reconciliation import</h2>
+<p class="muted">Upload a QuickBooks register export (one worksheet per store) before a QB-entry session.
+The app marks records already in QB so you don't enter them twice, flags doubtful matches for you to
+confirm, and clears <strong>missing</strong> statement flags that QuickBooks actually has. Re-run this
+each time you do QB entry.</p>
+
+<div class="card">
+  <form method="post" action="/qb-reconcile/upload" enctype="multipart/form-data"
+        style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+    <input type="file" name="file" accept=".xlsx" required>
+    <button class="btn" type="submit">Upload &amp; reconcile</button>
+  </form>
+  <p class="muted" style="font-size:12px; margin:6px 0 0;">.xlsx only. Worksheet tabs read:
+    3M, Madison, Maple, Refuah, Westgate, BMW, Lakewood Rx. Columns matched by header text
+    (Type / Date / Num / Name / Amount) — order can shift between exports.</p>
+</div>
+
+<p style="margin-top:12px;">
+  <a class="btn secondary" href="/qb-reconcile/unmatched">Pending unmatched rows ↗</a>
+  <span class="muted" style="font-size:12px;">QB rows that matched no record yet — they resolve
+    automatically when the matching email arrives.</span>
+</p>
+
+<h3 style="margin-top:18px;">Past imports</h3>
+{% if not batches %}
+  <div class="card muted">No imports yet.</div>
+{% else %}
+<table>
+  <thead><tr>
+    <th>Uploaded</th><th>File</th><th>By</th><th>Rows</th><th>Auto-matched</th>
+    <th>Doubtful</th><th>Statement resolved</th><th>No match</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for b in batches %}
+    <tr>
+      <td class="muted" style="white-space:nowrap;">{{ (b.uploaded_at | us_datetime) or '—' }}</td>
+      <td>{{ b.filename or '—' }}</td>
+      <td class="muted">{{ b.uploaded_by or '—' }}</td>
+      <td>{{ b.n_rows }}</td>
+      <td>{{ b.n_auto_matched }}</td>
+      <td>{{ b.n_doubtful }}</td>
+      <td>{{ b.n_statement_resolved }}</td>
+      <td>{{ b.n_no_match }}</td>
+      <td><a href="/qb-reconcile/review?batch_id={{ b.id }}">Review{% if b.n_doubtful %} ({{ b.n_doubtful }}){% endif %}</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+{% endblock %}

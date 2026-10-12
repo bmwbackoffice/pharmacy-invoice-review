@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Invoice history <span class="muted">({{ total }} records · read-only)</span></h2>
+<p class="muted">The ledger of every invoice ever recorded — the source of the Possible-Duplicate check.
+  Read-only to protect duplicate-detection integrity.</p>
+
+<div class="card">
+  <form method="get" action="/history">
+    <div class="row">
+      <div><label>Vendor contains</label><input name="vendor" value="{{ filters.vendor }}"></div>
+      <div><label>Invoice #</label><input name="invoice_number" value="{{ filters.invoice_number }}"></div>
+      <div><label>Store</label>
+        <select name="store"><option value="">any</option>
+          {% for s in stores %}<option value="{{ s }}" {{ 'selected' if filters.store==s }}>{{ s | store_label }}</option>{% endfor %}
+        </select></div>
+      <div><label>Date from</label><input name="date_from" type="date" value="{{ filters.date_from }}"></div>
+      <div><label>Date to</label><input name="date_to" type="date" value="{{ filters.date_to }}"></div>
+      <div><label>Amount min</label><input name="amount_min" type="number" step="0.01" value="{{ filters.amount_min }}"></div>
+      <div><label>Amount max</label><input name="amount_max" type="number" step="0.01" value="{{ filters.amount_max }}"></div>
+      <div><label>Sort by</label>
+        <select name="sort">
+          {% for s in ['date_added','vendor','invoice_number','store','invoice_date','amount'] %}<option value="{{ s }}" {{ 'selected' if filters.sort==s }}>{{ s }}</option>{% endfor %}
+        </select></div>
+      <div><label>Direction</label>
+        <select name="direction"><option value="desc" {{ 'selected' if filters.direction=='desc' }}>desc</option>
+          <option value="asc" {{ 'selected' if filters.direction=='asc' }}>asc</option></select></div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn secondary" href="/history">Reset</a>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Vendor</th><th>Store</th><th>Invoice #</th><th>Invoice date</th>
+      <th class="num">Amount</th><th>Recorded</th><th>Source</th><th>Links</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.vendor_matched or '—' }}</td>
+        <td>{{ (r.store_matched | store_label) or '—' }}</td>
+        <td>{{ r.invoice_number or '—' }}</td>
+        <td>{{ r.invoice_date | us_date }}</td>
+        <td class="num">{% if r.invoice_amount is not none %}{{ '%.2f'|format(r.invoice_amount) }}{% endif %}</td>
+        <td class="muted">{{ r.date_added | us_date }}</td>
+        <td class="muted">{{ r.source_file or '' }}</td>
+        <td>
+          {% set url = file_url(r.file_path) %}
+          {% if url %}<a href="{{ url }}" target="_blank">file</a>{% endif %}
+          {% if r.gmail_link %}{% if url %} · {% endif %}<a href="{{ r.gmail_link }}" target="_blank">email</a>{% endif %}
+          {% if not url and not r.gmail_link %}—{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted" style="padding:18px;">No history rows match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if pages > 1 %}
+<div class="card" style="display:flex; gap:12px; align-items:center;">
+  {% set base = '/history?vendor=' ~ filters.vendor ~ '&invoice_number=' ~ filters.invoice_number ~ '&store=' ~ filters.store ~ '&date_from=' ~ filters.date_from ~ '&date_to=' ~ filters.date_to ~ '&amount_min=' ~ filters.amount_min ~ '&amount_max=' ~ filters.amount_max ~ '&sort=' ~ filters.sort ~ '&direction=' ~ filters.direction %}
+  {% if page > 1 %}<a class="btn secondary" href="{{ base }}&page={{ page-1 }}">&larr; Prev</a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a class="btn secondary" href="{{ base }}&page={{ page+1 }}">Next &rarr;</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

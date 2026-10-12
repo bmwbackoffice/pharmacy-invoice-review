@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<h2>Ledger reconcile <span class="muted">({{ rows|length }})</span></h2>
+<p class="muted">Rows that exist in the dedup ledger (<code>invoice_history</code> / <code>payment_history</code>)
+  but never became a live record. This is the "extracted but never recorded" condition that hid
+  EuroPharma INV0800123 for two weeks — each one is likely a recovery that silently failed its save.
+  Recover with <code>python recover_errored_email.py &lt;email filename&gt; --commit</code> (requeues it
+  for a clean full-pipeline reprocess), or recover directly from the ledger if its source email is gone.</p>
+
+{% if not rows %}
+  <div class="card"><p class="muted" style="margin:0;">Nothing orphaned — every ledger row has a matching live record. ✓</p></div>
+{% else %}
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr><th>Kind</th><th>Vendor</th><th>Number</th><th class="num">Amount</th><th>Date</th><th>Email status</th><th>Source email</th></tr></thead>
+    <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.kind }}</td>
+        <td>{{ r.vendor or '—' }}</td>
+        <td>{{ r.number or '—' }}</td>
+        <td class="num">{{ money(r.amount) }}</td>
+        <td>{{ (r.date | us_date) if r.date else '—' }}</td>
+        <td>{% if r.email_status == 'error' %}<span class="pill rev">error</span>{% else %}<span class="muted">{{ r.email_status or '—' }}</span>{% endif %}</td>
+        <td class="muted" style="font-size:12px;">{{ r.source_file or '—' }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

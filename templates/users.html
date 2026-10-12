@@ -1,0 +1,73 @@
+{% extends "base.html" %}
+{% from "_macros.html" import sort_th %}
+{% block content %}
+<h2>Users</h2>
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+<div class="card">
+  <h3 style="margin-top:0;">Add a user</h3>
+  <form method="post" action="/admin/users/create">
+    <div class="row">
+      <div><label>Username</label><input name="username" required></div>
+      <div><label>Display name</label><input name="display_name"></div>
+      <div><label>Password</label><input name="password" type="password" required></div>
+      <div><label>Role</label><select name="role"><option value="reviewer">reviewer</option><option value="admin">admin</option></select></div>
+    </div>
+    <div style="margin-top:12px;"><button class="btn" type="submit">Create user</button></div>
+  </form>
+</div>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      {{ sort_th('Username', 'username', params) }}
+      {{ sort_th('Display name', 'display_name', params) }}
+      {{ sort_th('Role', 'role', params) }}
+      {{ sort_th('Active', 'active', params) }}
+      {{ sort_th('Created', 'created_at', params) }}
+      <th></th>
+    </tr></thead>
+    <tbody>
+    {% for u in users %}
+      {% set sortq = ('&sort=' ~ params.sort if params.sort else '') ~ ('&direction=' ~ params.direction if params.direction else '') %}
+      <tr>
+        <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ u.role }}</td>
+        <td>{{ 'yes' if u.active else 'no' }}</td>
+        <td class="muted">{{ u.created_at | us_date }}</td>
+        <td style="white-space:nowrap;">
+          <a class="btn secondary" href="/admin/users?edit={{ u.id }}{{ sortq }}" style="padding:4px 10px;">Edit</a>
+          <form method="post" action="/admin/users/{{ u.id }}/active" style="display:inline; margin:0;">
+            <input type="hidden" name="active" value="{{ '0' if u.active else '1' }}">
+            <button class="btn secondary" type="submit" style="padding:4px 10px;">{{ 'disable' if u.active else 'enable' }}</button>
+          </form>
+        </td>
+      </tr>
+      {% if edit_id == u.id %}
+      <tr>
+        <td colspan="6" style="background:#fbfdff;">
+          <form method="post" action="/admin/users/{{ u.id }}/edit">
+            <div class="row">
+              <div><label>Display name</label><input name="display_name" value="{{ u.display_name or '' }}"></div>
+              <div><label>Role</label>
+                <select name="role">
+                  <option value="reviewer" {{ 'selected' if u.role=='reviewer' }}>reviewer</option>
+                  <option value="admin" {{ 'selected' if u.role=='admin' }}>admin</option>
+                </select></div>
+              <div><label>Active</label>
+                <select name="active">
+                  <option value="1" {{ 'selected' if u.active }}>yes</option>
+                  <option value="0" {{ 'selected' if not u.active }}>no</option>
+                </select></div>
+              <div><label>Reset password (leave blank to keep)</label><input name="new_password" type="password" autocomplete="new-password"></div>
+            </div>
+            <div style="margin-top:10px;">
+              <button class="btn" type="submit">Save changes</button>
+              <a class="btn secondary" href="/admin/users?{{ sortq[1:] }}">Cancel</a>
+            </div>
+          </form>
+        </td>
+      </tr>
+      {% endif %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

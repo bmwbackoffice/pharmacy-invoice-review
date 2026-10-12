@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+{% set unmapped = cards | selectattr('store', 'none') | list %}
+<h2>Cards <span class="muted">({{ cards|length }} seen · {{ unmapped|length }} unmapped)</span></h2>
+<p class="muted">Every card last-4 seen on any record (invoice, credit memo, or payment).
+The card usually identifies the store, so assign each one: a record on a mapped card is then
+treated as that store with high confidence and is not flagged merely for an uncertain store.
+Assignments feed <a href="/reference/card_store_map">Card → store</a> and take effect on the next
+<code>classify_emails.py</code> run.</p>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th style="width:1%;white-space:nowrap;">Card last 4</th>
+      <th style="width:1%;white-space:nowrap;">Payments</th>
+      <th style="width:1%;white-space:nowrap;">Last seen</th>
+      <th>Example vendor</th>
+      <th>Store</th>
+    </tr></thead>
+    <tbody>
+    {% for c in cards %}
+      <tr>
+        <td style="white-space:nowrap;font-variant-numeric:tabular-nums;">••••&nbsp;{{ c.last4 }}</td>
+        <td style="text-align:right;">{{ c.count }}</td>
+        <td class="muted" style="white-space:nowrap;">{{ c.last_seen or '—' }}</td>
+        <td>{{ c.vendor or '' }}</td>
+        <td>
+          {% if c.store %}
+            <strong>{{ c.store | store_label }}</strong>
+            <a class="muted" href="/reference/card_store_map" style="margin-left:8px;">edit</a>
+          {% else %}
+            <form method="post" action="/cards/assign" style="display:flex;gap:6px;align-items:center;margin:0;">
+              <input type="hidden" name="card_last4" value="{{ c.last4 }}">
+              <select name="store_matched" required>
+                <option value="">— assign store —</option>
+                {% for s in stores %}<option value="{{ s }}">{{ s | store_label }}</option>{% endfor %}
+              </select>
+              <button class="btn secondary" type="submit" style="padding:4px 10px;">Save</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted" style="padding:18px;">No cards seen on any record yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,0 +1,532 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options, sort_th, amount_filter, ignore_vendor_button %}
+{% block content %}
+{# Header cell for one canonical column: sortable where it has a sort key, else plain. #}
+{% macro qb_head(col) -%}
+  {%- if qb_sort_key.get(col) -%}{{ sort_th(col, qb_sort_key[col], params, numeric=(col in qb_numeric)) }}
+  {%- else -%}<th>{{ col }}</th>{%- endif -%}
+{%- endmacro %}
+{# Body cell for one canonical column of a qb-ready row. #}
+{% macro qb_cell(col, r, url) -%}
+  {%- if col == 'Vendor' -%}<td>{{ r.qb_vendor or r.vendor_matched or '—' }}</td>
+  {%- elif col == 'Account' -%}<td>{{ r.qb_account or '' }}
+    {% if not r.qb_account and r.vendor_matched %}
+      {% if r.standard_vendor %}
+        <a class="pill" style="background:#fef3c7;color:#92400e;" target="_blank" rel="noopener"
+           href="/reference/vendor_account_assignment?prefill={{ r.standard_vendor|urlencode }}"
+           title="Assign a QuickBooks account (opens in a new tab)">assign account ↗</a>
+      {% else %}
+        <a class="pill" style="background:#fef3c7;color:#92400e;" target="_blank" rel="noopener"
+           href="/reference/vendor_name_map?prefill={{ r.vendor_matched|urlencode }}&store={{ r.store_matched|urlencode }}"
+           title="Standardize this vendor (opens in a new tab)">add vendor ↗</a>
+      {% endif %}
+      {# Not a real vendor mapping? Exclude it outright in one click (return_to falls back to Referer). #}
+      {{ ignore_vendor_button(r.vendor_matched, '', 'ignore vendor', 'linklike',
+                              'margin-left:6px; font-size:12px; color:var(--muted);') }}
+    {% endif %}
+  </td>
+  {#- missing_info ('store, date, amount' subset): saved before those review checks existed. -#}
+  {%- elif col == 'Store' -%}<td>{{ (r.store_matched | store_label) or '—' }}{% if 'store' in (r.missing_info or '') %} <span class="pill miss">no store</span>{% endif %}</td>
+  {%- elif col == 'Invoice #' -%}<td>{{ r.number or '—' }}</td>
+  {%- elif col == 'Date' -%}<td>{{ r.record_date | us_date }}{% if 'date' in (r.missing_info or '') %}<span class="pill miss">no date</span>{% endif %}</td>
+  {%- elif col == 'Amount' -%}<td class="num">{% if r.amount is not none %}{{ '%.2f'|format(r.amount) }}{% endif %}{% if 'amount' in (r.missing_info or '') %} <span class="pill miss">no amount</span>{% endif %}</td>
+  {%- elif col == 'Sales Tax' -%}<td class="num">{% if r.sales_tax is not none %}{{ '%.2f'|format(r.sales_tax) }}{% endif %}</td>
+  {%- elif col == 'Shipping' -%}<td class="num">{% if r.ship_charge is not none %}{{ '%.2f'|format(r.ship_charge) }}{% endif %}</td>
+  {%- elif col == 'Class' -%}<td>{{ r['class'] or '' }}</td>
+  {%- elif col == 'Possible Duplicate' -%}<td>
+    {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — ignored</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the record this duplicates">↗</a>{% endif %}
+      {% if r.record_type in ['invoice','payment'] %}
+      <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+        <input type="hidden" name="action" value="restore">
+        <button type="submit" class="linklike" title="not actually a duplicate — restore">undo</button>
+      </form>{% endif %}
+    {% elif r.duplicate_suspect %}<span class="pill dup" title="{{ r.duplicate_reason or '' }}">possible duplicate</span>
+      {% if r.record_type in ['invoice','payment'] %}
+      <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+        <input type="hidden" name="action" value="ignore">
+        <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">ignore this one</button>
+      </form>{% endif %}
+    {% endif %}
+    {% if r.duplicate_group_id %} <a class="pill" style="background:#eef2ff;color:#4338ca;" href="?group={{ r.duplicate_group_id|urlencode }}" title="Show all records in this duplicate group">Group {{ r.duplicate_group_id }}</a>{% endif %}
+  </td>
+  {%- elif col == 'File Link' -%}<td style="white-space:nowrap;">{% if r.short_file %}<a href="{{ r.short_file }}" target="_blank">File link</a>{% endif %}</td>
+  {%- elif col == 'Gmail Link' -%}<td style="white-space:nowrap;">{% if r.short_gmail %}<a href="{{ r.short_gmail }}" target="_blank">Email link</a>{% endif %}</td>
+  {%- elif col == 'Memo' -%}<td class="muted" style="font-size:12px; word-break:break-all; min-width:200px;">{{ r.memo }}</td>
+  {%- else -%}<td></td>{%- endif -%}
+{%- endmacro %}
+<style>
+  /* Store-focus ribbon + reorganized filter/action groups (matches /duplicates polish). */
+  .qbtop { display:flex; align-items:center; gap:14px; flex-wrap:wrap; }
+  .storebar { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+  .storepill { display:inline-block; padding:6px 12px; border-radius:999px; border:1px solid var(--line);
+               background:#fff; color:var(--ink); text-decoration:none; font-size:13px; font-weight:600;
+               white-space:nowrap; }
+  .storepill:hover { background:#eef4fb; }
+  .storepill.active { background:var(--brand); color:#fff; border-color:var(--brand); }
+  .qbtop-right { margin-left:auto; display:flex; gap:6px; }
+  .qbrow { display:flex; align-items:flex-start; gap:12px; flex-wrap:wrap; }
+  .qbactions { margin-left:auto; display:flex; gap:6px; align-items:center; flex-wrap:wrap; }
+  /* Grouped "Action needed" control: two labeled tiers (Status, then Which fix) in one box,
+     visually separated from the Filters ▾ / Export / Columns buttons. */
+  .qbactionbox { margin-left:auto; display:flex; flex-direction:column; gap:6px;
+                 border:1px solid var(--border,#e5e7eb); border-radius:8px; padding:6px 10px; background:#fafafa; }
+  .qbtier { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .qbtierlabel { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:#6b7280;
+                 min-width:66px; font-weight:600; }
+  .qbtier .btn { padding:4px 10px; }
+  /* "Which fix" tier gets an amber accent (echoes the add-vendor/assign-account pills it filters
+     on) so it reads distinctly from the blue Status tier. Only the ACTIVE (non-secondary) button
+     is amber; the label is amber-tinted too. */
+  .qbtier.fix .qbtierlabel { color:#b45309; }
+  .qbtier.fix .btn:not(.secondary) { background:#d97706; border-color:#d97706; color:#fff; }
+  .qbfilters > summary { list-style:none; cursor:pointer; display:inline-block; }
+  .qbfilters > summary::-webkit-details-marker { display:none; }
+  .qbfilterform { margin-top:12px; }
+  .filtergrid { display:flex; gap:14px 16px; flex-wrap:wrap; align-items:flex-end; }
+  .filtergrid label { display:flex; flex-direction:column; font-size:12px; color:var(--muted); gap:3px; margin:0; }
+  .filtergrid label.chk { flex-direction:row; align-items:center; gap:6px; font-weight:normal; }
+  .filtergrid select, .filtergrid input { width:auto; }
+  .filtergrid input[type=checkbox] { width:auto; }
+  .pill.miss { background:#fee2e2; color:#b91c1c; }
+</style>
+<h2>QB entry <span class="muted">({{ pg.total }} total{% if pg.page_size != 'all' and pg.pages > 1 %} · page {{ pg.page }}/{{ pg.pages }}{% endif %})</span></h2>
+
+{# Records saved before the store/date/amount review checks existed can still lack one (newer ones
+   go to review instead). missing_count covers every store, not-yet-entered. #}
+{% if missing == '1' %}
+<div class="card" style="border-color:#f59e0b; background:#fffbeb;">
+  Showing only records missing a store, date or amount. Fix each one on its <b>edit</b> page before entering it.
+  <a href="#" onclick="event.preventDefault(); var u=new URL(location.href); u.searchParams.delete('missing'); location.href=u.pathname+u.search;">✕ show all</a>
+</div>
+{% elif missing_count %}
+<div class="card" style="border-color:#f59e0b; background:#fffbeb;">
+  ⚠ {{ missing_count }} record{{ '' if missing_count == 1 else 's' }} waiting for QuickBooks entry
+  {{ 'is' if missing_count == 1 else 'are' }} missing a store, date or amount — saved before those checks existed.
+  <a class="btn secondary" style="padding:2px 8px;" href="/qb?missing=1&entered=no&store=&dup=all">Show them</a>
+</div>
+{% endif %}
+
+{# querystrings: `baseq` carries every current filter (incl. store) onto the entered-toggle +
+   export links; `pillq` carries everything EXCEPT store (each store pill sets its own). #}
+{% set base = [] %}
+{% if run %}{% set _ = base.append('run=' ~ run) %}{% endif %}
+{% if store %}{% set _ = base.append('store=' ~ (store|urlencode)) %}{% endif %}
+{% if email %}{% set _ = base.append('email=' ~ (email|urlencode)) %}{% endif %}
+{% if dup %}{% set _ = base.append('dup=' ~ dup) %}{% endif %}
+{% if ignored %}{% set _ = base.append('ignored=' ~ ignored) %}{% endif %}
+{% if group %}{% set _ = base.append('group=' ~ (group|urlencode)) %}{% endif %}
+{% if vendor %}{% set _ = base.append('vendor=' ~ (vendor|urlencode)) %}{% endif %}
+{% if search %}{% set _ = base.append('search=' ~ (search|urlencode)) %}{% endif %}
+{% if date_from %}{% set _ = base.append('date_from=' ~ (date_from|urlencode)) %}{% endif %}
+{% if date_to %}{% set _ = base.append('date_to=' ~ (date_to|urlencode)) %}{% endif %}
+{% if amount_min %}{% set _ = base.append('amount_min=' ~ (amount_min|urlencode)) %}{% endif %}
+{% if amount_max %}{% set _ = base.append('amount_max=' ~ (amount_max|urlencode)) %}{% endif %}
+{% if amount %}{% set _ = base.append('amount=' ~ (amount|urlencode)) %}{% endif %}
+{% if record_type %}{% set _ = base.append('record_type=' ~ (record_type|urlencode)) %}{% endif %}
+{% if missing %}{% set _ = base.append('missing=' ~ (missing|urlencode)) %}{% endif %}
+{% set baseq = base|join('&') %}
+{% set exportq = 'entered=' ~ entered ~ ('&' ~ baseq if baseq else '') %}
+{% set pb = ['entered=' ~ entered] %}
+{% if run %}{% set _ = pb.append('run=' ~ run) %}{% endif %}
+{% if email %}{% set _ = pb.append('email=' ~ (email|urlencode)) %}{% endif %}
+{% if dup %}{% set _ = pb.append('dup=' ~ dup) %}{% endif %}
+{% if ignored %}{% set _ = pb.append('ignored=' ~ ignored) %}{% endif %}
+{% if group %}{% set _ = pb.append('group=' ~ (group|urlencode)) %}{% endif %}
+{% if vendor %}{% set _ = pb.append('vendor=' ~ (vendor|urlencode)) %}{% endif %}
+{% if search %}{% set _ = pb.append('search=' ~ (search|urlencode)) %}{% endif %}
+{% if date_from %}{% set _ = pb.append('date_from=' ~ (date_from|urlencode)) %}{% endif %}
+{% if date_to %}{% set _ = pb.append('date_to=' ~ (date_to|urlencode)) %}{% endif %}
+{% if amount_min %}{% set _ = pb.append('amount_min=' ~ (amount_min|urlencode)) %}{% endif %}
+{% if amount_max %}{% set _ = pb.append('amount_max=' ~ (amount_max|urlencode)) %}{% endif %}
+{% if amount %}{% set _ = pb.append('amount=' ~ (amount|urlencode)) %}{% endif %}
+{% if record_type %}{% set _ = pb.append('record_type=' ~ (record_type|urlencode)) %}{% endif %}
+{% if missing %}{% set _ = pb.append('missing=' ~ (missing|urlencode)) %}{% endif %}
+{% set pillq = pb|join('&') %}
+{# needs_action is kept OUT of base/pb (so the toggle's own links, built from exportq, don't get a
+   duplicate needs_action=) and appended separately onto store/entered/export links instead. #}
+{% set na_extra = ('&needs_action=' ~ (needs_action|urlencode)) if needs_action else '' %}
+{# action (which fix is needed) is likewise kept OUT of base/pb and carried separately, so the
+   action-filter row's own links (which set action=) don't get a duplicate action= param. #}
+{% set act_extra = ('&action=' ~ (action|urlencode)) if action else '' %}
+{# The two tiers describe the SAME dimension (qb_account state), so some combinations are always
+   empty (Complete × Add vendor / Assign account; Needs action × No issue). Each tier's links carry
+   the OTHER tier's value ONLY when compatible, so clicking one CLEARS a conflicting selection in the
+   other (compatible ones are preserved). needs_action 'yes'=blank account, 'no'=filled; action
+   add_vendor/assign_account⊂blank, none⊂filled. #}
+{% set na_for_blank = na_extra if needs_action != 'no'  else '' %}   {# add vendor / assign account #}
+{% set na_for_filled = na_extra if needs_action != 'yes' else '' %}  {# no issue #}
+{% set act_for_needs = act_extra if action in ['add_vendor','assign_account'] else '' %}  {# Needs action #}
+{% set act_for_complete = act_extra if action == 'none' else '' %}   {# Complete #}
+
+{# ---- Group 1: store focus (pill tabs) + entered toggle ---- #}
+<div class="card qbtop">
+  <div class="storebar">
+    <a class="storepill {{ 'active' if not store }}" href="/qb?store=&{{ pillq }}{{ na_extra }}{{ act_extra }}">All stores</a>
+    {% for s in stores %}
+      <a class="storepill {{ 'active' if store==s }}" href="/qb?store={{ s|urlencode }}&{{ pillq }}{{ na_extra }}{{ act_extra }}">{{ s | store_label }}</a>
+    {% endfor %}
+  </div>
+  <div class="qbtop-right">
+    <a class="btn {{ '' if entered=='no' else 'secondary' }}" href="/qb?entered=no{{ ('&' ~ baseq) if baseq else '' }}{{ na_extra }}{{ act_extra }}">Not yet entered</a>
+    <a class="btn {{ '' if entered=='yes' else 'secondary' }}" href="/qb?entered=yes{{ ('&' ~ baseq) if baseq else '' }}{{ na_extra }}{{ act_extra }}">Entered</a>
+    <a class="btn {{ '' if entered=='all' else 'secondary' }}" href="/qb?entered=all{{ ('&' ~ baseq) if baseq else '' }}{{ na_extra }}{{ act_extra }}">All</a>
+  </div>
+</div>
+
+{# ---- Group 2: more filters (collapsed by default) + Group 3: actions ---- #}
+<div class="card">
+  <div class="qbrow">
+    <details class="qbfilters"{{ ' open' if (run or dup or ignored or record_type or vendor or search or date_from or date_to or amount_min or amount_max or amount or missing) }}>
+      <summary class="btn secondary">Filters ▾</summary>
+      <form method="get" action="/qb" class="qbfilterform">
+        {# store + entered come from the pills/toggle above; preserve them so applying a filter keeps them #}
+        <input type="hidden" name="entered" value="{{ entered }}">
+        <input type="hidden" name="store" value="{{ store }}">
+        <input type="hidden" name="needs_action" value="{{ needs_action }}">
+        <input type="hidden" name="action" value="{{ action }}">
+        {% if email %}<input type="hidden" name="email" value="{{ email }}">{% endif %}
+        {% if group %}<input type="hidden" name="group" value="{{ group }}">{% endif %}
+        <div class="filtergrid">
+          <label>Run
+            <select name="run" onchange="this.form.submit()">{{ run_options(runs, run) }}</select></label>
+          <label>Type
+            <select name="record_type" onchange="this.form.submit()">
+              <option value="" {{ 'selected' if not record_type }}>all</option>
+              {% for rt in record_types %}<option value="{{ rt }}" {{ 'selected' if record_type==rt }}>{{ rt|replace('_',' ') }}</option>{% endfor %}
+            </select></label>
+          <label>Possible dup
+            <select name="dup" onchange="this.form.submit()">
+              <option value="" {{ 'selected' if not dup }}>hide flagged (default)</option>
+              <option value="yes" {{ 'selected' if dup=='yes' }}>only flagged</option>
+              <option value="all" {{ 'selected' if dup=='all' }}>all (include flagged)</option>
+            </select></label>
+          <label>Vendor
+            <input name="vendor" value="{{ vendor or '' }}" placeholder="contains" style="width:130px;"></label>
+          <label>Search
+            <input name="search" value="{{ search or '' }}" placeholder="vendor / inv# / email" style="width:170px;"></label>
+          <label>Date from <input type="date" name="date_from" value="{{ date_from or '' }}"></label>
+          <label>Date to <input type="date" name="date_to" value="{{ date_to or '' }}"></label>
+          {{ amount_filter(amount, amount_min, amount_max) }}
+          <label class="chk"><input type="checkbox" name="ignored" value="1" {{ 'checked' if ignored=='1' }}
+                 onchange="this.form.submit()"> show ignored duplicates</label>
+          <label class="chk"><input type="checkbox" name="missing" value="1" {{ 'checked' if missing=='1' }}
+                 onchange="this.form.submit()"> only missing store / date / amount</label>
+        </div>
+        <div style="margin-top:10px;">
+          <button class="btn" type="submit">Apply</button>
+          <a class="btn secondary" href="/qb">Reset</a>
+        </div>
+      </form>
+    </details>
+    {# Grouped "Action needed" control. Tier 1 (Status): qb_account IS NULL is exactly what shows
+       the add-vendor/assign-account pill. Tier 2 (Which fix): a finer split of "Needs action" using
+       the SAME conditions that pill uses. Each tier's links carry every other active filter (exportq)
+       plus the OTHER tier's value (act_extra / na_extra), and set only their own param — no dup. #}
+    <div class="qbactionbox">
+      <div class="qbtier">
+        <span class="qbtierlabel">Status</span>
+        <a class="btn {{ '' if not needs_action else 'secondary' }}" href="/qb?needs_action=&{{ exportq }}{{ act_extra }}">All</a>
+        <a class="btn {{ '' if needs_action=='yes' else 'secondary' }}" href="/qb?needs_action=yes&{{ exportq }}{{ act_for_needs }}">Needs action</a>
+        <a class="btn {{ '' if needs_action=='no' else 'secondary' }}" href="/qb?needs_action=no&{{ exportq }}{{ act_for_complete }}">Complete</a>
+      </div>
+      <div class="qbtier fix">
+        <span class="qbtierlabel">Which fix</span>
+        <a class="btn {{ '' if not action else 'secondary' }}" href="/qb?action=&{{ exportq }}{{ na_extra }}">Any</a>
+        <a class="btn {{ '' if action=='add_vendor' else 'secondary' }}" href="/qb?action=add_vendor&{{ exportq }}{{ na_for_blank }}" title="Blank account, vendor not standardized yet">Add vendor</a>
+        <a class="btn {{ '' if action=='assign_account' else 'secondary' }}" href="/qb?action=assign_account&{{ exportq }}{{ na_for_blank }}" title="Blank account, vendor already standardized">Assign account</a>
+        <a class="btn {{ '' if action=='none' else 'secondary' }}" href="/qb?action=none&{{ exportq }}{{ na_for_filled }}" title="Account already set — just needs the entry checkbox">No issue</a>
+      </div>
+    </div>
+    <div class="qbactions">
+      <a class="btn ok" href="/qb/export.xlsx?{{ exportq }}{{ na_extra }}{{ act_extra }}"
+         onclick="return exportQbClick(this)"
+         title="{{ 'Matches your column view' if export_follow else 'Uses your custom export layout' }} — Invoice # kept as text so long numbers and leading zeros stay exact">Export Excel</a>
+      <button class="btn secondary" type="button" onclick="var p=document.getElementById('qbcolspanel');p.style.display=(p.style.display==='none'?'':'none');">Columns ⚙</button>
+    </div>
+  </div>
+  {% if group %}<div class="muted" style="margin-top:8px;">Group <strong>{{ group }}</strong>
+    <a href="#" title="clear group filter"
+       onclick="event.preventDefault(); var u=new URL(location.href); u.searchParams.delete('group'); location.href=u.pathname+u.search;">✕ clear</a></div>{% endif %}
+  {% if email %}<div style="margin-top:8px;">Filtered to email <strong>{{ email }}</strong>
+    <a class="btn secondary" href="/qb?entered={{ entered }}{{ ('&store=' ~ (store|urlencode)) if store else '' }}" style="padding:2px 8px;">clear</a></div>{% endif %}
+  <div class="muted" style="margin-top:6px;">credit memos show as negative amounts</div>
+</div>
+
+{# ---- Columns settings panel (visibility + order, saved per user) ---- #}
+<div class="card" id="qbcolspanel" style="display:none;">
+  <form method="post" action="/qb/columns" id="qbcolsform">
+    <h3 style="margin-top:0;">Table columns</h3>
+    <p class="muted">Choose which columns show and their order — saved for your account. Tick to show,
+      use ↑ ↓ to reorder. (The control columns — select, Entered, source email, edit — are always shown.)</p>
+    <ul id="viewcols" class="collist">
+      {% for col in view_columns %}
+        <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
+          <label><input type="checkbox" name="view_col" value="{{ col }}" checked> {{ col }}</label></li>
+      {% endfor %}
+      {% for col in all_columns if col not in view_columns %}
+        <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
+          <label><input type="checkbox" name="view_col" value="{{ col }}"> {{ col }}</label></li>
+      {% endfor %}
+    </ul>
+
+    <h3>Reference columns</h3>
+    <p class="muted">{{ reference_columns|join(', ') }} are always shown on screen (at the
+      end of each row) for quick access. They're left out of CSV export and "Copy visible
+      rows" by default since they're not QuickBooks data — tick to include one anyway.</p>
+    <ul class="collist">
+      {% for col in reference_columns %}
+        <li><label><input type="checkbox" name="include_ref" value="{{ col }}"
+          {{ 'checked' if col in export_include_refs }}> Include "{{ col }}"</label></li>
+      {% endfor %}
+    </ul>
+
+    <h3>CSV export</h3>
+    <p class="muted">The default download keeps the canonical QuickBooks import order unless
+      you customize it below.</p>
+    <label style="font-weight:400;"><input type="checkbox" name="export_follow" value="1"
+      {{ 'checked' if export_follow }} onchange="document.getElementById('exportcols').style.display=this.checked?'none':'';">
+      CSV export matches my column view</label>
+    <div id="exportcols" style="margin-top:8px;{{ 'display:none;' if export_follow }}">
+      <p class="muted" style="margin:0 0 6px;">Custom export layout:</p>
+      <ul id="expcols" class="collist">
+        {% for col in export_columns %}
+          <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
+            <label><input type="checkbox" name="export_col" value="{{ col }}" checked> {{ col }}</label></li>
+        {% endfor %}
+        {% for col in all_columns if col not in export_columns %}
+          <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
+            <label><input type="checkbox" name="export_col" value="{{ col }}"> {{ col }}</label></li>
+        {% endfor %}
+      </ul>
+    </div>
+    <div style="margin-top:10px;"><button class="btn" type="submit">Save</button></div>
+  </form>
+  <form method="post" action="/qb/columns" style="margin-top:8px;">
+    <input type="hidden" name="reset" value="1">
+    <button class="btn secondary" type="submit">Reset to standard order</button>
+  </form>
+</div>
+
+{# Bulk action bar. The checkboxes below belong to this form via form="qbbulk"
+   (HTML5), so they can live in table cells without nesting a form in the table. #}
+<form id="qbbulk" method="post" action="/qb/bulk_entered"></form>
+<div class="card" style="display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+  <button class="btn" type="submit" form="qbbulk" onclick="return confirmBulk()">Mark selected as Entered in QB</button>
+  <button class="btn secondary" type="button" onclick="copyQb(this)">Copy Selected</button>
+  <span class="muted">tick rows (or the header box to select all), then Copy Selected and/or mark entered — both act on the same ticked rows. Export Excel follows them too (full filtered set when nothing's ticked).</span>
+</div>
+
+{# Divider + shade before the REFERENCE columns (Possible Duplicate, File Link, Gmail Link) —
+   the ones that aren't QuickBooks data. Column positions are computed so the divider tracks
+   however many data columns are shown: lead controls = checkbox + Entered (2), then
+   view_columns, then reference_columns, then Source email + edit. #}
+{% set ref_first = view_columns|length + 3 %}
+{% set ref_last = ref_first + reference_columns|length - 1 %}
+<style>
+  /* Separating line before the reference (non-QB-data) columns, and a distinct header
+     color for them — no background shade. */
+  #qbtable th:nth-child({{ ref_first }}),
+  #qbtable td:nth-child({{ ref_first }}) {
+    border-left: 3px solid #64748b;      /* the separating line */
+  }
+  #qbtable th:nth-child(n+{{ ref_first }}):nth-child(-n+{{ ref_last }}) {
+    color: #4338ca;                      /* reference-column header wording */
+  }
+</style>
+<div class="card" style="padding:0;">
+  <table id="qbtable">
+    <thead><tr>
+      <th><input type="checkbox" onclick="toggleAll(this)" title="select all visible"></th>
+      {{ sort_th('Entered', 'entered', params) }}
+      {% for col in view_columns %}{{ qb_head(col) }}{% endfor %}
+      {% for col in reference_columns %}<th class="muted" title="Reference column — shown on screen only; tick it in Columns ⚙ to include in export/copy">{{ col }}</th>{% endfor %}
+      <th>Source email</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      {% set url = file_url(r.file_path) %}
+      <tr data-vendor="{{ r.vendor_matched or '' }}" data-account="{{ r.qb_account or '' }}"
+          data-store="{{ (r.store_matched | store_label) or '' }}"
+          data-number="{{ r.number or '' }}" data-date="{{ (r.record_date | us_date) or '' }}"
+          data-amount="{{ '' if r.amount is none else '%.2f'|format(r.amount) }}"
+          data-tax="{{ '' if r.sales_tax is none else '%.2f'|format(r.sales_tax) }}"
+          data-ship="{{ '' if r.ship_charge is none else '%.2f'|format(r.ship_charge) }}"
+          data-dup="{{ 'Yes' if r.duplicate_suspect else '' }}"
+          data-file="{{ r.short_file or '' }}" data-gmail="{{ r.short_gmail or '' }}"
+          data-memo="{{ r.memo or '' }}"
+          data-class="{{ r['class'] or '' }}">
+        <td><input type="checkbox" class="rowchk" name="selected"
+                   value="{{ r.record_type }}:{{ r.record_id }}" form="qbbulk"></td>
+        <td>
+          <button class="btn {{ 'ok' if r.entered_in_qb else 'secondary' }} entered-btn" type="button"
+                  data-rt="{{ r.record_type }}" data-rid="{{ r.record_id }}" data-entered="{{ '0' if r.entered_in_qb else '1' }}"
+                  style="padding:4px 10px;">{{ '✓ entered' if r.entered_in_qb else 'mark entered' }}</button>
+          {% if r.entered_in_qb and r.entered_qb_by %}<div class="muted">{{ r.entered_qb_by }} · {{ r.entered_qb_at | us_date }}</div>{% endif %}
+        </td>
+        {% for col in view_columns %}{{ qb_cell(col, r, url) }}{% endfor %}
+        {% for col in reference_columns %}{{ qb_cell(col, r, url) }}{% endfor %}
+        <td class="muted" style="white-space:nowrap;">
+          {% if r.short_records %}<a href="{{ r.short_records }}" title="{{ r.email_filename }}">records</a>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          {% if r.record_type == 'credit_memo' %}<span class="pill skip">credit</span> {% endif %}
+          <a href="/edit/{{ r.record_type }}/{{ r.record_id }}">edit</a>
+          <button class="btn secondary ignore-btn" type="button"
+                  data-rt="{{ r.record_type }}" data-rid="{{ r.record_id }}"
+                  style="padding:4px 10px;" title="exclude this one record from QB">ignore</button>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="{{ view_columns|length + reference_columns|length + 4 }}" class="muted" style="padding:18px;">No QB-ready rows.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{# Pagination bar — page links carry the current filters (baseq) + entered + page_size. #}
+{% set pageq = 'entered=' ~ entered ~ ('&' ~ baseq if baseq else '') ~ na_extra ~ act_extra %}
+{% if pg.pages > 1 or pg.page_size == 'all' %}
+<div class="card" style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+  <span class="muted">
+    {% if pg.page_size == 'all' %}Showing all {{ pg.total }}{% else %}Showing {{ (pg.page-1)*pg.size + (1 if pg.total else 0) }}–{{ [pg.page*pg.size, pg.total]|min }} of {{ pg.total }}{% endif %}</span>
+  {% if pg.page_size != 'all' and pg.pages > 1 %}
+    {% if pg.page > 1 %}<a class="btn secondary" style="padding:3px 10px;" href="/qb?{{ pageq }}&page_size={{ pg.page_size }}&page={{ pg.page-1 }}">← Prev</a>{% endif %}
+    <span class="muted">page {{ pg.page }} / {{ pg.pages }}</span>
+    {% if pg.page < pg.pages %}<a class="btn secondary" style="padding:3px 10px;" href="/qb?{{ pageq }}&page_size={{ pg.page_size }}&page={{ pg.page+1 }}">Next →</a>{% endif %}
+  {% endif %}
+  <span style="margin-left:auto; display:flex; gap:6px; align-items:center;">
+    <span class="muted">Rows/page:</span>
+    {% for sz in page_size_options %}<a class="btn {{ '' if pg.page_size == (sz|string) else 'secondary' }}" style="padding:3px 10px;" href="/qb?{{ pageq }}&page_size={{ sz }}">{{ sz }}</a>{% endfor %}
+    <a class="btn {{ '' if pg.page_size == 'all' else 'secondary' }}" style="padding:3px 10px;" href="/qb?{{ pageq }}&page_size=all">All</a>
+  </span>
+</div>
+{% endif %}
+
+<style>
+  .collist { list-style:none; padding:0; margin:0; max-width:420px; }
+  .collist li { padding:3px 0; }
+  .collist label { display:inline; font-weight:400; margin:0; }
+  .collist input[type=checkbox] { width:auto; padding:0; margin:0 6px 0 4px; vertical-align:middle; }
+  .collist .mv { padding:1px 7px; margin-right:2px; }
+</style>
+<script>
+// Export CSV follows the ticked rows: fill `ids` from the current selection right before navigating.
+// Nothing ticked -> no ids param -> the link downloads the full filtered set, exactly as before.
+function exportQbClick(a) {
+  var url = new URL(a.href, window.location.origin);
+  url.searchParams.delete('ids');   // in case of a repeat click after changing the selection
+  var ids = Array.from(document.querySelectorAll('#qbtable tbody input.rowchk:checked'))
+    .map(function (c) { return c.value; });
+  if (ids.length) url.searchParams.set('ids', ids.join(','));
+  a.href = url.pathname + '?' + url.searchParams.toString();
+  return true;   // let the browser follow the (possibly rewritten) link
+}
+function toggleAll(master) {
+  document.querySelectorAll('#qbtable tbody input.rowchk').forEach(function (c) { c.checked = master.checked; });
+}
+// Per-row "mark entered" without one <form> per row: a delegated handler that POSTs the
+// same endpoint (server redirects back), so the DOM stays light on big pages.
+document.getElementById('qbtable').addEventListener('click', function (e) {
+  var b = e.target.closest('.entered-btn'); if (!b) return;
+  var f = document.createElement('form'); f.method = 'post';
+  f.action = '/qb/' + b.dataset.rt + '/' + b.dataset.rid + '/entered';
+  var i = document.createElement('input'); i.type = 'hidden'; i.name = 'entered'; i.value = b.dataset.entered;
+  f.appendChild(i); document.body.appendChild(f); f.submit();
+});
+// Per-row manual "ignore" (exclude this one record from QB), same delegated pattern. One-way from
+// /qb — Restore lives on /browse and the record detail page. Row disappears on next load.
+document.getElementById('qbtable').addEventListener('click', function (e) {
+  var b = e.target.closest('.ignore-btn'); if (!b) return;
+  if (!confirm('Exclude this one record from QuickBooks import?')) return;
+  var f = document.createElement('form'); f.method = 'post';
+  f.action = '/records/' + b.dataset.rt + '/' + b.dataset.rid + '/ignore';
+  var i = document.createElement('input'); i.type = 'hidden'; i.name = 'ignored'; i.value = '1';
+  f.appendChild(i); document.body.appendChild(f); f.submit();
+});
+function confirmBulk() {
+  var n = document.querySelectorAll('#qbtable tbody input.rowchk:checked').length;
+  if (!n) { alert('Tick at least one row first.'); return false; }
+  return confirm('Mark ' + n + ' selected row(s) as Entered in QB?');
+}
+// Move a column list item up (-1) or down (+1) within its list, for reorder.
+function moveItem(btn, dir) {
+  var li = btn.closest('li'), list = li.parentNode;
+  if (dir < 0 && li.previousElementSibling) list.insertBefore(li, li.previousElementSibling);
+  else if (dir > 0 && li.nextElementSibling) list.insertBefore(li.nextElementSibling, li);
+}
+// Copy the SELECTED (ticked) rows as TSV in the USER'S chosen column view — the same
+// rows the bulk 'Mark entered' acts on. Values come from each row's data-* attributes
+// (raw figures), so numbers paste clean; local file paths are made absolute.
+var QB_VIEW = {{ copy_columns|tojson }};
+var QB_MAP = {{ qb_data_attr|tojson }};
+// One cell value for a row (data-* attribute; local file paths made absolute) — shared by the
+// plain-text (TSV) and HTML builders so both representations stay identical.
+function qbCellValue(tr, col) {
+  var attr = QB_MAP[col], v = tr.dataset[attr] || '';
+  if (attr === 'file' && v.charAt(0) === '/') v = window.location.origin + v;
+  return v;
+}
+// A bare <table> of the SAME data rows (no header) — the CF_HTML representation QuickBooks
+// Desktop's batch-entry grid reads to split a paste into cells (plain text alone lands in one cell).
+function buildQbHtml(rows) {
+  var esc = function (s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  };
+  var head = '<tr>' + QB_VIEW.map(function (col) { return '<th>' + esc(col) + '</th>'; }).join('') + '</tr>';
+  var trs = rows.map(function (tr) {
+    return '<tr>' + QB_VIEW.map(function (col) { return '<td>' + esc(qbCellValue(tr, col)) + '</td>'; }).join('') + '</tr>';
+  }).join('');
+  return '<table>' + head + trs + '</table>';
+}
+function copyQb(btn) {
+  var rows = Array.from(document.querySelectorAll('#qbtable tbody input.rowchk:checked'))
+    .map(function (c) { return c.closest('tr'); });
+  if (!rows.length) { alert('Tick at least one row first.'); return; }
+  // TSV with a header row. CRLF row separators: QuickBooks Desktop's grid only recognizes
+  // row boundaries on \r\n; Excel accepts either.
+  var tsv = QB_VIEW.join('\t') + '\r\n' + rows.map(function (tr) {
+    return QB_VIEW.map(function (col) { return qbCellValue(tr, col); }).join('\t');
+  }).join('\r\n');
+  var html = buildQbHtml(rows);
+  var done = function () { var t = btn.textContent; btn.textContent = 'Copied ' + rows.length + ' rows'; setTimeout(function () { btn.textContent = t; }, 1500); };
+  // Write BOTH text/plain and text/html so grid controls that split on CF_HTML (QuickBooks, Excel)
+  // fill cells, while plain-text targets (Notepad, terminals) still work.
+  // The async Clipboard API needs a SECURE CONTEXT (https or localhost) — over plain http on a LAN
+  // IP it's unavailable, so we fall to execCommand on a REAL selected <table>, which ALSO emits
+  // CF_HTML (unlike copying a plain textarea). Plain-text textarea is only the last resort.
+  if (window.isSecureContext && navigator.clipboard && window.ClipboardItem) {
+    var item = new ClipboardItem({
+      'text/plain': new Blob([tsv], { type: 'text/plain' }),
+      'text/html': new Blob([html], { type: 'text/html' })
+    });
+    navigator.clipboard.write([item]).then(done, function () { copyHtmlViaExec(html, tsv, done); });
+  } else {
+    copyHtmlViaExec(html, tsv, done);
+  }
+}
+// Copy rich HTML via execCommand — selecting a real DOM node makes the browser put BOTH text/html
+// (CF_HTML) and text/plain on the clipboard, and it works in INSECURE contexts (http/LAN) where the
+// async Clipboard API is missing. Falls back to the plain-text textarea only if the copy fails.
+function copyHtmlViaExec(html, tsv, done) {
+  var host = document.createElement('div');
+  host.setAttribute('contenteditable', 'true');
+  host.style.position = 'fixed'; host.style.left = '-9999px'; host.style.top = '0'; host.style.opacity = '0';
+  host.innerHTML = html;
+  document.body.appendChild(host);
+  var sel = window.getSelection(), range = document.createRange();
+  range.selectNodeContents(host);
+  sel.removeAllRanges(); sel.addRange(range);
+  var ok = false;
+  try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+  sel.removeAllRanges(); document.body.removeChild(host);
+  if (ok) { done(); } else { fallbackCopy(tsv, done); }
+}
+function fallbackCopy(text, done) {
+  var ta = document.createElement('textarea');
+  ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  try { document.execCommand('copy'); done(); } catch (e) { alert('Copy failed — select the table manually.'); }
+  document.body.removeChild(ta);
+}
+</script>
+{% endblock %}

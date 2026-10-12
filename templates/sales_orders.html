@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<h2>Sales orders <span class="muted">({{ held|length }} held)</span></h2>
+<p class="muted">Sales orders / order acknowledgements are held for a maturity window instead of being
+  recorded immediately. If a formal invoice for the same vendor + order number arrives, the invoice is
+  used and the order is dropped; otherwise the order records itself when the window elapses.</p>
+
+<h3>Held</h3>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Vendor</th><th>Order #</th><th class="num">Amount</th><th>Store</th>
+      <th>Held</th><th>Records on</th><th>Links</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for o in held %}
+      <tr>
+        <td>{{ o.vendor_matched or '—' }}</td>
+        <td style="white-space:nowrap;">{{ o.number or '—' }}</td>
+        <td class="num">{{ money(o.amount) if o.amount is not none else '—' }}</td>
+        <td>{{ (o.store_matched | store_label) or '—' }}</td>
+        <td class="muted" style="white-space:nowrap;">{{ (o.held_at | us_datetime) or '—' }}</td>
+        <td class="muted" style="white-space:nowrap;">
+          {{ (o.release_after | us_datetime) or '—' }}</td>
+        <td style="white-space:nowrap;">
+          {% if o.source_email %}<a href="/browse?email={{ o.source_email|urlencode }}" title="{{ o.source_email }}">records</a>{% endif %}
+          {% if o.file_preview %} · <a href="{{ o.file_preview }}" target="_blank">File</a>{% endif %}
+          {% if o.gmail_link %} · <a href="{{ o.gmail_link }}" target="_blank">Email</a>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          <form method="post" action="/sales-orders/{{ o.id }}/release" style="display:inline;margin:0;">
+            <button class="btn secondary" type="submit" style="padding:4px 10px;"
+              title="Record on the next classify run instead of waiting">Release now</button>
+          </form>
+          <form method="post" action="/sales-orders/{{ o.id }}/ignore" style="display:inline;margin:0 0 0 4px;"
+            onsubmit="return confirm('Ignore this sales order? It will never be recorded.');">
+            <button class="btn" type="submit" style="background:#b45309;padding:4px 10px;">Ignore</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted" style="padding:18px;">Nothing held.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if superseded %}
+<h3 style="margin-top:18px;">Superseded <span class="muted">(an invoice arrived, or manually ignored)</span></h3>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr><th>Vendor</th><th>Order #</th><th class="num">Amount</th><th>Replaced by</th><th>Held</th></tr></thead>
+    <tbody>
+    {% for o in superseded %}
+      <tr>
+        <td>{{ o.vendor_matched or '—' }}</td>
+        <td style="white-space:nowrap;">{{ o.number or '—' }}</td>
+        <td class="num">{{ money(o.amount) if o.amount is not none else '—' }}</td>
+        <td>{{ o.matched_invoice or '—' }}
+          {% if o.source_email %}<a class="muted" href="/browse?email={{ o.source_email|urlencode }}" style="margin-left:6px;">records</a>{% endif %}</td>
+        <td class="muted" style="white-space:nowrap;">{{ (o.held_at | us_date) or '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if released %}
+<h3 style="margin-top:18px;">Recently released <span class="muted">(recorded after the hold window)</span></h3>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr><th>Vendor</th><th>Order #</th><th class="num">Amount</th><th>Recorded invoice</th><th>Held</th></tr></thead>
+    <tbody>
+    {% for o in released %}
+      <tr>
+        <td>{{ o.vendor_matched or '—' }}</td>
+        <td style="white-space:nowrap;">{{ o.number or '—' }}</td>
+        <td class="num">{{ money(o.amount) if o.amount is not none else '—' }}</td>
+        <td>{% if o.source_email %}<a href="/browse?email={{ o.source_email|urlencode }}" title="{{ o.source_email }}">records</a>{% else %}—{% endif %}</td>
+        <td class="muted" style="white-space:nowrap;">{{ (o.held_at | us_date) or '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

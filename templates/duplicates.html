@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<style>
+  /* Scoped comparison table for each duplicate set: fields down the side, one column
+     per copy, so amounts/dates line up side by side. Overrides base.html's sticky th
+     + zebra striping. */
+  .duptable { width:auto; border-collapse:collapse; font-size:12.5px; }
+  .duptable th, .duptable td { border:1px solid var(--line); padding:4px 10px; vertical-align:top;
+                               text-align:left; white-space:nowrap; }
+  .duptable th { position:static; top:auto; background:#fafbfc; font-weight:600; }
+  .duptable tbody tr:nth-child(even) { background:transparent; }
+  .duptable tbody tr:hover td { background:#f3f7fc; }
+  .duptable td.rowlabel, .duptable th.rowlabel { background:#fafbfc; color:var(--muted); font-weight:600; }
+  .duptable td.amt { text-align:left; font-variant-numeric:tabular-nums; font-weight:700; }
+  .duptable td.amtdiff { color:var(--bad); }   /* the outlier amount(s) in a disagreeing set */
+</style>
+<h2>Possible Duplicates
+  <span class="muted">({{ dup_groups|length }} set{{ '' if dup_groups|length == 1 else 's' }} to review)</span>
+</h2>
+<p class="muted">Each table is one document's copies side by side — the likely <strong>original</strong> plus
+every copy still flagged as a possible duplicate. Per copy: <strong>ignore</strong> it (excluded from QB,
+keeps the others) or <strong>dismiss the flag</strong> if it isn't actually a duplicate. Resolved sets drop
+off this page. Excluded-vendor <em>invoices</em> are left out (they never enter QB anyway); payments are
+always shown.</p>
+
+{% if flagged %}
+<div class="card" style="border-color:var(--ok); background:#f0f9f4;">
+  Flagged this set for review — it's now on <a href="/flags">Flags</a> as one entry (every copy's data embedded
+  for the investigation). The set stays here until you resolve the copies above.
+</div>
+{% endif %}
+
+{% macro dup_actions(r, original_email, records) %}
+  {% if r.duplicate_ignored %}
+    {# Already-ignored context copy: only offer to bring it back if it was ignored by mistake. #}
+    <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;">
+      <input type="hidden" name="action" value="restore">
+      <button class="btn secondary" type="submit" style="padding:3px 9px; font-size:12px;"
+              title="Un-ignore this copy (bring it back as a live record)">Restore</button>
+    </form>
+  {% else %}
+  {% set flagged = r.duplicate_suspect %}
+  {# "Keep this one" acts only over the LIVE copies — already-ignored ones stay ignored. #}
+  {% set live_others = records | rejectattr('duplicate_ignored') | list %}
+  <div style="display:flex; gap:5px; flex-wrap:wrap;">
+    {% if live_others|length > 1 %}
+    <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate/keep" style="margin:0;"
+          onsubmit="return confirm('Keep this {{ r.record_type }} ({{ (r.store_matched | store_label) or '?' }}, {{ money(r.amount) }}) and mark the other {{ live_others|length - 1 }} live cop{{ 'y' if live_others|length - 1 == 1 else 'ies' }} in this set as duplicates, excluded from QuickBooks?');">
+      {% for other in records %}{% if (other.record_id != r.record_id or other.record_type != r.record_type) and not other.duplicate_ignored %}
+      <input type="hidden" name="others" value="{{ other.record_type }}:{{ other.record_id }}">
+      {% endif %}{% endfor %}
+      <button class="btn ok" type="submit" style="padding:3px 9px; font-size:12px;">Keep this one</button>
+    </form>
+    {% endif %}
+    <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;"
+          onsubmit="return confirm('Mark this {{ r.record_type }} ({{ (r.store_matched | store_label) or '?' }}, {{ money(r.amount) }}) as a duplicate and exclude it from QuickBooks?');">
+      <input type="hidden" name="action" value="ignore">
+      <input type="hidden" name="duplicate_of" value="{{ original_email if flagged else '' }}">
+      <button class="btn" type="submit" style="padding:3px 9px; font-size:12px;">Ignore</button>
+    </form>
+    {% if flagged %}
+    <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;">
+      <input type="hidden" name="action" value="clear">
+      <button class="btn secondary" type="submit" style="padding:3px 9px; font-size:12px;">Not dup</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+{% endmacro %}
+
+{% for g in dup_groups %}
+  {# Red-flag ONLY the outlier amount(s), not the whole row. Group the set's amounts by value
+     (as a 2-dp string key so float noise never splits an equal pair; None gets its own key).
+     A value that appears MORE THAN ONCE has agreement → normal color; a value appearing exactly
+     once WHEN the set disagrees is the outlier → red. All-identical → amt_multi false → nothing
+     red. All-distinct (no consensus) → every value is a lone key → all red, which is reasonable. #}
+  {% set ns = namespace(keys=[]) %}
+  {% for r in g.records %}{% set _ = ns.keys.append(('%.2f'|format(r.amount)) if r.amount is not none else '∅') %}{% endfor %}
+  {% set amt_multi = (ns.keys | unique | list | length) > 1 %}
+  <div class="card">
+    <div style="overflow-x:auto;">
+      <table class="duptable">
+        <thead>
+          <tr>
+            <th class="rowlabel"></th>
+            {% for r in g.records %}
+            <th style="background:{{ '#eef2f7' if r.duplicate_ignored else ('#eef4fb' if r.duplicate_suspect else '#f0f9f4') }};{{ 'color:var(--muted);' if r.duplicate_ignored }}">
+              {{ 'Ignored' if r.duplicate_ignored else ('Possible duplicate' if r.duplicate_suspect else 'Likely Correct') }}
+              <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;">{{ r.record_type.replace('_', ' ') | title }}</div>
+            </th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="rowlabel">Store</td>
+            {% for r in g.records %}<td>{{ (r.store_matched | store_label) or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">Vendor</td>
+            {% for r in g.records %}<td>{{ r.vendor_matched or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">{{ 'Reference #' if g.record_type == 'payment' else 'Invoice #' }}</td>
+            {% for r in g.records %}<td>{{ r.number or '—' }}</td>{% endfor %}</tr>
+          {% if g.record_type == 'payment' and g.records | selectattr('applied_invoice') | list %}
+          <tr><td class="rowlabel" title="The invoice the remittance says this payment settles. One reference can pay several invoices, so different invoice numbers here mean different payments.">Applied to invoice</td>
+            {% for r in g.records %}<td>{{ r.applied_invoice or '—' }}</td>{% endfor %}</tr>
+          {% endif %}
+          <tr><td class="rowlabel">Amount</td>
+            {% for r in g.records %}
+            {% set k = ('%.2f'|format(r.amount)) if r.amount is not none else '∅' %}
+            <td class="amt{{ ' amtdiff' if (amt_multi and ns.keys.count(k) == 1) }}">{{ money(r.amount) }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">Date</td>
+            {% for r in g.records %}<td>{{ (r.record_date | us_date) or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">Received</td>
+            {% for r in g.records %}<td>{{ (r.received_at | us_datetime) or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">Sender Email</td>
+            {% for r in g.records %}<td>{{ r.sender or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel">Links</td>
+            {% for r in g.records %}
+            <td style="white-space:nowrap;">
+              <a href="/records/{{ r.record_type }}/{{ r.record_id }}">Details</a>
+              {% set url = file_url(r.file_path) %}
+              {% if url %} · <a href="{{ url }}" target="_blank">File</a>{% endif %}
+              {% if r.gmail_link %} · <a href="{{ r.gmail_link }}" target="_blank">Email</a>{% endif %}
+            </td>
+            {% endfor %}</tr>
+          <tr><td class="rowlabel"></td>
+            {% for r in g.records %}<td>{{ dup_actions(r, g.original_email, g.records) }}</td>{% endfor %}</tr>
+        </tbody>
+      </table>
+    </div>
+    {# Flag the WHOLE set for review as ONE entry — every copy above (ignored ones included, as
+       context for why the set looked ambiguous) is embedded in the single flag's snapshot, since
+       the investigating bot sees only that snapshot, never the DB. #}
+    <form method="post" action="/duplicates/flag_set"
+          style="margin:8px 0 0; display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+      {% for r in g.records %}
+      <input type="hidden" name="records" value="{{ r.record_type }}:{{ r.record_id }}">
+      {% endfor %}
+      <input type="text" name="note" required placeholder="Why flag this set for review? (required)"
+             style="flex:1; min-width:260px; padding:4px 8px; font-size:12.5px;">
+      <button class="btn secondary" type="submit" style="padding:4px 11px; font-size:12px;"
+              title="Create one review flag covering all {{ g.records|length }} copies in this set">
+        Flag set for review</button>
+    </form>
+  </div>
+{% else %}
+  <div class="card muted">No possible duplicates to review right now.</div>
+{% endfor %}
+{% endblock %}

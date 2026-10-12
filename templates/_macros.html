@@ -1,0 +1,101 @@
+{# Shared helpers. Import with:
+   {% from "_macros.html" import run_options, run_label, money %} #}
+
+{# Currency: renders e.g. $1,091.33 (negatives as -$50.00); blank for None/''.
+   NOTE: QB entry deliberately does NOT use this — it shows raw numbers for paste. #}
+{% macro money(v) -%}
+  {%- if v is not none and v != '' -%}
+    {%- if v < 0 -%}-${{ '{:,.2f}'.format(-v) }}{%- else -%}${{ '{:,.2f}'.format(v) }}{%- endif -%}
+  {%- endif -%}
+{%- endmacro %}
+
+{# Human-readable OUTCOME for a record row/detail (see record-detail feature). `r`
+   needs: record_type, entered_in_qb, duplicate_ignored, skip_qb_import, duplicate_suspect, ignored_by.
+   Order is significant — first match wins (manual ignore checked ahead of the plain vendor skip). #}
+{% macro outcome(r) -%}
+  {%- if r.record_type == 'review' -%}In review
+  {%- elif r.entered_in_qb -%}Entered in QB
+  {%- elif r.duplicate_ignored -%}Duplicate — auto-ignored (kept out of QB)
+  {%- elif r.skip_qb_import and r.ignored_by -%}Ignored by {{ r.ignored_by }} — recorded, not entered in QB
+  {%- elif r.skip_qb_import -%}Excluded vendor — recorded, not entered in QB
+  {%- elif r.duplicate_suspect -%}Possible duplicate — recorded
+  {%- else -%}Recorded — pending QB entry
+  {%- endif -%}
+{%- endmacro %}
+
+{# One-click "Ignore this vendor" → POST /vendors/exclude (ticks Exclude from QB for `vendor`,
+   idempotent). Reusable anywhere an unresolved vendor name shows. `return_to` is where to land
+   after (empty → the route falls back to the Referer). Confirms first (broad action — excludes ALL
+   of the vendor's invoices going forward). The confirm text is deliberately generic (no vendor name
+   interpolated) so an apostrophe in the name can't break the JS. Renders nothing when vendor is blank. #}
+{% macro ignore_vendor_button(vendor, return_to='', label='Ignore this vendor', cls='btn secondary', style='') -%}
+  {%- if vendor -%}
+  <form method="post" action="/vendors/exclude" style="display:inline; margin:0;"
+        onsubmit="return confirm('Exclude this vendor from QuickBooks entirely? ALL of its invoices will be skipped going forward — not just this record.');">
+    <input type="hidden" name="vendor_name" value="{{ vendor }}">
+    <input type="hidden" name="return_to" value="{{ return_to }}">
+    <button class="{{ cls }}" type="submit"{% if style %} style="{{ style }}"{% endif %}
+            title="Add “{{ vendor }}” to Excluded Vendors — its invoices won't enter QuickBooks">{{ label }}</button>
+  </form>
+  {%- endif -%}
+{%- endmacro %}
+
+{# <option> list for a `run` <select>. `selected` is the current run_id ("" = all). #}
+{% macro run_options(runs, selected) -%}
+  <option value="">all runs</option>
+  {%- for r in runs %}
+  <option value="{{ r.run_id }}" {{ 'selected' if selected == r.run_id }}>
+    {{ (r.started_at | us_datetime) if r.started_at else r.run_id }}
+    {%- if r.n_results is not none %} · {{ r.n_results }} rec{% endif %}
+    {%- if r.n_review %} / {{ r.n_review }} rev{% endif %}
+    {%- if not r.finished_at %} · (running){% endif %}
+  </option>
+  {%- endfor %}
+{%- endmacro %}
+
+{# Clickable sortable column header. `key` is the sort key; `params` is a dict of
+   the page's CURRENT query params (filters + sort + direction). Clicking keeps all
+   filters, sets sort=key, and toggles asc/desc (a new column starts asc). Arrow
+   shows the active column's direction. Renders a full <th>. #}
+{% macro sort_th(label, key, params, numeric=False) -%}
+  {%- set cur = params.get('sort') -%}
+  {%- set dir = (params.get('direction') or 'desc')|lower -%}
+  {%- set newdir = ('asc' if not (cur == key and dir == 'asc') else 'desc') -%}
+  {%- set parts = [] -%}
+  {%- for k, v in params.items() if k not in ('sort', 'direction', 'page') and v -%}
+    {%- set _ = parts.append(k ~ '=' ~ (v|urlencode)) -%}
+  {%- endfor -%}
+  {%- set _ = parts.append('sort=' ~ key) -%}
+  {%- set _ = parts.append('direction=' ~ newdir) -%}
+  <th{% if numeric %} class="num"{% endif %}><a href="?{{ parts|join('&') }}" style="color:inherit; text-decoration:none;">{{ label }}{% if cur == key %} <span style="color:var(--brand);">{{ '▲' if dir == 'asc' else '▼' }}</span>{% endif %}</a></th>
+{%- endmacro %}
+{% macro run_label(runs, run_id) -%}
+  {%- for r in runs if r.run_id == run_id -%}
+    {{ (r.started_at | us_datetime) if r.started_at else r.run_id }}
+  {%- else -%}{{ run_id }}{%- endfor -%}
+{%- endmacro %}
+
+{# Amount filter: a single EXACT "Amount" field by default (param `amount`), with a "range"
+   toggle that reveals Min/Max (params `amount_min`/`amount_max`). Starts in range mode only when
+   a min/max is set and no exact amount is — so bookmarked links of either kind reopen correctly.
+   The hidden group's inputs are `disabled` so they never submit (no stale/conflicting param).
+   Relies on the global amtToggle() defined in base.html. #}
+{% macro amount_filter(amount, amount_min, amount_max) -%}
+  {%- set range_on = (amount_min or amount_max) and not amount -%}
+  <span class="amtfilter" data-range="{{ '1' if range_on else '0' }}">
+    <span class="amt-exact"{% if range_on %} style="display:none;"{% endif %}>
+      <label>Amount <input type="number" step="0.01" name="amount" value="{{ amount or '' }}"
+             {% if range_on %}disabled {% endif %}style="width:90px;"></label>
+      <a href="#" class="amt-toggle" onclick="amtToggle(this);return false;"
+         title="switch to a min/max range">range&nbsp;⇄</a>
+    </span>
+    <span class="amt-range"{% if not range_on %} style="display:none;"{% endif %}>
+      <label>Amount min <input type="number" step="0.01" name="amount_min" value="{{ amount_min or '' }}"
+             {% if not range_on %}disabled {% endif %}style="width:80px;"></label>
+      <label>Amount max <input type="number" step="0.01" name="amount_max" value="{{ amount_max or '' }}"
+             {% if not range_on %}disabled {% endif %}style="width:80px;"></label>
+      <a href="#" class="amt-toggle" onclick="amtToggle(this);return false;"
+         title="switch to a single exact amount">exact&nbsp;⇄</a>
+    </span>
+  </span>
+{%- endmacro %}

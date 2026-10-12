@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options %}
+{% block content %}
+<h2>Emails <span class="muted">({{ total }} email{{ '' if total == 1 else 's' }})</span></h2>
+<p class="muted">Every ingested email and what the system did with it — a ledger so nothing is invisible. Read-only.</p>
+
+<div class="card">
+  <form method="get" action="/emails">
+    <div class="row">
+      <div><label>Disposition</label>
+        <select name="disposition"><option value="">any</option>
+          {% for key, lbl in dispositions %}<option value="{{ key }}" {{ 'selected' if params.disposition == key }}>{{ lbl }}</option>{% endfor %}
+        </select></div>
+      <div><label>Email type</label>
+        <select name="email_type"><option value="">any</option>
+          {% for t in email_types %}<option value="{{ t }}" {{ 'selected' if params.email_type == t }}>{{ t }}</option>{% endfor %}
+        </select></div>
+      <div><label>Run</label>
+        <select name="run">{{ run_options(runs, params.run) }}</select></div>
+      <div><label>Received from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
+      <div><label>Received to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
+      <div><label>Search (subject / sender)</label><input name="search" value="{{ params.search }}"></div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn secondary" href="/emails">Reset</a>
+    </div>
+  </form>
+</div>
+
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Received</th><th>Sender</th><th>Subject</th><th>Type</th>
+      <th>Disposition</th><th>Records</th><th>Run</th><th>Gmail</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td class="muted" style="white-space:nowrap;">{{ (r.received_at | us_datetime) or '—' }}</td>
+        <td class="muted" style="white-space:nowrap;" title="{{ r.from_address or '' }}">{{ r.from_address or '—' }}</td>
+        <td title="{{ r.subject or '' }}">{{ (r.subject or '—')[:80] }}</td>
+        <td class="muted">{{ r.email_type or '—' }}</td>
+        <td>{{ r.disposition }}</td>
+        <td class="muted" style="white-space:nowrap;">
+          {% for rec in r.records %}{% if not loop.first %}, {% endif %}<a href="/records/{{ rec.record_type }}/{{ rec.id }}">{{ rec.record_type }} #{{ rec.id }}</a>{% else %}—{% endfor %}
+        </td>
+        <td class="muted" style="white-space:nowrap;">{{ r.run_id or '—' }}</td>
+        <td class="muted">{% if r.gmail_link %}<a href="{{ r.gmail_link }}" target="_blank">Email link</a>{% else %}—{% endif %}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted" style="padding:18px;">No emails match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if pages > 1 %}
+<div class="card" style="display:flex; gap:12px; align-items:center;">
+  {% set qs = [] %}
+  {% for k in ['disposition','email_type','run','date_from','date_to','search'] %}
+    {% if params[k] %}{% set _ = qs.append(k ~ '=' ~ (params[k]|urlencode)) %}{% endif %}
+  {% endfor %}
+  {% set base = '/emails?' ~ (qs|join('&')) %}
+  {% if page > 1 %}<a class="btn secondary" href="{{ base }}{{ '&' if qs else '' }}page={{ page-1 }}">&larr; Prev</a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a class="btn secondary" href="{{ base }}{{ '&' if qs else '' }}page={{ page+1 }}">Next &rarr;</a>{% endif %}
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options %}
+{% block content %}
+<h2>Statement exceptions
+  <span class="muted">({{ items|length }} statement{{ '' if items|length == 1 else 's' }} with open exceptions)</span></h2>
+<p class="muted">Missing or amount-mismatched invoices a vendor's statement lists but we haven't recorded. One
+row per statement — resolve or assign the whole statement. These are reconciled fresh every classify
+run, so a row clears on its own once the invoice is recorded.</p>
+<div class="card">
+  <form method="get" action="/statements" style="margin:0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
+    <div>
+      <label>Run</label><br>
+      <select name="run" onchange="this.form.submit()" style="max-width:240px;">{{ run_options(runs, run) }}</select>
+    </div>
+    <div>
+      <label>Vendor</label><br>
+      <select name="vendor" onchange="this.form.submit()">
+        <option value="">all vendors</option>
+        {% for v in vendors %}<option value="{{ v }}" {{ 'selected' if vendor == v }}>{{ v }}</option>{% endfor %}
+      </select>
+    </div>
+    <div>
+      <label>Search</label><br>
+      <input name="search" value="{{ search or '' }}" placeholder="vendor / #">
+    </div>
+    <div>
+      <label>Assigned to</label><br>
+      <select name="assigned" onchange="this.form.submit()">
+        <option value="">anyone</option>
+        <option value="__unassigned__" {{ 'selected' if assigned == '__unassigned__' }}>unassigned</option>
+        {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if assigned == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
+      </select>
+    </div>
+    <div><button class="btn secondary" type="submit" style="padding:5px 12px;">Search</button></div>
+    {% if run or vendor or search or assigned %}<div><a class="btn secondary" href="/statements" style="padding:5px 12px;">clear</a></div>{% endif %}
+    <noscript><button class="btn" type="submit">Apply</button></noscript>
+  </form>
+</div>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      <th>Flagged</th><th>Vendor</th><th>Invoice #</th><th>Status</th><th>Why flagged</th><th>Source email</th><th></th>
+    </tr></thead>
+    <tbody>
+    {% for it in items %}
+      <tr style="background:#fff7ed;">
+        <td class="muted" style="white-space:nowrap;">
+          {{ (it.flagged_at | us_datetime) or '—' }}
+          {% if it.run_id %}<br><span title="first seen in run">{{ it.run_id }}</span>{% endif %}
+        </td>
+        <td>{{ it.vendor_matched or '—' }}</td>
+        <td style="white-space:nowrap; width:1%;">{{ it.invoice_number or '—' }}</td>
+        <td style="white-space:nowrap;">
+          {% if it.status == 'amount_mismatch' %}
+            <span class="pill" style="background:#fef3c7;color:#92400e;">{{ it.status_label }}</span>
+          {% elif it.status == 'missing' %}
+            <span class="pill" style="background:#fee2e2;color:#991b1b;">{{ it.status_label }}</span>
+          {% else %}
+            <span class="pill" style="background:#ede9fe;color:#5b21b6;">{{ it.status_label }}</span>
+          {% endif %}
+          <div><span class="pill" style="background:#e0e7ff;color:#3730a3;" title="from a vendor statement">📄 Statement</span></div>
+          {% if it.assigned_to %}<div><span class="pill" style="background:#ecfdf5;color:#065f46;">👤 {{ it.assigned_to }}</span></div>{% endif %}
+          <form method="post" action="/statement-line/assign" style="margin-top:4px;">
+            <input type="hidden" name="line_ids" value="{{ it.line_ids | join(',') }}">
+            <select name="assigned_to" onchange="this.form.submit()" style="font-size:12px;padding:2px 4px;">
+              <option value="">— unassigned —</option>
+              {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if it.assigned_to == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
+            </select>
+          </form>
+        </td>
+        <td class="muted">
+          <div style="white-space: pre-line; max-height: 140px; overflow-y: auto;">{{ it.question or '' }}</div>
+        </td>
+        <td style="white-space:nowrap;">
+          {% if it.source_email %}<a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">records</a>{% endif %}
+          {% if it.gmail_link %}<br><a href="{{ it.gmail_link }}" target="_blank">Email link</a>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          <form method="post" action="/statement-line/dismiss-group" style="display:inline;margin:0;"
+                onsubmit="return confirm('Resolve / dismiss all {{ it.line_count }} open line(s) on this statement? They leave the queue and will not reappear.');">
+            <input type="hidden" name="line_ids" value="{{ it.line_ids | join(',') }}">
+            <button class="btn secondary" type="submit" title="Mark the whole statement handled — won't reappear"
+                    style="padding:4px 10px;">Resolve / dismiss</button>
+          </form>
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="7" class="muted" style="padding:18px;">No statement exceptions. 🎉</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

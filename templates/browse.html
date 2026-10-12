@@ -1,0 +1,255 @@
+{% extends "base.html" %}
+{% from "_macros.html" import run_options, sort_th, money, outcome, amount_filter %}
+{% block content %}
+<h2>Records
+  <span class="muted">
+    {% if source == 'history' %}({{ total }} ledger rows · read-only){% else %}({{ rows|length }} shown, max 2000){% endif %}
+  </span>
+</h2>
+
+{# ---- source toggle (Records = recorded items; History = dedup ledger) ---- #}
+<div class="card" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+  <strong>View:</strong>
+  <a class="btn {{ 'secondary' if source=='history' else '' }}" href="/browse?source=records&excluded={{ excluded }}">Records</a>
+  <a class="btn {{ '' if source=='history' else 'secondary' }}" href="/browse?source=history&excluded={{ excluded }}">History ledger</a>
+  <span class="muted">Records = recorded invoices / credit-memos / payments (+ in-review items). History = the read-only invoice_history dedup ledger.</span>
+</div>
+
+{% if source == 'history' %}
+{# =================== HISTORY LEDGER (read-only) =================== #}
+<div class="card">
+  <form method="get" action="/browse">
+    <input type="hidden" name="source" value="history">
+    <div class="row">
+      <div><label>Excluded vendors</label>
+        <select name="excluded">
+          {% for v,l in [('exclude','exclude'),('include','include'),('only','only')] %}<option value="{{ v }}" {{ 'selected' if excluded==v }}>{{ l }}</option>{% endfor %}
+        </select></div>
+      <div><label>Vendor contains</label><input name="vendor" value="{{ params.vendor }}"></div>
+      <div><label>Invoice #</label><input name="invoice_number" value="{{ params.invoice_number }}"></div>
+      <div><label>Store</label>
+        <select name="store"><option value="">any</option>
+          {% for s in stores %}<option value="{{ s }}" {{ 'selected' if params.store==s }}>{{ s | store_label }}</option>{% endfor %}
+        </select></div>
+      <div><label>Date from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
+      <div><label>Date to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
+      <div><label>Amount</label>{{ amount_filter(params.amount, params.amount_min, params.amount_max) }}</div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn secondary" href="/browse?source=history">Reset</a>
+    </div>
+  </form>
+</div>
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      {{ sort_th('Vendor', 'vendor', params) }}
+      {{ sort_th('Store', 'store', params) }}
+      {{ sort_th('Invoice #', 'invoice_number', params) }}
+      {{ sort_th('Invoice date', 'invoice_date', params) }}
+      {{ sort_th('Amount', 'amount', params, numeric=True) }}
+      {{ sort_th('Recorded', 'date_added', params) }}
+      <th>Source</th><th>Links</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td>{{ r.vendor_matched or '—' }}</td>
+        <td>{{ (r.store_matched | store_label) or '—' }}</td>
+        <td>{{ r.invoice_number or '—' }}</td>
+        <td>{{ r.invoice_date | us_date }}</td>
+        <td class="num">{{ money(r.invoice_amount) }}</td>
+        <td class="muted">{{ r.date_added | us_date }}</td>
+        <td class="muted">{{ r.source_file or '' }}</td>
+        <td>
+          {% set url = file_url(r.file_path) %}
+          {% if url %}<a href="{{ url }}" target="_blank">File link</a>{% endif %}
+          {% if r.gmail_link %}{% if url %} · {% endif %}<a href="{{ r.gmail_link }}" target="_blank">Email link</a>{% endif %}
+          {% if not url and not r.gmail_link %}—{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="8" class="muted" style="padding:18px;">No ledger rows match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if pages > 1 %}
+<div class="card" style="display:flex; gap:12px; align-items:center;">
+  {% set qs = [] %}
+  {% for k in ['excluded','vendor','invoice_number','store','date_from','date_to','amount_min','amount_max','amount','sort','direction'] %}
+    {% if params[k] %}{% set _ = qs.append(k ~ '=' ~ (params[k]|urlencode)) %}{% endif %}
+  {% endfor %}
+  {% set base = '/browse?source=history&' ~ (qs|join('&')) %}
+  {% if page > 1 %}<a class="btn secondary" href="{{ base }}&page={{ page-1 }}">&larr; Prev</a>{% endif %}
+  <span class="muted">Page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a class="btn secondary" href="{{ base }}&page={{ page+1 }}">Next &rarr;</a>{% endif %}
+</div>
+{% endif %}
+
+{% else %}
+{# =================== RECORDS =================== #}
+{% if params.email %}
+<div class="card" style="background:#fffdf5;">
+  Filtered to one source email: <strong>{{ params.email }}</strong>
+  <a class="btn secondary" href="/browse?excluded={{ excluded }}" style="padding:2px 8px;">clear</a>
+</div>
+{% endif %}
+{% if params.group %}
+<div class="card" style="background:#eef2ff;">
+  Filtered to duplicate group <strong>{{ params.group }}</strong> — every record tied to this cluster.
+  <a class="btn secondary" href="/browse?excluded={{ excluded }}" style="padding:2px 8px;">clear</a>
+</div>
+{% endif %}
+<div class="card">
+  <form method="get" action="/browse">
+    <input type="hidden" name="source" value="records">
+    {% if params.email %}<input type="hidden" name="email" value="{{ params.email }}">{% endif %}
+    {% if params.group %}<input type="hidden" name="group" value="{{ params.group }}">{% endif %}
+    <div class="row">
+      <div><label>Excluded vendors</label>
+        <select name="excluded">
+          {% for v,l in [('exclude','exclude'),('include','include'),('only','only')] %}<option value="{{ v }}" {{ 'selected' if excluded==v }}>{{ l }}</option>{% endfor %}
+        </select></div>
+      <div><label>Run</label>
+        <select name="run">{{ run_options(runs, params.run) }}</select></div>
+      <div><label>Search (vendor / # / file)</label><input name="search" value="{{ params.search }}"></div>
+      <div><label>Store</label>
+        <select name="store"><option value="">any</option>
+          {% for s in stores %}<option value="{{ s }}" {{ 'selected' if params.store==s }}>{{ s | store_label }}</option>{% endfor %}
+        </select></div>
+      <div><label>Vendor contains</label><input name="vendor" value="{{ params.vendor }}"></div>
+      <div><label>Record type</label>
+        <select name="record_type"><option value="">any</option>
+          {% for t in ['invoice','credit_memo','payment','review'] %}<option value="{{ t }}" {{ 'selected' if params.record_type==t }}>{{ t }}</option>{% endfor %}
+        </select></div>
+      <div><label>Status</label>
+        <select name="status"><option value="">any</option>
+          {% for s in statuses %}<option value="{{ s }}" {{ 'selected' if params.status==s }}>{{ s }}</option>{% endfor %}
+        </select></div>
+      <div><label>Entered in QB</label>
+        <select name="entered"><option value="">any</option>
+          <option value="yes" {{ 'selected' if params.entered=='yes' }}>yes</option>
+          <option value="no" {{ 'selected' if params.entered=='no' }}>no</option>
+        </select></div>
+      <div><label>Possible duplicate</label>
+        <select name="dup"><option value="">all</option>
+          <option value="yes" {{ 'selected' if params.dup=='yes' }}>only flagged</option>
+          <option value="no" {{ 'selected' if params.dup=='no' }}>only not flagged</option>
+        </select></div>
+      <div><label>Ignored duplicates</label>
+        <label style="font-weight:normal; display:flex; align-items:center; gap:6px; padding-top:6px;">
+          <input type="checkbox" name="ignored" value="1" {{ 'checked' if params.ignored=='1' }} style="width:auto;">
+          show ignored
+        </label></div>
+      <div><label>Added from</label><input name="date_from" type="date" value="{{ params.date_from }}"></div>
+      <div><label>Added to</label><input name="date_to" type="date" value="{{ params.date_to }}"></div>
+      <div><label>Amount</label>{{ amount_filter(params.amount, params.amount_min, params.amount_max) }}</div>
+    </div>
+    <div style="margin-top:12px;">
+      <button class="btn" type="submit">Apply</button>
+      <a class="btn secondary" href="/browse">Reset</a>
+    </div>
+  </form>
+</div>
+<style>
+  /* Compact rows: tighter padding + keep the key columns on one line. The long sender email was
+     forcing width and squeezing Store/Vendor/Outcome into narrow, wrapping columns. */
+  .recs td, .recs th { padding:4px 8px; vertical-align:top; }
+  .recs td.nowrap { white-space:nowrap; }
+  .recs .trunc { display:inline-block; max-width:150px; overflow:hidden; text-overflow:ellipsis;
+                 white-space:nowrap; vertical-align:bottom; }
+  /* Compact Flags: smaller pills/buttons so duplicate rows with several controls (ignored / undo /
+     Group / ignore) take far less vertical space. */
+  .recs td.flags-cell { font-size:11px; line-height:1.3; }
+  .recs td.flags-cell .pill { padding:0 5px; font-size:10px; }
+  .recs td.flags-cell .linklike { font-size:11px; }
+  .recs td.flags-cell form { margin:0; }
+</style>
+<div class="card" style="padding:0;">
+  <table class="recs">
+    <thead><tr>
+      {{ sort_th('Type', 'record_type', params) }}
+      {{ sort_th('Store', 'store', params) }}
+      {{ sort_th('Vendor', 'vendor', params) }}
+      {{ sort_th('#', 'number', params) }}
+      {{ sort_th('Date', 'date', params) }}
+      {{ sort_th('Amount', 'amount', params, numeric=True) }}
+      {{ sort_th('Sender', 'sender', params) }}
+      {{ sort_th('Received', 'received', params) }}
+      <th>Flags</th>
+      <th>Outcome</th>
+      <th>Source email</th><th>Links</th>
+    </tr></thead>
+    <tbody>
+    {% for r in rows %}
+      {% set is_review = r.record_type == 'review' %}
+      <tr{% if is_review %} style="background:#f7fbff;"{% endif %}>
+        <td>{{ r.record_type }}</td>
+        <td class="nowrap">{{ (r.store_matched | store_label) or '—' }}</td>
+        <td class="nowrap">{{ r.vendor_matched or '—' }}</td>
+        <td>{{ r.number or '—' }}</td>
+        <td>
+          {% if is_review %}
+            <span class="muted" title="This item is still in review — it has no invoice date of its own yet. Showing the date it was last flagged into the review queue instead.">flagged {{ r.record_date | us_date }}</span>
+          {% else %}
+            {{ r.record_date | us_date }}
+          {% endif %}
+        </td>
+        <td class="num">{{ money(r.amount) }}</td>
+        <td class="muted" title="{{ r.sender or '' }}"><span class="trunc">{{ r.sender or '—' }}</span></td>
+        <td class="muted" style="white-space:nowrap;">{{ (r.received_at | us_datetime) or '—' }}</td>
+        <td class="flags-cell">
+          {% if is_review %}<span class="pill rev">In review</span>{% endif %}
+          {% if r.skip_qb_import %}<span class="pill skip">skip QB</span>{% endif %}
+          {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — ignored</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the record this duplicates">↗</a>{% endif %}
+            {% if r.record_type in ['invoice','payment'] %}
+            <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+              <input type="hidden" name="action" value="restore">
+              <button type="submit" class="linklike" title="not actually a duplicate — restore">undo</button>
+            </form>{% endif %}
+          {% elif r.duplicate_suspect %}<span class="pill dup">dup?</span>
+            {% if r.record_type in ['invoice','payment'] %}
+            <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="display:inline;margin:0;">
+              <input type="hidden" name="action" value="ignore">
+              <button type="submit" class="linklike" title="mark as a confirmed duplicate (exclude from QB)">ignore this one</button>
+            </form>{% endif %}
+          {% endif %}
+          {% if r.duplicate_group_id %}<a class="pill" style="background:#eef2ff;color:#4338ca;" href="?group={{ r.duplicate_group_id|urlencode }}" title="Show all records in this duplicate group">Group {{ r.duplicate_group_id }}</a>{% endif %}
+          {% if r.entered_in_qb %}<span class="pill" style="background:#dcfce7;color:#137547;">in QB</span>{% endif %}
+          {# Manual per-record Ignore / Restore (independent of vendor rules + duplicate detection). #}
+          {% if r.skip_qb_import and r.ignored_by %}
+            <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/ignore" style="display:inline;margin:0;">
+              <input type="hidden" name="ignored" value="0">
+              <button type="submit" class="linklike" title="restore to normal (re-include in QB)">restore</button>
+            </form>
+          {% elif r.record_type in ['invoice','credit_memo','payment'] and not r.skip_qb_import %}
+            <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/ignore" style="display:inline;margin:0;">
+              <input type="hidden" name="ignored" value="1">
+              <button type="submit" class="linklike" title="exclude this one record from QB (manual override)">ignore</button>
+            </form>
+          {% endif %}
+        </td>
+        <td class="muted"><span class="trunc" style="max-width:190px;" title="{{ outcome(r) }}">{{ outcome(r) }}</span></td>
+        <td class="muted" style="white-space:nowrap;">
+          {% if r.email_filename %}<a href="/browse?email={{ r.email_filename|urlencode }}&excluded={{ excluded }}" title="{{ r.email_filename }}">records</a>{% endif %}
+          {% if r.run_id %}<br><span class="muted" title="classify run">{{ r.run_id }}</span>{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          <a href="/records/{{ r.record_type }}/{{ r.record_id }}">Details</a>
+          {% set url = file_url(r.file_path) %}
+          {% if url %} · <a href="{{ url }}" target="_blank">File link</a>{% endif %}
+          {% if r.gmail_link %} · <a href="{{ r.gmail_link }}" target="_blank">Email link</a>{% endif %}
+          {% if is_review %} · <a href="/review/{{ r.record_id }}">review</a>
+          {% elif r.record_type in ['invoice','credit_memo','payment'] %} · <a href="/edit/{{ r.record_type }}/{{ r.record_id }}">edit</a>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="12" class="muted" style="padding:18px;">No records match.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}

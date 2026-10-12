@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<h2>Pending unmatched QB rows{% if pending_count %} <span class="muted">({{ pending_count }} pending)</span>{% endif %}</h2>
+<p class="muted">These are QuickBooks export rows that matched <strong>no app record</strong> when uploaded —
+usually because the vendor's email hadn't been processed yet. They're kept here and
+<strong>resolve automatically</strong> when the matching email arrives (or when you click
+<em>Re-check pending matches</em> after fixing a vendor name). <strong>Dismiss</strong> one only if it
+will never show up as an email — the app record, if any, is never touched either way.
+<a href="/qb-reconcile">← back to reconcile</a></p>
+
+{% set tabs = [('pending','Pending'),('resolved','Resolved'),('dismissed','Dismissed'),('all','All')] %}
+<div class="card" style="display:flex; gap:6px; flex-wrap:wrap; align-items:center;">
+  <span class="muted" style="margin-right:4px;">Show:</span>
+  {% for key, label in tabs %}
+    <a class="btn {{ '' if status==key else 'secondary' }}" href="/qb-reconcile/unmatched?status={{ key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+
+{% if not rows %}
+  <div class="card muted">No {{ status if status != 'all' else '' }} unmatched rows.</div>
+{% else %}
+<div class="card" style="padding:0;">
+<table>
+  <thead><tr>
+    <th>Store</th><th>Vendor</th><th>Type</th><th>Number</th><th class="num">Amount</th>
+    <th>Date</th><th>Source file</th><th>Status</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for u in rows %}
+    <tr>
+      <td>{{ (u.qb_store | store_label) or '—' }}</td>
+      <td>{{ u.qb_name or '—' }}{% if u.qb_std_vendor %} <span class="muted">({{ u.qb_std_vendor }})</span>{% endif %}</td>
+      <td>{{ u.qb_type or '—' }}</td>
+      <td>{{ u.qb_num or '—' }}</td>
+      <td class="num">{{ money(u.qb_amount) }}</td>
+      <td class="muted" style="white-space:nowrap;">{{ (u.qb_date | us_date) or '—' }}</td>
+      <td class="muted" style="font-size:12px;">{{ u.batch_filename or '—' }}</td>
+      <td style="white-space:nowrap;">
+        {% if u.status == 'pending' %}<span class="pill dup">pending</span>
+        {% elif u.status == 'resolved' %}<span class="pill" style="background:#dcfce7;color:#166534;">resolved</span>
+          {% if u.resolved_record_type and u.resolved_record_id %}
+            <a href="/records/{{ u.resolved_record_type }}/{{ u.resolved_record_id }}" title="the record it matched">↗</a>{% endif %}
+        {% elif u.status == 'dismissed' %}<span class="pill skip">dismissed</span>
+        {% else %}{{ u.status }}{% endif %}
+        {% if u.resolved_at %}<div class="muted" style="font-size:11px;">{{ u.resolved_at | us_datetime }}</div>{% endif %}
+      </td>
+      <td style="white-space:nowrap;">
+        {% if u.status == 'pending' %}
+          <form method="post" action="/qb-reconcile/unmatched/{{ u.id }}/dismiss" style="display:inline;margin:0;"
+                onsubmit="return confirm('Dismiss this QB row? Use this only if it will never arrive as an email.');">
+            <button class="btn secondary" type="submit" style="padding:3px 10px; font-size:12px;">Dismiss</button>
+          </form>
+        {% elif u.status == 'dismissed' %}
+          <form method="post" action="/qb-reconcile/unmatched/{{ u.id }}/restore" style="display:inline;margin:0;">
+            <button class="linklike" type="submit" title="put back to pending">restore</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

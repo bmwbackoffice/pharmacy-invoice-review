@@ -1,0 +1,172 @@
+{% extends "base.html" %}
+{% from "_macros.html" import ignore_vendor_button %}
+{% block content %}
+{# A dropdown for a reference-valued column. Includes a blank option; the current value
+   is preselected; a legacy/typo'd value not in the list is still shown (so it stays
+   visible + editable) rather than silently dropped. #}
+{% macro ref_select(name, current, opts, form_id, required) -%}
+  <select name="{{ name }}"{% if form_id %} form="{{ form_id }}"{% endif %}{% if required %} required{% endif %}>
+    {% set cur = (current or '')|string %}
+    <option value=""></option>
+    {% for o in opts %}<option value="{{ o }}"{% if o|string == cur %} selected{% endif %}>{{ o }}</option>{% endfor %}
+    {% if cur and cur not in (opts|map('string')|list) %}<option value="{{ cur }}" selected>{{ cur }} (not in list)</option>{% endif %}
+  </select>
+{%- endmacro %}
+{# Text input backed by a SHARED <datalist> (rendered once per page, referenced by id from
+   every row). Used on pages flagged use_datalist where the option lists are large and a
+   per-row <select> would duplicate the whole list on each row. A stored value not in the
+   list stays as free text automatically — same "(not in list)" tolerance as ref_select. #}
+{% macro ref_datalist_input(name, current, options_from, form_id, required) -%}
+  <input name="{{ name }}" value="{{ (current or '')|string }}" list="opt-{{ options_from }}"
+         autocomplete="off"{% if form_id %} form="{{ form_id }}"{% endif %}{% if required %} required{% endif %}>
+{%- endmacro %}
+{% if page.use_datalist %}
+  {% set _seen = [] %}
+  {% for c in page.columns if c.type == 'select' and c.options_from not in _seen %}
+    {% set _ = _seen.append(c.options_from) %}
+    <datalist id="opt-{{ c.options_from }}">
+      {% for o in (options|default({})).get(c.options_from, []) %}<option value="{{ o }}">{% endfor %}
+    </datalist>
+  {% endfor %}
+{% endif %}
+<h2>{{ page.title }} <span class="muted">({{ items|length }})</span></h2>
+<p class="muted">{{ page.help }} Edits here take effect on the next <code>classify_emails.py</code> run.</p>
+
+{% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% set _qb_n = resolved|default(0)|int %}
+{% set _st_n = stmt_resolved|default(0)|int %}
+{% set _ex_n = (request.query_params.get('excluded') or 0)|int %}
+{% if _qb_n > 0 or _st_n > 0 or _ex_n > 0 %}
+  <div class="ok-msg">Rechecked existing records —
+    {{ _qb_n }} QB record{{ '' if _qb_n == 1 else 's' }} resolved,
+    {{ _st_n }} statement exception{{ '' if _st_n == 1 else 's' }} resolved{% if _ex_n > 0 %},
+    {{ _ex_n }} record{{ '' if _ex_n == 1 else 's' }} newly skipped from QuickBooks{% endif %}.
+  </div>
+{% endif %}
+
+{% if show_vendor_lookup %}{% include "_vendor_lookup.html" %}{% endif %}
+
+{# Add-vendor suggestions: arriving from /qb "add vendor" with a raw spelling that didn't match.
+   Offer to attach it to an existing vendor in one click instead of typing a new row. #}
+{% if suggestions is defined and suggestions %}
+<div class="card" style="background:#f0f7ff; border:1px solid #bfdbfe;">
+  <h3 style="margin-top:0;">Is <b>&ldquo;{{ prefill }}&rdquo;</b> the same as an existing vendor?</h3>
+  <p class="muted" style="margin-top:2px;">One click adds this spelling to that vendor
+    {% if store %}(under {{ store | store_label }}){% endif %} — and the invoice resolves right away.</p>
+  {% for s in suggestions %}
+  <form method="post" action="/reference/vendor-name-map/attach-spelling"
+        style="display:flex; align-items:center; gap:8px; margin:4px 0;">
+    <input type="hidden" name="standard_vendor_name" value="{{ s.standard_vendor_name }}">
+    <input type="hidden" name="raw" value="{{ prefill }}">
+    <input type="hidden" name="store" value="{{ store }}">
+    <button class="btn" type="submit" style="padding:4px 12px;">Yes — same as
+      <b>{{ s.standard_vendor_name }}</b></button>
+    <span class="muted" style="font-size:12.5px;">{{ s.score }}% match{% if s.matched_on and s.matched_on[0] != 'standard name' %} · on {{ s.matched_on[0] }} &ldquo;{{ s.matched_on[1] }}&rdquo;{% endif %}</span>
+  </form>
+  {% endfor %}
+  <p class="muted" style="margin:8px 0 0;">None of these? Add it as a new vendor below.</p>
+</div>
+{% endif %}
+
+{# Not a real vendor mapping? From the /qb "add vendor" flow (prefill = the raw spelling), offer a
+   one-click exclude instead of creating a mapping — covers both the suggestion view and the
+   blank-add fallback. Returns here with a flash. #}
+{% if table == 'vendor_name_map' and prefill %}
+<div class="card" style="background:#fff7ed; border:1px solid #fed7aa;">
+  <h3 style="margin-top:0;">Not a real vendor?</h3>
+  <p class="muted" style="margin:2px 0 8px;">If <b>&ldquo;{{ prefill }}&rdquo;</b> shouldn&rsquo;t be a
+    QuickBooks vendor at all, exclude it in one click instead of adding a mapping — all of its invoices
+    will be skipped going forward.</p>
+  {{ ignore_vendor_button(prefill, '/reference/vendor_name_map',
+                          'Ignore “' ~ prefill ~ '” entirely', 'btn secondary') }}
+</div>
+{% endif %}
+
+<div class="card">
+  <h3 style="margin-top:0;">Add</h3>
+  <form method="post" action="/reference/{{ table }}/add">
+    <div class="row">
+    {% for c in page.columns %}
+      <div>
+        <label>{{ c.label }}{% if c.required %} *{% endif %}</label>
+        {% set pre = prefill if (c.name == 'standard_vendor_name' and prefill) else '' %}
+        {% if c.type == 'checkbox' %}
+          <label style="font-weight:400;"><input type="checkbox" name="{{ c.name }}" value="1" style="width:auto;"> {{ c.label }}</label>
+        {% elif c.type == 'textarea' %}
+          <textarea name="{{ c.name }}" rows="2" {% if c.required %}required{% endif %}>{{ pre }}</textarea>
+        {% elif c.type == 'select' %}
+          {% if page.use_datalist %}
+            {{ ref_datalist_input(c.name, pre, c.options_from, '', c.required) }}
+          {% else %}
+            {{ ref_select(c.name, pre, (options|default({})).get(c.options_from, []), '', c.required) }}
+          {% endif %}
+        {% else %}
+          <input name="{{ c.name }}" value="{{ pre }}" {% if c.required %}required{% endif %}>
+        {% endif %}
+      </div>
+    {% endfor %}
+    </div>
+    <div style="margin-top:10px;"><button class="btn" type="submit">Add</button></div>
+  </form>
+</div>
+
+<input id="refFilter" placeholder="Filter..." style="margin-bottom:10px;width:300px;"
+       oninput="document.querySelectorAll('table tbody tr').forEach(tr =>
+         tr.style.display = (tr.dataset.search || '').includes(this.value.toLowerCase()) ? '' : 'none')">
+
+<div class="card" style="padding:0;">
+  <table>
+    <thead><tr>
+      {% for c in page.columns %}<th>{{ c.label }}</th>{% endfor %}
+      <th style="width:150px;">Audit</th><th style="width:150px;"></th>
+    </tr></thead>
+    <tbody>
+    {% for it in items %}
+      {# HTML5 form= attribute lets one row's inputs (across cells) belong to a
+         single form without nesting a <form> inside <tr> (which the parser hoists). #}
+      {# Build a plain-text search string from the ACTUAL stored field values, so the
+         Filter box works even where cells are <select>/<input> (whose current values
+         aren't dependably in the row's innerText). #}
+      {% set searchbits = [] %}
+      {% for c in page.columns %}{% set _ = searchbits.append((it[c.name] or '')|string) %}{% endfor %}
+      <tr data-search="{{ (searchbits | join(' ')) | lower }}">
+        {% for c in page.columns %}
+          <td>
+            {% if c.type == 'checkbox' %}
+              <input type="checkbox" name="{{ c.name }}" value="1" form="ref-{{ it.id }}"
+                     style="width:auto;" {{ 'checked' if it[c.name] }}>
+            {% elif c.type == 'textarea' %}
+              <textarea name="{{ c.name }}" rows="2" form="ref-{{ it.id }}">{{ it[c.name] or '' }}</textarea>
+            {% elif c.type == 'select' %}
+              {% if page.use_datalist %}
+                {{ ref_datalist_input(c.name, it[c.name], c.options_from, 'ref-' ~ it.id, c.required) }}
+              {% else %}
+                {{ ref_select(c.name, it[c.name], (options|default({})).get(c.options_from, []), 'ref-' ~ it.id, c.required) }}
+              {% endif %}
+            {% else %}
+              <input name="{{ c.name }}" value="{{ it[c.name] or '' }}" form="ref-{{ it.id }}">
+            {% endif %}
+          </td>
+        {% endfor %}
+        <td class="muted">
+          {% if it.created_by %}created {{ it.created_by }}{% if it.created_at %}<br>{{ it.created_at | us_date }}{% endif %}{% endif %}
+          {% if it.edited_by %}<br>edited {{ it.edited_by }}{% if it.edited_at %}<br>{{ it.edited_at | us_datetime }}{% endif %}{% endif %}
+        </td>
+        <td style="white-space:nowrap;">
+          <form id="ref-{{ it.id }}" method="post" action="/reference/{{ table }}/{{ it.id }}/edit" style="display:inline;"></form>
+          <button class="btn secondary" type="submit" form="ref-{{ it.id }}" style="padding:4px 10px;">Save</button>
+          {% if user.role == 'admin' %}
+          <form method="post" action="/reference/{{ table }}/{{ it.id }}/delete" style="display:inline;"
+                onsubmit="return confirm('Delete this entry? The pipeline will stop using it on the next run.');">
+            <button class="btn" style="background:#b91c1c;padding:4px 10px;" type="submit">Delete</button>
+          </form>
+          {% else %}<span class="muted">admin only</span>{% endif %}
+        </td>
+      </tr>
+    {% else %}
+      <tr><td colspan="{{ page.columns|length + 2 }}" class="muted" style="padding:18px;">Nothing here yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

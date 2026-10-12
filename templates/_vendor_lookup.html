@@ -1,0 +1,42 @@
+{# Cross-table vendor/account lookup box. Included at the top of the three vendor-related
+   Setup pages (Vendor names, Vendor → account, Account names). Read-only: one term, matched
+   across all three tables, so "does this vendor have everything it needs" is one glance.
+   Expects `table`, `vlookup` (current term), and `lookup` (web_db.vendor_lookup result or None). #}
+<div class="card" style="background:#f8fafc;">
+  <h3 style="margin-top:0;">Vendor / account lookup <span class="muted" style="font-weight:normal;">— searches Vendor names, Vendor → account, and Account names at once</span></h3>
+  <form method="get" action="/reference/{{ table }}" style="margin:0;">
+    <input name="vlookup" value="{{ vlookup }}" placeholder="e.g. Zahler" style="width:300px;">
+    <button class="btn" type="submit" style="padding:4px 14px;">Look up</button>
+    {% if vlookup %}<a class="btn secondary" href="/reference/{{ table }}" style="padding:4px 10px;">clear</a>{% endif %}
+  </form>
+
+  {% if lookup is not none %}
+    {% if not lookup.vendors and not lookup.accounts %}
+      <p class="muted" style="margin-bottom:0;">No vendor/account data matches &lsquo;{{ lookup.term }}&rsquo;. It needs to be added — use <b>Add</b> on the relevant page below.</p>
+    {% else %}
+      {% for v in lookup.vendors %}
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-top:8px;background:#fff;">
+          <b>{{ v.standard_vendor_name }}</b>
+          {% if not v.in_name_map %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="No row on the Vendor names page">not in Vendor names</span>{% endif %}
+          <div class="muted" style="margin-top:2px;">
+            {% if v.aliases %}Aliases: {{ v.aliases }}<br>{% endif %}
+            {% if v.store_names %}Store names: {% for label, name in v.store_names %}{{ label }}=&ldquo;{{ name }}&rdquo;{% if not loop.last %}, {% endif %}{% endfor %}<br>{% endif %}
+            Account:
+            {% if v.assigned_account %}<b style="color:#166534;">{{ v.assigned_account }}</b>{% else %}
+              <span style="color:#b91c1c;">none assigned</span>
+              <a class="pill" style="background:#fef3c7;color:#92400e;"
+                 href="/reference/vendor_account_assignment?prefill={{ v.standard_vendor_name|urlencode }}"
+                 title="Assign a QuickBooks account to this vendor">assign account</a>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+      {% for a in lookup.accounts %}
+        <div style="border:1px solid #e2e8f0;border-radius:6px;padding:8px 12px;margin-top:8px;background:#fff;">
+          <b>{{ a.standard_account_name }}</b> <span class="muted">(account)</span>
+          {% if a.store_names %}<div class="muted" style="margin-top:2px;">Store names: {% for label, name in a.store_names %}{{ label }}=&ldquo;{{ name }}&rdquo;{% if not loop.last %}, {% endif %}{% endfor %}</div>{% endif %}
+        </div>
+      {% endfor %}
+    {% endif %}
+  {% endif %}
+</div>
