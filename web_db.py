@@ -2076,10 +2076,58 @@ def finish_investigation(inv_id, status, findings=None, error=None, usage=None):
             cur.execute(
                 "UPDATE investigations SET status = %s, findings = %s, error = %s, "
                 "finished_at = now(), num_turns = %s, input_tokens = %s, output_tokens = %s, "
-                "cost_usd = %s, duration_ms = %s WHERE id = %s",
+                "cost_usd = %s, duration_ms = %s WHERE id = %s AND status = 'running'",
                 (status, findings, error, u.get("num_turns"), u.get("input_tokens"),
                  u.get("output_tokens"), u.get("cost_usd"), u.get("duration_ms"), inv_id))
         conn.commit()
+    finally:
+        conn.close()
+    # (Only a still-running row is finished: a run a person stopped or deleted is never overwritten.)
+
+
+def stop_investigation(inv_id, username, detail=""):
+    """Mark a running investigation stopped by a person (status 'failed', error "Stopped by …").
+    Logged. Returns True if it was running."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE investigations SET status = 'failed', finished_at = now(), error = %s "
+                        "WHERE id = %s AND status = 'running'",
+                        (f"Stopped by {username}" + (f" ({detail})" if detail else ""), inv_id))
+            changed = cur.rowcount > 0
+            if changed:
+                cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                            "VALUES ('investigations', %s, 'status', 'running', 'stopped', %s)", (inv_id, username))
+        conn.commit()
+        return changed
+    finally:
+        conn.close()
+
+
+def delete_investigation(inv_id, username):
+    """Delete one investigation record entirely (admins). Refuses a running one -- stop it first. The
+    flag or request it belonged to is untouched. Logged with a short summary of what was deleted.
+    Returns (ok, message)."""
+    conn = connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM investigations WHERE id = %s FOR UPDATE", (inv_id,))
+            inv = cur.fetchone()
+            if not inv:
+                conn.rollback()
+                return (False, "That investigation no longer exists.")
+            if inv["status"] == "running":
+                conn.rollback()
+                return (False, "That investigation is still running — stop it first.")
+            subject = f"flag {inv['flag_id']}" if inv.get("flag_id") else f"request {inv.get('request_id')}"
+            summary = (f"{subject}, {inv['status']}, started {inv['started_at']:%Y-%m-%d %H:%M}"
+                       + (f", ${float(inv['cost_usd']):.4f}" if inv.get("cost_usd") is not None else ""))
+            cur.execute("DELETE FROM investigations WHERE id = %s", (inv_id,))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('investigations', %s, 'deleted', %s, 'deleted', %s)", (inv_id, summary, username))
+        conn.commit()
+        return (True, "Investigation deleted.")
     finally:
         conn.close()
 

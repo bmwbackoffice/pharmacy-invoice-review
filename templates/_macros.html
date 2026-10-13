@@ -12,6 +12,26 @@
 {# Human-readable OUTCOME for a record row/detail (see record-detail feature). `r`
    needs: record_type, entered_in_qb, duplicate_ignored, skip_qb_import, duplicate_suspect, ignored_by.
    Order is significant — first match wins (manual ignore checked ahead of the plain vendor skip). #}
+{# Admin controls for one automated investigation (flags and change requests, 2026-10-13): Stop while it
+   says running (kills its process, or clears a record left by a restart), Delete otherwise. #}
+{% macro inv_controls(inv_id, status) -%}
+  <div style="margin-top:6px; display:flex; gap:6px; flex-wrap:wrap;">
+    {% if status == 'running' %}
+    <form method="post" action="/investigations/{{ inv_id }}/stop" style="display:inline; margin:0;"
+          onsubmit="return confirm('Stop this investigation? Its result will be lost.');">
+      <button class="btn secondary" type="submit" style="padding:2px 10px; font-size:12px;"
+              title="End a stuck or unwanted run">Stop investigation</button>
+    </form>
+    {% else %}
+    <form method="post" action="/investigations/{{ inv_id }}/delete" style="display:inline; margin:0;"
+          onsubmit="return confirm('Delete this investigation record permanently? The flag or request itself stays.');">
+      <button class="btn secondary" type="submit" style="padding:2px 10px; font-size:12px;"
+              title="Remove this investigation record entirely">Delete investigation</button>
+    </form>
+    {% endif %}
+  </div>
+{%- endmacro %}
+
 {% macro outcome(r) -%}
   {%- if r.record_type == 'review' -%}In review
   {%- elif r.entered_in_qb -%}Entered in QB

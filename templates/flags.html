@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import money %}
+{% from "_macros.html" import money, inv_controls %}
 {% block content %}
 <h2>Flags <span class="muted">({{ flags|length }})</span></h2>
 <p class="muted">
@@ -59,6 +59,7 @@
         {% elif f.inv_status == 'failed' %}
           <div style="color:#b91c1c; white-space:pre-wrap; font-size:13px;">{{ f.inv_error }}</div>
         {% endif %}
+        {% if is_admin %}{{ inv_controls(f.inv_id, f.inv_status) }}{% endif %}
       </div>
     {% endif %}
 

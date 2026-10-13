@@ -5729,3 +5729,32 @@ the Maple scan). **Not applied by Claude; the next classify run applies them.**
 Display: `/duplicates` Vendor row shows the standard name under a differing printed one ("American
 Health" / "= Garden Of Life") via a new Jinja filter `std_vendor` (`review_app._std_vendor`). Tests:
 `PaymentDuplicateSweep` in `tests/test_db_rollback.py` (6). Suite: 105 pass.
+
+### Stop / delete automated investigations; stuck runs can't block Investigate any more (2026-10-13)
+
+**Bug found:** investigation #15 (flag 13) sat 'running' since 2026-10-08 14:38 — its process ended with a
+web-app restart. The clean-up for such runs (`fail_stale_investigations`, older than 2× the timeout) only
+ran inside `investigate.enqueue`, i.e. when Investigate was clicked — but any running investigation
+disables every Investigate button, so it could never run. Fix: `investigate.sweep_stale()` now runs on
+every `/flags` and `/requests` page load.
+
+**Stop:** `investigate._run` now uses `Popen` + `communicate(timeout)` and registers each process in
+`_PROCS[inv_id]`; `investigate.stop(inv_id, user)` kills the process tree (`taskkill /T /F` on Windows)
+if it's running in this app, adds the id to `_STOPPED` (the worker then writes nothing) and calls new
+`web_db.stop_investigation` (status 'failed', error "Stopped by <user> (…)", edit_log). A record left by a
+restart is just marked stopped. `web_db.finish_investigation` now only updates a row still 'running', so
+a late result never overwrites a stop. **Delete:** new `web_db.delete_investigation(inv_id, user)` —
+refuses a running one ("stop it first"), deletes the row, logs a summary (subject, status, start, cost) to
+edit_log; the flag/request stays. Admin routes `POST /investigations/{id}/stop` and `/delete` (back to
+Flags or Requests with `?msg=`); buttons via the `inv_controls` macro in `_macros.html` on both pages
+(Stop while running, Delete otherwise, each with a confirm).
+
+**Incident during testing (cleaned up):** the first version of `tests/test_investigations.py` opened its
+connection with `web_db.connect()`, which is autocommit, so its "rolled back" changes were committed at
+11:03:35: change requests #5–#8 ('zz test'), their investigations #16–#21 (three 'running'), edit_log
+#9101/#9102 (credited to joel), and the page-load sweep marked the real stuck #15 'failed' ("interrupted
+(app restart or crash)") — the intended outcome, left as is. The test rows and log entries were removed
+by exact id in one checked transaction; the test now sets `autocommit = False`, and a before/after snapshot
+of live counts confirmed the suite writes nothing. Tests: `tests/test_investigations.py` (the real runner
+with a stand-in process stopped mid-run — process killed, record not overwritten; stop without a process;
+stop/late finish/delete/sweep on rolled-back rows; Stop button on /requests). Suite: 111 pass.

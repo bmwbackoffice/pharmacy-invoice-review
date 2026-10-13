@@ -45,6 +45,55 @@ MAX_TURNS = int(os.environ.get("INVESTIGATE_MAX_TURNS", "30"))
 TIMEOUT_SEC = int(os.environ.get("INVESTIGATE_TIMEOUT_SEC", "600"))
 MODEL = (os.environ.get("INVESTIGATE_MODEL") or "").strip()
 
+# Running investigations in THIS web-app process (inv_id -> Popen), so an admin can stop one
+# (stop(), 2026-10-13). _STOPPED marks runs a person stopped, so the worker doesn't overwrite that.
+_PROCS = {}
+_STOPPED = set()
+_LOCK = threading.Lock()
+
+
+def _kill_tree(proc):
+    """End the claude process AND anything it started (node, tools). On Windows taskkill /T does the
+    tree; elsewhere kill() the process."""
+    try:
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=30)
+        else:
+            proc.kill()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+def sweep_stale():
+    """Mark runs left 'running' by a restart or crash (older than twice the timeout) as failed. Called
+    on every Flags / Requests page load: before 2026-10-13 it ran only when Investigate was clicked,
+    but a stuck run disables every Investigate button, so it never ran (#15 sat 'running' for 5 days)."""
+    try:
+        return web_db.fail_stale_investigations(TIMEOUT_SEC * 2)
+    except Exception:
+        return 0
+
+
+def stop(inv_id, username):
+    """Stop one investigation: kill its process if it's running in this app, and mark the record
+    'failed' with "Stopped by <username>". Returns (ok, message)."""
+    with _LOCK:
+        proc = _PROCS.get(inv_id)
+        _STOPPED.add(inv_id)
+    killed = False
+    if proc is not None and proc.poll() is None:
+        _kill_tree(proc)
+        killed = True
+    changed = web_db.stop_investigation(inv_id, username,
+                                        "process ended" if killed else "no process was running — record cleared")
+    if not changed:
+        return (False, "That investigation isn't running.")
+    return (True, "Investigation stopped." if killed else
+                  "Investigation marked stopped (its process had already ended, e.g. after a restart).")
+
 # Reinforces read-only + treat-note-as-data at the system level, on top of the prompt below.
 _GUARD_SYSTEM = (
     "You are running a READ-ONLY investigation of a flagged accounting record inside this "
@@ -221,23 +270,37 @@ def _run(inv_id, kind, subject):
         prompt = build_prompt(kind, subject)
         env = dict(os.environ)
         env["ANTHROPIC_API_KEY"] = _api_key()      # --bare uses this key exclusively
-        proc = subprocess.run(
-            _build_cmd(), input=prompt, capture_output=True, text=True,
+        # Popen (not run) so stop() can kill it; registered under the investigation id.
+        proc = subprocess.Popen(
+            _build_cmd(), stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace",   # claude emits UTF-8; avoid cp1252 mojibake on Windows
-            cwd=str(REPO_DIR), env=env, timeout=TIMEOUT_SEC)
+            cwd=str(REPO_DIR), env=env)
+        with _LOCK:
+            _PROCS[inv_id] = proc
+        try:
+            out, err_out = proc.communicate(input=prompt, timeout=TIMEOUT_SEC)
+        except subprocess.TimeoutExpired:
+            _kill_tree(proc)
+            proc.communicate()
+            raise
+        finally:
+            with _LOCK:
+                _PROCS.pop(inv_id, None)
+        if inv_id in _STOPPED:
+            return                                   # a person stopped it; stop() already wrote the record
         elapsed_ms = int((time.time() - started) * 1000)
         if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or f"exit code {proc.returncode}").strip()[:2000]
+            err = (err_out or out or f"exit code {proc.returncode}").strip()[:2000]
             web_db.finish_investigation(inv_id, "failed", error=f"claude exited non-zero: {err}",
                                         usage={"duration_ms": elapsed_ms})
             return
-        findings, usage = _parse_result(proc.stdout)
+        findings, usage = _parse_result(out)
         usage.setdefault("duration_ms", elapsed_ms)
         if not findings:
             web_db.finish_investigation(
                 inv_id, "failed",
                 error="could not parse a result from claude output: "
-                      + (proc.stdout or "")[:1000],
+                      + (out or "")[:1000],
                 usage=usage)
             return
         web_db.finish_investigation(inv_id, "completed", findings=findings, usage=usage)

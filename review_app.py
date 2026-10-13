@@ -2045,13 +2045,14 @@ def flags_page(request: Request):
     if not user:
         return _login_redirect()
     is_admin = user["role"] == "admin"
+    import investigate
+    investigate.sweep_stale()          # a run left 'running' by a restart would otherwise block Investigate
     flags = web_db.list_flags(username=user["username"], is_admin=is_admin)
     # Pre-build the copy-paste fix prompt for every approved flag so the /flags page can offer a
     # re-copyable "Copy fix prompt" button (pure text — triggers nothing).
     for f in flags:
         if f.get("status") == "approved_for_fix":
             f["fix_prompt"] = web_db.build_fix_prompt(f)
-    import investigate
     return render(request, "flags.html", user, flags=flags, is_admin=is_admin,
                   busy=web_db.any_investigation_running(),
                   max_turns=investigate.MAX_TURNS)
@@ -2103,13 +2104,41 @@ def requests_page(request: Request):
     if not user:
         return _login_redirect()
     is_admin = user["role"] == "admin"
+    import investigate
+    investigate.sweep_stale()          # a run left 'running' by a restart would otherwise block Investigate
     reqs = web_db.list_change_requests(username=user["username"], is_admin=is_admin)
     for r in reqs:
         if r.get("status") == "approved_for_build":
             r["build_prompt"] = web_db.build_request_prompt(r)   # pure text; triggers nothing
-    import investigate
     return render(request, "requests.html", user, requests=reqs, is_admin=is_admin,
                   busy=web_db.any_investigation_running(), max_turns=investigate.MAX_TURNS)
+
+
+def _investigation_back(request, msg):
+    """Back to the Flags or Requests page the action came from, with a message."""
+    page = "/requests" if "/requests" in (request.headers.get("referer") or "") else "/flags"
+    return RedirectResponse(f"{page}?msg={quote(msg)}", status_code=302)
+
+
+@app.post("/investigations/{inv_id}/stop")
+def investigation_stop(request: Request, inv_id: int):
+    """Admins: stop a stuck or unwanted investigation (kills its process if it's still running)."""
+    user = current_user(request)
+    if not user or user["role"] != "admin":
+        return _login_redirect()
+    import investigate
+    ok, msg = investigate.stop(inv_id, user["username"])
+    return _investigation_back(request, msg)
+
+
+@app.post("/investigations/{inv_id}/delete")
+def investigation_delete(request: Request, inv_id: int):
+    """Admins: delete one investigation record entirely (not while it's running)."""
+    user = current_user(request)
+    if not user or user["role"] != "admin":
+        return _login_redirect()
+    ok, msg = web_db.delete_investigation(inv_id, user["username"])
+    return _investigation_back(request, msg)
 
 
 @app.post("/requests/submit")
