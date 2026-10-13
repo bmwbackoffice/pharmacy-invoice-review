@@ -2700,6 +2700,22 @@ def acquire_run_lock():
     return bool(got)
 
 
+def run_lock_held():
+    """True if some classify run holds the run lock right now (checked by trying it and letting go at
+    once). Used by the web app's 'Check for new email now' button so it doesn't start a second run."""
+    conn = connect()
+    conn.autocommit = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT pg_try_advisory_lock(%s)", (RUN_LOCK_KEY,))
+            got = cur.fetchone()[0]
+            if got:
+                cur.execute("SELECT pg_advisory_unlock(%s)", (RUN_LOCK_KEY,))
+            return not got
+    finally:
+        conn.close()
+
+
 def release_run_lock():
     """Free the run lock (closing its connection frees it too, as does the process exiting)."""
     global _RUN_LOCK_CONN

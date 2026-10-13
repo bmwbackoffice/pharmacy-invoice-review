@@ -73,8 +73,12 @@ def main():
     LOG_DIR.mkdir(exist_ok=True)
     _roll_log()
     started = datetime.now()
+    # "--by NAME": started from the web app's "Check for new email now" button (2026-10-13).
+    by = sys.argv[sys.argv.index("--by") + 1] if "--by" in sys.argv[1:-1] else ""
     with open(LOG, "a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n===== Scheduled run {started:%Y-%m-%d %H:%M:%S} =====\n")
+        if by:
+            log.write(f"(started by hand by {by} from the web app)\n")
         log.flush()
         fetch = _step(log, "gmail_fetcher.py", [], FETCH_TIMEOUT)
         if fetch not in (0, None):

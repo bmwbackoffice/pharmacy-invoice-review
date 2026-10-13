@@ -5760,3 +5760,25 @@ with a stand-in process stopped mid-run — process killed, record not overwritt
 stop/late finish/delete/sweep on rolled-back rows; Stop button on /requests). Suite: 111 pass.
 - 2026-10-13: `/no-live-copy` — the "A person marked a copy" and "Confirmed" sections are now collapsed
   `<details>` (count + one-line description in the summary), so the page opens on the to-do list only.
+- 2026-10-13: the **Last scheduled run** tile moved from System health (admins only) to the FIRST tile of
+  Work, so every user sees a stopped or failed run; `/scheduled-runs` (the log tail) opens for every
+  signed-in user, read-only. The rest of System health stays admins-only.
+
+### Run-problem banner + "Check for new email now" (2026-10-13)
+
+**Banner:** `render()` adds `run_alert` (`review_app.run_alert()`, cached 30 s) to every page; `base.html`
+shows a red bar when the last automatic run FAILED / TIMED OUT or the latest scheduled slot was missed
+("The automatic email check didn't run at 3:30 PM — new invoices aren't being picked up…"), with a
+Details link (/scheduled-runs) and a run-now button. Everyone signed in sees it; it disappears once a run
+succeeds.
+
+**Manual run:** `POST /scheduled-runs/run-now` (buttons: dashboard next to Work, /scheduled-runs, the
+banner) starts `scheduled_run.py --by <user>` in the background (pythonw, DETACHED_PROCESS |
+CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW, cwd = project) — the same unattended fetch + classify the
+schedule runs, logged to the same file with "(started by hand by <user> from the web app)". Refused, with
+a flash message, when `database.run_lock_held()` (new: tries the advisory lock and lets go) says a run is
+going, when the log's last block has no result yet, or when a run started in the last 3 minutes
+(`RUN_NOW_COOLDOWN_MIN`). Read-only users are refused by the read-only guard (403). Works because the web
+app runs from this folder on the machine with the Gmail token; on a different machine it would need its
+own setup. Tests: `tests/test_run_now_banner.py` (10; launcher replaced by a recorder — no real run).
+Suite: 121 pass.

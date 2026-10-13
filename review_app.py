@@ -237,6 +237,12 @@ def render(request, template, user, **ctx):
             ctx["notice"] = web_db.get_active_notice()
         except Exception:
             ctx["notice"] = None
+    # Red banner on every page when the automatic run failed, timed out or was missed (2026-10-13).
+    if user and "run_alert" not in ctx:
+        try:
+            ctx["run_alert"] = run_alert()
+        except Exception:
+            ctx["run_alert"] = None
     return templates.TemplateResponse(request, template, {"user": user, **ctx})
 
 
@@ -414,7 +420,10 @@ def dashboard(request: Request):
         {"label": "QB match review", "count": d.get("qb_pending", 0), "href": "/qb-reconcile/review",
          "note": "doubtful QuickBooks-reconcile matches to confirm"},
     ]
-    health = [last_scheduled_run_tile()] + [
+    # The scheduled run's status is shown to EVERYONE, first in Work (2026-10-13): if runs stop or fail,
+    # whoever opens the dashboard first should notice. The rest of System health stays admins-only.
+    work.insert(0, last_scheduled_run_tile())
+    health = [
         {"label": "Failed emails", "count": d["failed_emails"], "href": "/emails?disposition=error",
          "note": "processing error"},
         {"label": "Never classified", "count": d.get("never_classified", 0),
@@ -651,14 +660,78 @@ def last_scheduled_run_tile():
             "note": note, "alert": run["alert"]}
 
 
-@app.get("/scheduled-runs", response_class=HTMLResponse)
-def scheduled_runs(request: Request, lines: int = 300):
-    """Admins: the end of logs/scheduled_runs.log, newest at the bottom."""
+_RUN_ALERT_CACHE = {"at": 0.0, "value": None}
+_RUN_ALERT_TTL = 30          # seconds; the banner reads the run log at most this often
+
+
+def run_alert():
+    """The banner text when the last automatic run failed, timed out or was missed, else None."""
+    import time as _time
+    now = _time.time()
+    if now - _RUN_ALERT_CACHE["at"] > _RUN_ALERT_TTL:
+        run = last_scheduled_run()
+        text = None
+        if run and run["alert"]:
+            if run["stale"]:
+                text = (f"The automatic email check didn't run at {run['missed'].strftime('%I:%M %p').lstrip('0')} — "
+                        f"new invoices aren't being picked up. Is the computer that runs it on and signed in?")
+            else:
+                text = (f"The last automatic email check {run['result'].split(' (')[0].lower()} "
+                        f"(started {run['started'].strftime('%I:%M %p').lstrip('0')}).")
+        _RUN_ALERT_CACHE.update(at=now, value=text)
+    return _RUN_ALERT_CACHE["value"]
+
+
+RUN_NOW_COOLDOWN_MIN = 3
+
+
+@app.post("/scheduled-runs/run-now")
+def scheduled_run_now(request: Request):
+    """'Check for new email now' (2026-10-13): start the same unattended run the schedule uses
+    (scheduled_run.py --by <user>), in the background with no window, logged to the same file. Refused
+    while a run holds the run lock or when one started in the last few minutes. Read-only users can't
+    reach this (the read-only guard refuses any POST)."""
     user = current_user(request)
     if not user:
         return _login_redirect()
-    if user["role"] != "admin":
-        return render(request, "message.html", user, message="Admins only.")
+    back = request.headers.get("referer") or "/dashboard"
+    back = back + ("&" if "?" in back else "?") + "flash="
+    import database
+    import subprocess
+    import sys
+    try:
+        busy = database.run_lock_held()
+    except Exception:
+        busy = False
+    run = last_scheduled_run()
+    if busy or (run and run["running"]):
+        return RedirectResponse(back + quote("A check is already running — new email will show up when it finishes."),
+                                status_code=302)
+    if run and datetime.now() - run["started"] < timedelta(minutes=RUN_NOW_COOLDOWN_MIN):
+        return RedirectResponse(back + quote(f"A check started at {run['started'].strftime('%I:%M %p').lstrip('0')} "
+                                             f"— try again in a few minutes."), status_code=302)
+    exe = Path(sys.executable)
+    pyw = exe.with_name("pythonw.exe")
+    flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+             | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        subprocess.Popen([str(pyw if pyw.exists() else exe), str(BASE_DIR / "scheduled_run.py"), "--by", user["username"]],
+                         cwd=str(BASE_DIR), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
+    except Exception as e:
+        return RedirectResponse(back + quote(f"Couldn't start the check: {e}"), status_code=302)
+    _RUN_ALERT_CACHE["at"] = 0.0
+    return RedirectResponse(back + quote("Checking for new email now — it usually takes a few minutes. "
+                                         "Refresh the page later to see new items."), status_code=302)
+
+
+@app.get("/scheduled-runs", response_class=HTMLResponse)
+def scheduled_runs(request: Request, lines: int = 300):
+    """Everyone signed in (2026-10-13; was admins-only): the end of logs/scheduled_runs.log, newest at
+    the bottom. Read-only, linked from the Last scheduled run tile."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
     try:
         tail = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-max(20, min(lines, 5000)):]
     except OSError:

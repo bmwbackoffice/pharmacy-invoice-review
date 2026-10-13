@@ -152,6 +152,17 @@
       ⚠️ {{ notice.message }}
     </div>
     {% endif %}
+    {# Red banner on every page when the automatic run failed, timed out or was missed (review_app.run_alert). #}
+    {% if run_alert %}
+    <div id="run-alert" class="card" style="background:#fef2f2; border-color:#dc2626; color:#991b1b; margin-bottom:10px;
+         display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <span>⚠ {{ run_alert }}</span>
+      <a href="/scheduled-runs" style="color:#991b1b; font-weight:700;">Details</a>
+      <form method="post" action="/scheduled-runs/run-now" style="margin:0 0 0 auto;">
+        <button class="btn" type="submit" style="padding:3px 12px; background:#b91c1c;">Check for new email now</button>
+      </form>
+    </div>
+    {% endif %}
     {# Global one-line flash (e.g. the one-click "Ignore this vendor" confirmation). Any page can
        receive it via a ?flash=... redirect; shown once on load, not persisted. #}
     {% if user and user.role == 'viewer' %}

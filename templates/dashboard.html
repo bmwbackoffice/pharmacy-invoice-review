@@ -37,7 +37,13 @@
 {% endmacro %}
 
 <h2>To-do dashboard</h2>
-<h3 class="dashsection">Work</h3>
+<div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;">
+  <h3 class="dashsection">Work</h3>
+  <form method="post" action="/scheduled-runs/run-now" style="margin:0 0 0 auto;">
+    <button class="btn secondary" type="submit" style="padding:4px 12px;"
+            title="Fetch and process new email now instead of waiting for the next scheduled check">Check for new email now</button>
+  </form>
+</div>
 <p class="muted">The queues waiting on a person — counts are live on each load. Only the review queue is
   split by assignee; the rest are shared pools anyone can work.</p>
 {{ tile_grid(work) }}

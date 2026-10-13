@@ -130,14 +130,21 @@ class DashboardSections(unittest.TestCase):
             self.assertIn(label, health)
         work = html[html.index(">Work<"):html.index("System health")]
         self.assertNotIn("Orphaned ledger rows", work)
+        self.assertIn("Last scheduled run", work, "the run status is in Work, for everyone")
+        self.assertNotIn("Last scheduled run", health)
 
-    def test_reviewer_sees_only_work(self):
+    def test_reviewer_sees_work_and_the_run_status(self):
         cl = self._client("reviewer")
         html = cl.get("/dashboard").text
         self.assertIn("Review queue", html)
         self.assertNotIn("System health", html)
         self.assertNotIn("Orphaned ledger rows", html)
-        self.assertIn("Admins only", cl.get("/scheduled-runs").text)
+        work = html[html.index(">Work<"):]
+        self.assertLess(work.index("Last scheduled run"), work.index("Review queue"), "the run status comes first")
+        r = cl.get("/scheduled-runs")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Scheduled runs", r.text)
+        self.assertNotIn("Admins only", r.text)
 
     def test_admin_log_page(self):
         r = self._client("admin").get("/scheduled-runs")
