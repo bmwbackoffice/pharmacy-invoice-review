@@ -17,6 +17,9 @@ import classify_emails as ce
 def main():
     commit = "--commit" in sys.argv[1:]
     ce.USE_DB = True
+    # The sweeps match vendors by standard name, which needs the vendor tables a classify run loads in
+    # main(). Without this line they silently fell back to printed spellings here (fixed 2026-10-13).
+    ce.VENDOR_STD = ce.load_vendor_standardization()
     tag = "manual catch-up" if commit else "dry-run"
     print(f"=== duplicate backstops [{'COMMIT' if commit else 'DRY-RUN'}] ===\n")
 

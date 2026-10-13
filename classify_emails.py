@@ -4405,7 +4405,9 @@ def flag_number_misread_duplicates(actor, dry_run=False):
                 "   AND amount IS NOT NULL AND invoice_date IS NOT NULL AND invoice_date <> ''")
             clusters = {}
             for r in cur.fetchall():
-                key = (_norm_vendor_dedupe(r["vendor_matched"] or ""),
+                # Standard-name vendor key, like every other duplicate check (DU-01; switched 2026-10-13 --
+                # the printed spelling kept 'Maxi Health' / 'MaxiHealth' copies apart).
+                key = (_dedupe_vendor_key(r["vendor_matched"] or ""),
                        round(float(r["amount"]), 2),
                        str(r["invoice_date"]).strip(),
                        _norm(r["store_matched"]))
@@ -4494,7 +4496,7 @@ def dedupe_review_queue(actor, dry_run=False):
         a = items[i]
         for j in range(i + 1, len(items)):
             b = items[j]
-            if (_norm_vendor_dedupe(a["vendor_matched"] or "") != _norm_vendor_dedupe(b["vendor_matched"] or "")
+            if (_dedupe_vendor_key(a["vendor_matched"] or "") != _dedupe_vendor_key(b["vendor_matched"] or "")   # standard name (2026-10-13)
                     or a["amount"] is None or b["amount"] is None
                     or round(float(a["amount"]), 2) != round(float(b["amount"]), 2)):
                 continue

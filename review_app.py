@@ -18,7 +18,7 @@ import csv
 import io
 import os
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote
 
@@ -535,11 +535,66 @@ _RUN_START = re.compile(r"^===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d
 _RUN_RESULT = re.compile(r"^===== Result: (.+?) -- ([\d.]+) min =====", re.M)
 
 
+SCHEDULE_FILE = BASE_DIR / "logs" / "schedule.json"
+# The default schedule setup_scheduled_run.ps1 installs (2026-10-13); its actual settings are saved to
+# logs/schedule.json, which wins when present.
+DEFAULT_SCHEDULE = {"morning_runs": ["07:30", "09:00"], "work_start": "10:00", "work_end": "18:00",
+                    "every_minutes": 30, "evening_runs": ["20:00"],
+                    "weekend_from": "09:00", "weekend_to": "21:00", "weekend_every_hours": 3}
+
+
+def load_schedule():
+    import json
+    sched = dict(DEFAULT_SCHEDULE)
+    try:
+        raw = SCHEDULE_FILE.read_text(encoding="utf-8-sig")
+        sched.update({k: v for k, v in json.loads(raw).items() if v not in (None, "")})
+    except (OSError, ValueError):
+        pass
+    for k in ("morning_runs", "evening_runs"):          # PowerShell writes a 1-item array as a string
+        if isinstance(sched.get(k), str):
+            sched[k] = [sched[k]]
+    return sched
+
+
+def schedule_slots(day, sched):
+    """The run times scheduled on `day` (a date), as datetimes."""
+    def at(hhmm):
+        h, m = (int(x) for x in str(hhmm).split(":"))
+        return datetime(day.year, day.month, day.day, h, m)
+
+    def every(start, end, step_min):
+        out, t, last = [], at(start), at(end)
+        while t <= last:
+            out.append(t)
+            t += timedelta(minutes=step_min)
+        return out
+
+    if day.weekday() >= 5:                                # Saturday, Sunday
+        return every(sched["weekend_from"], sched["weekend_to"], int(sched["weekend_every_hours"]) * 60)
+    return sorted([at(t) for t in sched["morning_runs"] if t]
+                  + every(sched["work_start"], sched["work_end"], int(sched["every_minutes"]))
+                  + [at(t) for t in sched["evening_runs"] if t])
+
+
+def schedule_description(sched=None):
+    s = sched or load_schedule()
+    def fmt(hhmm):
+        return datetime.strptime(str(hhmm), "%H:%M").strftime("%I:%M %p").lstrip("0")
+    parts = [", ".join(fmt(t) for t in s["morning_runs"] if t)] if any(s["morning_runs"]) else []
+    parts.append(f"every {s['every_minutes']} minutes {fmt(s['work_start'])}–{fmt(s['work_end'])}")
+    if any(s["evening_runs"]):
+        parts.append(", ".join(fmt(t) for t in s["evening_runs"] if t))
+    return (f"Weekdays: {', then '.join(parts)}. Weekends: every {s['weekend_every_hours']} hours "
+            f"{fmt(s['weekend_from'])}–{fmt(s['weekend_to'])}.")
+
+
 def last_scheduled_run(now=None):
     """The last scheduled_run.py block in logs/scheduled_runs.log: {started, result, minutes, running,
-    stale, alert} or None when there's no log. stale = no run started for 75+ minutes inside the
-    7 AM-9 PM schedule window (the task stopped: the PC is off or signed out). alert = stale, or the last
-    run FAILED / TIMED OUT."""
+    stale, missed, alert} or None when there's no log. stale = the most recent scheduled run time (at
+    least 20 minutes ago, from logs/schedule.json) was missed: no run started at or after it, and the
+    previous run wasn't still going then (that slot is skipped on purpose). So quiet mornings, evenings
+    and weekends with fewer runs aren't reported as overdue. alert = stale, or FAILED / TIMED OUT."""
     try:
         text = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace")[-200_000:]
     except OSError:
@@ -551,11 +606,20 @@ def last_scheduled_run(now=None):
     started = datetime.strptime(last.group(1), "%Y-%m-%d %H:%M:%S")
     res = _RUN_RESULT.search(text, last.end())
     now = now or datetime.now()
-    in_window = now.replace(hour=7, minute=45, second=0) <= now <= now.replace(hour=21, minute=15, second=0)
-    stale = in_window and (now - started).total_seconds() > 75 * 60
+    minutes = float(res.group(2)) if res else None
+    ended = started + timedelta(minutes=minutes) if minutes is not None else now
+    sched = load_schedule()
+    due = None                                            # the latest slot that should have run by now
+    for back in range(0, 4):
+        day = (now - timedelta(days=back)).date()
+        past = [t for t in schedule_slots(day, sched) if t <= now - timedelta(minutes=20)]
+        if past:
+            due = past[-1]
+            break
+    stale = bool(due) and started < due - timedelta(minutes=2) and ended < due
     result = res.group(1) if res else "Running"
-    return {"started": started, "result": result, "minutes": float(res.group(2)) if res else None,
-            "running": res is None, "stale": stale,
+    return {"started": started, "result": result, "minutes": minutes, "running": res is None,
+            "stale": stale, "missed": due if stale else None,
             "alert": stale or result.startswith(("FAILED", "TIMED OUT"))}
 
 
@@ -566,8 +630,9 @@ def last_scheduled_run_tile():
                 "note": "no scheduled run has happened yet (setup_scheduled_run.ps1)", "alert": False}
     s = run["started"]
     when = f"{s.month}/{s.day} {s.strftime('%I:%M %p').lstrip('0')}"
+    missed = run["missed"].strftime("%I:%M %p").lstrip("0") if run.get("missed") else ""
     note = (f"started {when}" + (f", took {run['minutes']:.0f} min" if run["minutes"] is not None else ", still going")
-            + (" — none since; is the PC on and signed in?" if run["stale"] else ""))
+            + (f" — the {missed} run didn't happen; is the PC on and signed in?" if run["stale"] else ""))
     return {"label": "Last scheduled run", "count": run["result"].split(" (")[0], "href": "/scheduled-runs",
             "note": note, "alert": run["alert"]}
 
@@ -584,7 +649,8 @@ def scheduled_runs(request: Request, lines: int = 300):
         tail = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-max(20, min(lines, 5000)):]
     except OSError:
         tail = []
-    return render(request, "scheduled_runs.html", user, tail="\n".join(tail), run=last_scheduled_run())
+    return render(request, "scheduled_runs.html", user, tail="\n".join(tail), run=last_scheduled_run(),
+                  schedule=schedule_description())
 
 
 @app.get("/reconcile", response_class=HTMLResponse)

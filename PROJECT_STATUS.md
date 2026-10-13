@@ -5681,3 +5681,25 @@ assigned to others, 56 Quick fix chips. Running/failed investigations stay on th
 matter). The separate pages and the login landing page (/review) are unchanged. Tests:
 `tests/test_my_work.py` (placement, order, others count, admin-only flags/requests, chip, title, age
 labels on fixed data; page + menu order). Suite: 90 pass.
+
+### Standard vendor names in the newest sweeps + a quieter schedule (2026-10-13)
+
+**Vendor key.** `flag_number_misread_duplicates` (DU-16) and `dedupe_review_queue` (DU-17) now group
+vendors with `_dedupe_vendor_key` (standard name via Vendor names, like every other duplicate check)
+instead of `_norm_vendor_dedupe` (printed spelling) — 'Maxi Health' / 'MaxiHealth' copies now group.
+`resolve_store_preferred.py` now loads `ce.VENDOR_STD` first; before, run by hand, all three of its
+sweeps (store-preference included) silently fell back to printed spellings. Dry run on 2026-10-13: the
+switch flags/collapses nothing new on current data. Tests: `SweepsUseStandardNames` in
+`tests/test_db_rollback.py`.
+
+**Schedule.** `setup_scheduled_run.ps1` now registers several weekly triggers: weekdays 7:30 and 9:00,
+every 30 min 10:00–18:00, then 20:00 (20 runs); Saturday/Sunday every 3 h 9:00–21:00 (5 runs). Options
+`-MorningRuns -WorkStart -WorkEnd -EveryMinutes -EveningRuns -WeekendFrom -WeekendTo -WeekendEveryHours
+-Remove`. It writes the settings to `logs/schedule.json`. The dashboard's Last scheduled run tile no
+longer uses a fixed 7–9 window: `review_app.last_scheduled_run()` builds the day's slots
+(`load_schedule()` = schedule.json over `DEFAULT_SCHEDULE`; `schedule_slots(day, sched)`), finds the
+latest slot at least 20 min ago (looking back up to 3 days) and calls it missed only if no run started
+at/after it and the previous run wasn't still going then (IgnoreNew skips that slot on purpose); the
+tile names the missed run. `/scheduled-runs` shows `schedule_description()`. **Not active until Joel
+re-runs the setup script** (it replaces the existing task). Tests: 7 new in `LastScheduledRun`.
+Suite: 99 pass.

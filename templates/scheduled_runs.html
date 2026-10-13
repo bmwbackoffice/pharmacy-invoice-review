@@ -2,14 +2,14 @@
 {% block content %}
 <p><a href="/dashboard">&larr; dashboard</a></p>
 <h2>Scheduled runs</h2>
-<p class="muted">The automatic fetch-and-classify run (every 30 minutes, 7 AM–9 PM, while the computer that runs
-  it is on and signed in). Each block ends with its result: OK, SKIPPED (another run was going), FAILED or
-  TIMED OUT. Full log: <code>logs\scheduled_runs.log</code>.</p>
+<p class="muted">The automatic fetch-and-classify run, while the computer that runs it is on and signed in.
+  {{ schedule }} Each block ends with its result: OK, SKIPPED (another run was going), FAILED or TIMED OUT.
+  Full log: <code>logs\scheduled_runs.log</code>. Change the schedule by running <code>setup_scheduled_run.ps1</code> again.</p>
 {% if run %}
 <div class="card" style="{{ 'border-color:#dc2626; background:#fef2f2;' if run.alert else '' }}">
   Last run: <strong>{{ run.result }}</strong> · started {{ run.started.strftime('%m/%d/%Y %I:%M %p') }}
   {% if run.minutes is not none %} · {{ '%.1f'|format(run.minutes) }} min{% else %} · still going{% endif %}
-  {% if run.stale %}<br>No run has started for over 75 minutes during the schedule window — check that the computer is on and signed in, and that the task "Pharmacy invoices - fetch and classify" is enabled in Task Scheduler.{% endif %}
+  {% if run.stale %}<br>The {{ run.missed.strftime('%I:%M %p').lstrip('0') }} run didn't happen — check that the computer is on and signed in, and that the task "Pharmacy invoices - fetch and classify" is enabled in Task Scheduler.{% endif %}
 </div>
 {% endif %}
 {% if tail %}

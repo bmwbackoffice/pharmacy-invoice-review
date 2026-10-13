@@ -25,11 +25,12 @@ class LastScheduledRun(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = review_app.SCHEDULED_LOG
+        self._saved = (review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE)
         review_app.SCHEDULED_LOG = Path(self.tmp.name) / "scheduled_runs.log"
+        review_app.SCHEDULE_FILE = Path(self.tmp.name) / "schedule.json"     # absent -> the defaults
 
     def tearDown(self):
-        review_app.SCHEDULED_LOG = self._saved
+        review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE = self._saved
         self.tmp.cleanup()
 
     def _run(self, text, now):
@@ -52,9 +53,49 @@ class LastScheduledRun(unittest.TestCase):
                       datetime(2026, 10, 12, 14, 10))
         self.assertTrue(r["alert"])
 
-    def test_stale_only_inside_the_schedule_window(self):
-        self.assertTrue(self._run(LOG_OK, datetime(2026, 10, 12, 16, 0))["stale"])     # 2 h, mid-day
-        self.assertFalse(self._run(LOG_OK, datetime(2026, 10, 12, 23, 0))["stale"])    # after 9 PM
+    @staticmethod
+    def _log(start, minutes):
+        return f"===== Scheduled run {start:%Y-%m-%d %H:%M:%S} =====\n===== Result: OK -- {minutes} min =====\n"
+
+    def test_default_schedule_slots(self):
+        s = review_app.load_schedule()
+        mon = review_app.schedule_slots(datetime(2026, 10, 12).date(), s)            # a Monday
+        self.assertEqual(len(mon), 20, "7:30, 9:00, 10:00-18:00 every 30 min, 20:00")
+        self.assertEqual((mon[0].strftime("%H:%M"), mon[2].strftime("%H:%M"), mon[-1].strftime("%H:%M")),
+                         ("07:30", "10:00", "20:00"))
+        sat = review_app.schedule_slots(datetime(2026, 10, 17).date(), s)
+        self.assertEqual([t.hour for t in sat], [9, 12, 15, 18, 21])
+
+    def test_missed_working_hours_run_is_stale(self):
+        r = self._run(LOG_OK, datetime(2026, 10, 12, 16, 0))                           # Mon 2 PM run, now 4 PM
+        self.assertTrue(r["stale"])
+        self.assertEqual(r["missed"].strftime("%H:%M"), "15:30")
+
+    def test_quiet_morning_is_not_stale(self):
+        log = self._log(datetime(2026, 10, 13, 9, 0), 1.0)                            # Tue 9:00 ran
+        self.assertFalse(self._run(log, datetime(2026, 10, 13, 9, 55))["stale"])
+
+    def test_weekend_gap_is_not_stale(self):
+        log = self._log(datetime(2026, 10, 17, 9, 0), 1.0)                            # Sat 9:00 ran
+        self.assertFalse(self._run(log, datetime(2026, 10, 17, 11, 50))["stale"])
+        self.assertTrue(self._run(log, datetime(2026, 10, 17, 12, 30))["stale"], "the noon run was missed")
+
+    def test_slot_skipped_by_a_long_run_is_not_missed(self):
+        log = self._log(datetime(2026, 10, 12, 10, 0), 40.0)                          # ran 10:00-10:40
+        self.assertFalse(self._run(log, datetime(2026, 10, 12, 10, 55))["stale"])     # 10:30 slot covered
+
+    def test_nothing_all_weekend_is_stale_monday_morning(self):
+        log = self._log(datetime(2026, 10, 16, 20, 0), 1.0)                           # last run Fri 8 PM
+        self.assertTrue(self._run(log, datetime(2026, 10, 19, 7, 0))["stale"])
+
+    def test_schedule_file_is_used(self):
+        review_app.SCHEDULE_FILE.write_text('{"work_start": "09:00", "every_minutes": 60, "morning_runs": "08:00", '
+                                            '"evening_runs": ""}', encoding="utf-8")
+        s = review_app.load_schedule()
+        self.assertEqual(s["morning_runs"], ["08:00"], "a one-item list written as a string")
+        mon = review_app.schedule_slots(datetime(2026, 10, 12).date(), s)
+        self.assertEqual([t.strftime("%H:%M") for t in mon][:3], ["08:00", "09:00", "10:00"])
+        self.assertIn("every 60 minutes 9:00 AM–6:00 PM", review_app.schedule_description(s))
 
     def test_no_log(self):
         self.assertIsNone(review_app.last_scheduled_run())

@@ -101,6 +101,56 @@ class ReviewQueueMerge(RollbackTestCase):
         self.assertEqual(self.cur.fetchone(), (None, None))
 
 
+class SweepsUseStandardNames(RollbackTestCase):
+    """DU-16 / DU-17 (switched 2026-10-13): copies spelled 'Maxi Health' and 'MaxiHealth' are one vendor.
+    The standard-name lookup is stood in for by a key that maps both spellings together."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_key = ce._dedupe_vendor_key
+        real = self._saved_key
+        ce._dedupe_vendor_key = lambda v: "zz maxihealth" if "maxi" in (v or "").lower() else real(v)
+
+    def tearDown(self):
+        ce._dedupe_vendor_key = self._saved_key
+        super().tearDown()
+
+    def test_misread_number_sweep_groups_spellings(self):
+        ids = []
+        for i, (vendor, num) in enumerate((("Zz Maxi Health", "ZZ803670"), ("Zz MaxiHealth", "ZZ803G70"))):
+            fn = f"ZZTEST maxi {i}.eml"
+            self.cur.execute("INSERT INTO emails (filename, status) VALUES (%s,'processed')", (fn,))
+            self.cur.execute(
+                "INSERT INTO invoices (email_filename, vendor_matched, store_matched, invoice_number, amount, "
+                "invoice_date, entered_in_qb, duplicate_suspect, duplicate_ignored, skip_qb_import) "
+                "VALUES (%s,%s,'Maple Pharmacy',%s,6957.40,'2026-10-01',FALSE,FALSE,FALSE,FALSE) RETURNING id",
+                (fn, vendor, num))
+            ids.append(self.cur.fetchone()[0])
+        res = ce.flag_number_misread_duplicates("test", dry_run=False)
+        self.assertTrue(any(set(ids) <= set(f["ids"]) for f in res["flagged"]))
+        self.cur.execute("SELECT bool_and(duplicate_suspect) FROM invoices WHERE id = ANY(%s)", (ids,))
+        self.assertTrue(self.cur.fetchone()[0])
+
+    def test_review_queue_collapse_groups_spellings(self):
+        import web_db
+        c = self.cur
+        c.execute("CREATE TEMP TABLE review_queue (LIKE public.review_queue INCLUDING ALL)")
+        c.execute("CREATE TEMP TABLE ignored_reviews (LIKE public.ignored_reviews INCLUDING ALL)")
+        for i, vendor in ((1, "Zz Maxi Health"), (2, "Zz MaxiHealth")):
+            c.execute("INSERT INTO review_queue (id, filename, source_email, vendor_matched, invoice_number, "
+                      "amount, question) VALUES (%s,%s,%s,%s,'ZZ803670',6957.40,'q')",
+                      (i, f"ZZ{i}.pdf", f"ZZTEST mail {i}.eml", vendor))
+        saved = web_db.connect
+        web_db.connect = db.connect
+        try:
+            res = ce.dedupe_review_queue("test", dry_run=False)
+        finally:
+            web_db.connect = saved
+        self.assertEqual(len(res["dismissed"]), 1)
+        c.execute("SELECT count(*) FROM review_queue")
+        self.assertEqual(c.fetchone()[0], 1, "one copy kept, the other dismissed")
+
+
 class StoreConflictDB(RollbackTestCase):
     """DU-03: a copy naming another store used to replace the earlier one silently (Lantev #9GH5739)."""
 
