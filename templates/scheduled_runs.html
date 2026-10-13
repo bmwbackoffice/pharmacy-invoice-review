@@ -6,8 +6,8 @@
   {{ schedule }} Each block ends with its result: OK, SKIPPED (another run was going), FAILED or TIMED OUT.
   Full log: <code>logs\scheduled_runs.log</code>. Change the schedule by running <code>setup_scheduled_run.ps1</code> again.</p>
 <form method="post" action="/scheduled-runs/run-now" style="margin:0 0 12px;">
-  <button class="btn" type="submit" title="Fetch and process new email now instead of waiting for the next scheduled check">Check for new email now</button>
-  <span class="muted" style="font-size:12.5px; margin-left:8px;">Runs the same check in the background; it shows up below as a new block.</span>
+  <button class="btn" type="submit" title="Process answers, Quick fixes and uploads now instead of waiting for the next scheduled run">Apply changes now</button>
+  <span class="muted" style="font-size:12.5px; margin-left:8px;">Runs the classifier only (no new email is fetched) in the background; it shows up below as a new block.</span>
 </form>
 {% if run %}
 <div class="card" style="{{ 'border-color:#dc2626; background:#fef2f2;' if run.alert else '' }}">

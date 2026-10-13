@@ -687,8 +687,9 @@ RUN_NOW_COOLDOWN_MIN = 3
 
 @app.post("/scheduled-runs/run-now")
 def scheduled_run_now(request: Request):
-    """'Check for new email now' (2026-10-13): start the same unattended run the schedule uses
-    (scheduled_run.py --by <user>), in the background with no window, logged to the same file. Refused
+    """'Apply changes now' (2026-10-13): run the CLASSIFIER only (scheduled_run.py --classify-only --by
+    <user>; no Gmail fetch -- that stays on the schedule), so answers, Quick fixes and uploads take effect
+    without waiting for the next scheduled run. Background, no window, logged to the same file. Refused
     while a run holds the run lock or when one started in the last few minutes. Read-only users can't
     reach this (the read-only guard refuses any POST)."""
     user = current_user(request)
@@ -705,24 +706,25 @@ def scheduled_run_now(request: Request):
         busy = False
     run = last_scheduled_run()
     if busy or (run and run["running"]):
-        return RedirectResponse(back + quote("A check is already running — new email will show up when it finishes."),
-                                status_code=302)
+        return RedirectResponse(back + quote("A run is already going — it will apply your changes too. "
+                                             "Refresh in a few minutes."), status_code=302)
     if run and datetime.now() - run["started"] < timedelta(minutes=RUN_NOW_COOLDOWN_MIN):
-        return RedirectResponse(back + quote(f"A check started at {run['started'].strftime('%I:%M %p').lstrip('0')} "
+        return RedirectResponse(back + quote(f"A run started at {run['started'].strftime('%I:%M %p').lstrip('0')} "
                                              f"— try again in a few minutes."), status_code=302)
     exe = Path(sys.executable)
     pyw = exe.with_name("pythonw.exe")
     flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
              | getattr(subprocess, "CREATE_NO_WINDOW", 0))
     try:
-        subprocess.Popen([str(pyw if pyw.exists() else exe), str(BASE_DIR / "scheduled_run.py"), "--by", user["username"]],
+        subprocess.Popen([str(pyw if pyw.exists() else exe), str(BASE_DIR / "scheduled_run.py"),
+                          "--classify-only", "--by", user["username"]],
                          cwd=str(BASE_DIR), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                          stderr=subprocess.DEVNULL, creationflags=flags, close_fds=True)
     except Exception as e:
-        return RedirectResponse(back + quote(f"Couldn't start the check: {e}"), status_code=302)
+        return RedirectResponse(back + quote(f"Couldn't start it: {e}"), status_code=302)
     _RUN_ALERT_CACHE["at"] = 0.0
-    return RedirectResponse(back + quote("Checking for new email now — it usually takes a few minutes. "
-                                         "Refresh the page later to see new items."), status_code=302)
+    return RedirectResponse(back + quote("Applying changes now — answers, Quick fixes and uploads are being "
+                                         "processed. Refresh in a few minutes to see the results."), status_code=302)
 
 
 @app.get("/scheduled-runs", response_class=HTMLResponse)

@@ -5782,3 +5782,9 @@ going, when the log's last block has no result yet, or when a run started in the
 app runs from this folder on the machine with the Gmail token; on a different machine it would need its
 own setup. Tests: `tests/test_run_now_banner.py` (10; launcher replaced by a recorder — no real run).
 Suite: 121 pass.
+- 2026-10-13 (change): the manual button is now **"Apply changes now"** and runs the **classifier only** —
+  `scheduled_run.py --classify-only --by <user>` skips the Gmail fetch (fetching stays on the schedule) and
+  logs "(classifier only, started by hand by <user> from the web app)". Buttons: dashboard (next to Work),
+  /scheduled-runs, and the Review queue page (always shown; highlighted with "N answered items waiting to be
+  processed" when there are any). The red banner keeps only its Details link (its usual cause, the PC being
+  off, isn't fixed by running the classifier). Tests updated (`test_run_now_banner.py`, 11). Suite: 122 pass.

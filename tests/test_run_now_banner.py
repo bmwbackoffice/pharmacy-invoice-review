@@ -86,17 +86,17 @@ class RunNow(_LogCase):
         self.assertEqual(r.status_code, 302)
         return r.headers["location"]
 
-    def test_starts_the_unattended_run(self):
+    def test_starts_the_classifier_only(self):
         loc = self._press()
         self.assertEqual(len(self.started), 1)
         args = self.started[0]
         self.assertTrue(args[1].endswith("scheduled_run.py"))
-        self.assertEqual(args[2:], ["--by", "amy"])
-        self.assertIn("Checking%20for%20new%20email%20now", loc)
+        self.assertEqual(args[2:], ["--classify-only", "--by", "amy"], "no Gmail fetch, just the classifier")
+        self.assertIn("Applying%20changes%20now", loc)
 
     def test_refused_while_a_run_holds_the_lock(self):
         database.run_lock_held = lambda: True
-        self.assertIn("already%20running", self._press())
+        self.assertIn("already%20going", self._press())
         self.assertEqual(self.started, [])
 
     def test_refused_right_after_another_start(self):
@@ -106,7 +106,7 @@ class RunNow(_LogCase):
 
     def test_refused_while_the_log_shows_a_run_going(self):
         self.write(f"===== Scheduled run {datetime.now() - timedelta(minutes=10):%Y-%m-%d %H:%M:%S} =====\n")
-        self.assertIn("already%20running", self._press())
+        self.assertIn("already%20going", self._press())
         self.assertEqual(self.started, [])
 
 
@@ -133,21 +133,31 @@ class ReadOnlyUsersCannotStartIt(unittest.TestCase):
 
 class LogNote(unittest.TestCase):
 
-    def test_by_line(self):
+    def _main(self, argv):
         tmp = tempfile.TemporaryDirectory()
         saved = (scheduled_run.LOG_DIR, scheduled_run.LOG, scheduled_run._step, sys.argv)
+        steps = []
         scheduled_run.LOG_DIR = Path(tmp.name)
         scheduled_run.LOG = Path(tmp.name) / "scheduled_runs.log"
-        scheduled_run._step = lambda log, script, args, timeout: 0
-        sys.argv = ["scheduled_run.py", "--by", "amy"]
+        scheduled_run._step = lambda log, script, args, timeout: steps.append(script) or 0
+        sys.argv = ["scheduled_run.py"] + argv
         try:
             scheduled_run.main()
-            text = scheduled_run.LOG.read_text(encoding="utf-8")
-            self.assertIn("(started by hand by amy from the web app)", text)
-            self.assertIn("Result: OK", text)
+            return scheduled_run.LOG.read_text(encoding="utf-8"), steps
         finally:
             scheduled_run.LOG_DIR, scheduled_run.LOG, scheduled_run._step, sys.argv = saved
             tmp.cleanup()
+
+    def test_classifier_only_by_hand(self):
+        text, steps = self._main(["--classify-only", "--by", "amy"])
+        self.assertEqual(steps, ["classify_emails.py"], "the Gmail fetch is skipped")
+        self.assertIn("(classifier only, started by hand by amy from the web app)", text)
+        self.assertIn("Result: OK", text)
+
+    def test_scheduled_run_still_fetches(self):
+        text, steps = self._main([])
+        self.assertEqual(steps, ["gmail_fetcher.py", "classify_emails.py"])
+        self.assertNotIn("by hand", text)
 
 
 if __name__ == "__main__":

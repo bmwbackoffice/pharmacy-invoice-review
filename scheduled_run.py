@@ -73,14 +73,21 @@ def main():
     LOG_DIR.mkdir(exist_ok=True)
     _roll_log()
     started = datetime.now()
-    # "--by NAME": started from the web app's "Check for new email now" button (2026-10-13).
+    # "--by NAME": started from the web app's "Apply changes now" button (2026-10-13).
+    # "--classify-only": skip the Gmail fetch -- just process answers, Quick fixes, uploads and anything
+    # already fetched, so a reviewer's changes take effect without waiting for the next scheduled run.
     by = sys.argv[sys.argv.index("--by") + 1] if "--by" in sys.argv[1:-1] else ""
+    classify_only = "--classify-only" in sys.argv[1:]
     with open(LOG, "a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n===== Scheduled run {started:%Y-%m-%d %H:%M:%S} =====\n")
-        if by:
-            log.write(f"(started by hand by {by} from the web app)\n")
+        if by or classify_only:
+            log.write(f"({'classifier only' if classify_only else 'fetch + classify'}"
+                      f"{', started by hand by ' + by + ' from the web app' if by else ''})\n")
         log.flush()
-        fetch = _step(log, "gmail_fetcher.py", [], FETCH_TIMEOUT)
+        if classify_only:
+            fetch = 0
+        else:
+            fetch = _step(log, "gmail_fetcher.py", [], FETCH_TIMEOUT)
         if fetch not in (0, None):
             log.write("(gmail_fetcher.py did not finish cleanly -- classifying whatever is already in test_emails/)\n")
         rc = _step(log, "classify_emails.py", ["--drive"], CLASSIFY_TIMEOUT)

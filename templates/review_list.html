@@ -5,6 +5,12 @@
 {% set needs_shown = items|length - answered_in_list %}
 <h2>Review queue <span class="muted">({{ needs_shown }} needs-review shown{% if answered_in_list %} · {{ answered_in_list }} answered{% elif answered_n %} · {{ answered_n }} answered hidden{% endif %})</span>
   {% if ignored_n %}<a class="muted" href="/ignored" style="font-size:14px;font-weight:400;margin-left:10px;">View dismissed ({{ ignored_n }})</a>{% endif %}</h2>
+{# Answers, Quick fixes and uploads take effect on the next classify run; this runs it now (2026-10-13). #}
+{% set _waiting = answered_n or answered_in_list %}
+<form method="post" action="/scheduled-runs/run-now" style="margin:0 0 10px;">
+  <button class="btn {{ '' if _waiting else 'secondary' }}" type="submit" title="Process answers, Quick fixes and uploads now instead of waiting for the next scheduled run">Apply changes now</button>
+  <span class="muted" style="font-size:12.5px; margin-left:8px;">{% if _waiting %}{{ _waiting }} answered item{{ '' if _waiting == 1 else 's' }} waiting to be processed{% else %}Answers, Quick fixes and uploads are processed by the next scheduled run — or now, with this button.{% endif %}</span>
+</form>
 <div class="card">
   <form method="get" action="/review" style="margin:0;display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;">
     {# preserve the active column sort across filter changes #}
