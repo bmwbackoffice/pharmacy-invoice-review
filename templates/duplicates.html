@@ -96,7 +96,8 @@ always shown.</p>
           <tr><td class="rowlabel">Store</td>
             {% for r in g.records %}<td>{{ (r.store_matched | store_label) or '—' }}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">Vendor</td>
-            {% for r in g.records %}<td>{{ r.vendor_matched or '—' }}</td>{% endfor %}</tr>
+            {% for r in g.records %}<td>{{ r.vendor_matched or '—' }}
+              {%- set sv = r.vendor_matched | std_vendor %}{% if sv %}<div class="muted" style="font-size:12px;" title="Standard name in Setup › Vendor names — this is why the copies are in one set">= {{ sv }}</div>{% endif %}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">{{ 'Reference #' if g.record_type == 'payment' else 'Invoice #' }}</td>
             {% for r in g.records %}<td>{{ r.number or '—' }}</td>{% endfor %}</tr>
           {% if g.record_type == 'payment' and g.records | selectattr('applied_invoice') | list %}

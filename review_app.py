@@ -126,6 +126,20 @@ templates.env.filters["us_date"] = us_date
 templates.env.filters["us_datetime"] = us_datetime
 templates.env.filters["store_label"] = web_db.store_label
 
+
+def _std_vendor(name):
+    """The vendor's standard name from Setup › Vendor names, only when it differs from `name` beyond case
+    and punctuation (so 'American Health' shows '= Garden Of Life'); '' otherwise or when unknown."""
+    import classify_emails as ce
+    if not (name or "").strip():
+        return ""
+    tables = web_db._vendor_tables()
+    std = ce.resolve_standard_vendor(name, std_tables=tables) if tables else None
+    return std if std and ce._norm_vendor_dedupe(std) != ce._norm_vendor_dedupe(name) else ""
+
+
+templates.env.filters["std_vendor"] = _std_vendor
+
 # Setup, grouped (2026-10-12): the Setup menu's 9 entries became 3 tabbed pages. Every table keeps its
 # own page and URL (links into them still work); the tabs just join the pages that belong together.
 # Each tab: (href, label, other paths that count as this tab).

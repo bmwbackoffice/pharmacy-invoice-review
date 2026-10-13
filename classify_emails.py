@@ -4372,6 +4372,100 @@ def resolve_store_preferred_duplicates(actor, dry_run=False):
     return {"resolved": resolved, "skipped": skipped}
 
 
+def resolve_payment_duplicates(actor, dry_run=False):
+    """Post-save sweep for PAYMENT copies of one payment (2026-10-13). For payments the vendor's own copy
+    is the one to keep -- the reverse of invoices, where the store scan wins (resolve_store_preferred_
+    duplicates). It also settles copies with no reference number when they name the same applied invoice:
+    check_duplicate_payment only ever marks those "possible" (it never decides on vendor + amount + date
+    alone), which left e.g. three copies of one Garden of Life payment (#305/#581/#582, invoice 52164619;
+    one spelled American Health, an alias) for a person.
+    A cluster = same standard vendor + amount (cents) + payment date + store + identifier, where the
+    identifier is the reference number plus the applied invoice number (one reference can settle several
+    invoices), or with no reference, the applied invoice number -- never amount alone.
+    Members: live copies plus copies the PIPELINE auto-ignored (duplicate_ignored_by blank); a copy a
+    person ignored is left out entirely. Acts only when the cluster has 2+ members, at least one live,
+    none entered in QuickBooks and none skip-QB. Keeper: the earliest vendor-sent copy (sender not a
+    store scanner in sender_store_map), else the earliest copy. The keeper is made live (suspect flags
+    cleared) and every other member is marked an ignored duplicate of it, with a shared group id and a
+    reason; each change is logged. Idempotent. Returns {"resolved": [...]}; dry_run writes nothing."""
+    if not USE_DB:
+        return {"resolved": []}
+    import secrets as _secrets
+    import psycopg2.extras as _extras
+    smap = load_sender_store_map()
+    db = _database()
+    conn = db.connect()
+    conn.autocommit = False
+    resolved = []
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT p.id, p.vendor_matched, p.store_matched, p.reference_number, p.invoice_number, "
+                "       p.amount, p.payment_date, p.email_filename, p.duplicate_suspect, p.duplicate_ignored, "
+                "       p.duplicate_ignored_by, p.duplicate_group_id, p.entered_in_qb, p.skip_qb_import, "
+                "       e.from_address "
+                "  FROM payments p LEFT JOIN emails e ON e.filename = p.email_filename "
+                " WHERE p.amount IS NOT NULL AND coalesce(p.payment_date, '') <> '' "
+                "   AND (p.duplicate_ignored IS NOT TRUE OR coalesce(btrim(p.duplicate_ignored_by), '') = '')")
+            clusters = {}
+            for r in cur.fetchall():
+                ref = re.sub(r"[^a-z0-9]", "", (r["reference_number"] or "").lower())
+                inv = re.sub(r"[^a-z0-9]", "", (r["invoice_number"] or "").lower())
+                # The applied invoice is ALWAYS part of the key when present: one reference can settle
+                # several invoices (an Anda payment FJGYX1XV1H covered 23, two of them $25.98 each).
+                ident = ("ref", ref, inv) if ref else (("inv", inv) if inv else None)
+                if not ident:
+                    continue                                  # amount + date alone is never enough
+                key = (_dedupe_vendor_key(r["vendor_matched"] or ""), round(float(r["amount"]), 2),
+                       str(r["payment_date"]).strip(), _norm(r["store_matched"]), ident)
+                clusters.setdefault(key, []).append(r)
+
+            for key, members in clusters.items():
+                if len(members) < 2 or not any(not m["duplicate_ignored"] for m in members):
+                    continue
+                if any(m["entered_in_qb"] or m["skip_qb_import"] for m in members):
+                    continue                                  # leave anything touching QB entry to a person
+                members.sort(key=lambda m: m["id"])
+                vendor_sent = [m for m in members if _norm(m.get("from_address")) not in smap]
+                keep = (vendor_sent or members)[0]
+                others = [m for m in members if m["id"] != keep["id"]]
+                if not keep["duplicate_ignored"] and not keep["duplicate_suspect"] \
+                        and all(m["duplicate_ignored"] for m in others):
+                    continue                                  # already settled this way
+                gid = (keep.get("duplicate_group_id")
+                       or next((m["duplicate_group_id"] for m in members if m.get("duplicate_group_id")), None)
+                       or _secrets.token_hex(4).upper())
+                why = ("the vendor's own copy" if vendor_sent else "the first copy (no vendor-sent copy)")
+                ident = (f"reference {key[4][1]}" + (f", invoice {key[4][2]}" if key[4][2] else "")
+                         if key[4][0] == "ref" else f"applied invoice {key[4][1]}")
+                reason = (f"Same payment as {keep['email_filename']} (same vendor, ${key[1]:.2f}, {key[2]}, "
+                          f"{ident}) — auto-ignored, keeping {why}. Resolved by the payment-duplicate sweep.")
+                resolved.append({"keep_id": keep["id"], "ignored_ids": [m["id"] for m in others],
+                                 "vendor": keep.get("vendor_matched"), "amount": key[1],
+                                 "store": keep.get("store_matched"), "vendor_copy": bool(vendor_sent)})
+                if dry_run:
+                    continue
+                cur.execute("UPDATE payments SET duplicate_suspect=FALSE, duplicate_ignored=FALSE, "
+                            "duplicate_reason=NULL, duplicate_of=NULL, duplicate_group_id=%s, edited_at=now() "
+                            "WHERE id=%s", (gid, keep["id"]))
+                if keep["duplicate_ignored"]:
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                "changed_by) VALUES ('payments',%s,'duplicate_ignored','true','false',%s)",
+                                (keep["id"], actor))
+                for m in others:
+                    cur.execute("UPDATE payments SET duplicate_suspect=TRUE, duplicate_ignored=TRUE, "
+                                "duplicate_reason=%s, duplicate_of=%s, duplicate_group_id=%s, edited_at=now() "
+                                "WHERE id=%s", (reason, keep["email_filename"], gid, m["id"]))
+                    if not m["duplicate_ignored"]:
+                        cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                    "changed_by) VALUES ('payments',%s,'duplicate_ignored','false','true',%s)",
+                                    (m["id"], actor))
+        conn.commit() if not dry_run else conn.rollback()
+    finally:
+        conn.close()
+    return {"resolved": resolved}
+
+
 def flag_number_misread_duplicates(actor, dry_run=False):
     """Catch duplicates the number-based dedup MISSES: same normalized vendor + amount + invoice_date
     + store but DIFFERENT invoice numbers (a misread digit — e.g. Emerson E29402997 vs E29402597 for
@@ -5849,6 +5943,14 @@ def main():
     # the prior copy wasn't in the DB yet when the later one was processed. Runs now that both ARE
     # saved: keeps the store-scanned copy, auto-ignores the vendor copy. Conservative (see the fn).
     if USE_DB:
+        # Payments: copies of one payment (same vendor/amount/date/store and reference or applied
+        # invoice) keep the VENDOR's copy -- the reverse of invoices below. Settles no-reference copies too.
+        pd = resolve_payment_duplicates("auto-resolved (payment-duplicate sweep)")
+        if pd["resolved"]:
+            print(f"  PAYMENT-DUPES: settled {len(pd['resolved'])} payment duplicate set(s) (kept the vendor's copy):")
+            for r in pd["resolved"]:
+                print(f"    {r['vendor']} ${r['amount']} @ {r['store']}: kept id {r['keep_id']}, "
+                      f"ignored {r['ignored_ids']}")
         sp = resolve_store_preferred_duplicates("auto-resolved (store-preferred backstop)")
         if sp["resolved"]:
             print(f"  STORE-PREFERRED: auto-resolved {len(sp['resolved'])} exact-duplicate set(s) "

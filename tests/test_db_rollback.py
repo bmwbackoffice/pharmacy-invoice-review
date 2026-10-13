@@ -151,6 +151,91 @@ class SweepsUseStandardNames(RollbackTestCase):
         self.assertEqual(c.fetchone()[0], 1, "one copy kept, the other dismissed")
 
 
+class PaymentDuplicateSweep(RollbackTestCase):
+    """resolve_payment_duplicates (2026-10-13): for payments keep the VENDOR's copy, and settle copies
+    with no reference number when they name the same applied invoice."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_smap = ce.load_sender_store_map
+        ce.load_sender_store_map = lambda: {"zzscanner@example.com": "Refuah Pharmacy"}
+        self._saved_std, ce.VENDOR_STD = ce.VENDOR_STD, {}
+        ce._DEDUPE_VENDOR_CACHE.clear()
+        self.n = 0
+
+    def tearDown(self):
+        ce.load_sender_store_map = self._saved_smap
+        ce.VENDOR_STD = self._saved_std
+        ce._DEDUPE_VENDOR_CACHE.clear()
+        super().tearDown()
+
+    def _pay(self, sender, ref="", inv="ZZ52164619", ignored=False, suspect=False, by=None, entered=False,
+             amount=1372.62, vendor="Zz Garden Test"):
+        self.n += 1
+        fn = f"ZZTEST pay {self.n}.eml"
+        self.cur.execute("INSERT INTO emails (filename, status, from_address) VALUES (%s,'processed',%s)", (fn, sender))
+        self.cur.execute(
+            "INSERT INTO payments (email_filename, vendor_matched, store_matched, reference_number, invoice_number, "
+            "amount, payment_date, duplicate_suspect, duplicate_ignored, duplicate_ignored_by, entered_in_qb, "
+            "skip_qb_import) VALUES (%s,%s,'Refuah Pharmacy',%s,%s,%s,'2026-10-07',%s,%s,%s,%s,FALSE) RETURNING id",
+            (fn, vendor, ref, inv, amount, suspect or ignored, ignored, by, entered))
+        return self.cur.fetchone()[0]
+
+    def _state(self, *ids):
+        self.cur.execute("SELECT id, duplicate_ignored, duplicate_suspect FROM payments WHERE id = ANY(%s) ORDER BY id",
+                         (list(ids),))
+        return {r[0]: (r[1], r[2]) for r in self.cur.fetchall()}
+
+    def test_garden_of_life_case_keeps_the_vendor_copy(self):
+        v = self._pay("ar@vendor.example")
+        s1 = self._pay("zzscanner@example.com", suspect=True)
+        s2 = self._pay("zzscanner@example.com", suspect=True)
+        ce.resolve_payment_duplicates("test")
+        st = self._state(v, s1, s2)
+        self.assertEqual(st[v], (False, False), "vendor copy live and clean")
+        self.assertEqual((st[s1][0], st[s2][0]), (True, True), "both scans ignored")
+
+    def test_swaps_when_the_scan_arrived_first(self):
+        s = self._pay("zzscanner@example.com")
+        v = self._pay("ar@vendor.example", ignored=True)              # pipeline auto-ignored the vendor copy
+        ce.resolve_payment_duplicates("test")
+        st = self._state(s, v)
+        self.assertEqual(st[v][0], False)
+        self.assertEqual(st[s][0], True)
+
+    def test_one_reference_for_different_invoices_is_left_alone(self):
+        a = self._pay("ar@vendor.example", ref="FJGYX1XV1H", inv="ZZ20873185", amount=25.98)
+        b = self._pay("ar@vendor.example", ref="FJGYX1XV1H", inv="ZZ21048489", amount=25.98)
+        ce.resolve_payment_duplicates("test")
+        self.assertEqual(self._state(a, b), {a: (False, False), b: (False, False)})
+
+    def test_amount_and_date_alone_are_never_enough(self):
+        a = self._pay("ar@vendor.example", inv="")
+        b = self._pay("zzscanner@example.com", inv="", suspect=True)
+        ce.resolve_payment_duplicates("test")
+        self.assertEqual(self._state(a, b)[b], (False, True), "still a possible duplicate for a person")
+
+    def test_entered_or_person_marked_copies_are_respected(self):
+        v = self._pay("ar@vendor.example")
+        s = self._pay("zzscanner@example.com", entered=True)
+        ce.resolve_payment_duplicates("test")
+        self.assertEqual(self._state(v, s)[s], (False, False), "a set touching QB entry is left to a person")
+        v2 = self._pay("ar@vendor.example", inv="ZZ999", ignored=True, by="joel")   # a person ignored it
+        s2 = self._pay("zzscanner@example.com", inv="ZZ999")
+        ce.resolve_payment_duplicates("test")
+        self.assertEqual(self._state(v2, s2), {v2: (True, True), s2: (False, False)})
+
+    def test_dry_run_and_idempotent(self):
+        v = self._pay("ar@vendor.example")
+        s = self._pay("zzscanner@example.com", suspect=True)
+        dry = ce.resolve_payment_duplicates("test", dry_run=True)
+        self.assertTrue(any(r["keep_id"] == v for r in dry["resolved"]))
+        self.assertEqual(self._state(s)[s], (False, True), "dry run wrote nothing")
+        ce.resolve_payment_duplicates("test")
+        again = ce.resolve_payment_duplicates("test")
+        self.assertFalse(any(r["keep_id"] == v for r in again["resolved"]), "a settled set is left alone")
+
+
 class StoreConflictDB(RollbackTestCase):
     """DU-03: a copy naming another store used to replace the earlier one silently (Lantev #9GH5739)."""
 

@@ -6,6 +6,9 @@ classify_emails run; this script is for a dry-run review or a one-time catch-up.
      from a store scanner, keep the store-scanned copy and auto-IGNORE the vendor copy.
   2) Misread-number: same vendor + amount + date + store but a DIFFERENT invoice number (a misread
      digit) — FLAG both so neither silently reaches /qb; a human resolves on /duplicates.
+  3) Review-queue dedupe: several review items for one invoice collapse to one.
+  4) Payment duplicates (2026-10-13): copies of one payment (same vendor + amount + date + store and
+     reference / applied invoice) keep the VENDOR's copy — the reverse of invoices.
 
     python resolve_store_preferred.py            # report only (dry run)
     python resolve_store_preferred.py --commit   # write
@@ -29,6 +32,11 @@ def main():
         print(f"  {r['vendor']} #{r['number']} @ {r['store']}: keep id {r['keep_id']}, "
               f"ignore {r['ignored_ids']}")
     print(f"  skipped (two scans / no store-scanned copy): {len(res['skipped'])}")
+
+    pd = ce.resolve_payment_duplicates(tag, dry_run=not commit)
+    print(f"\n[payment duplicates] settled (keep the vendor's copy): {len(pd['resolved'])}")
+    for r in pd["resolved"]:
+        print(f"  {r['vendor']} ${r['amount']} @ {r['store']}: keep id {r['keep_id']}, ignore {r['ignored_ids']}")
 
     mm = ce.flag_number_misread_duplicates(tag, dry_run=not commit)
     print(f"\n[misread-number] flagged for review (same vendor/amount/date/store, differing number): "

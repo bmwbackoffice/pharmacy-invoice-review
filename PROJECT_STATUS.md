@@ -5703,3 +5703,29 @@ at/after it and the previous run wasn't still going then (IgnoreNew skips that s
 tile names the missed run. `/scheduled-runs` shows `schedule_description()`. **Not active until Joel
 re-runs the setup script** (it replaces the existing task). Tests: 7 new in `LastScheduledRun`.
 Suite: 99 pass.
+
+### Payment duplicates: keep the vendor's copy; settle no-reference copies (2026-10-13)
+
+Joel: for payments the **vendor's** copy is the keeper (the reverse of invoices, where the store scan
+wins). And no-reference payment copies that name the same applied invoice were left for a person
+(check_duplicate_payment only marks those "possible", by design) — e.g. Garden of Life #305 (vendor
+email) / #581 / #582 (two Refuah scans, #582 printed "American Health", an alias of Garden Of Life — the
+set WAS detected via the standard-name key; the page just showed the printed spelling).
+
+New post-save sweep `resolve_payment_duplicates(actor, dry_run=False)` in classify_emails.py, run in
+`main()` right before the store-preference backstop and in `resolve_store_preferred.py`. Cluster key:
+standard vendor (`_dedupe_vendor_key`) + amount (cents) + payment_date + store + identifier = (reference,
+applied invoice) or, with no reference, (applied invoice) — never amount/date alone; the applied invoice
+is ALWAYS in the key because one reference can settle several invoices (Anda FJGYX1XV1H covered 23: #517
+inv 20873185 and #525 inv 21048489, both $25.98 — caught in the dry run before the guard was added).
+Members: live copies + copies the pipeline auto-ignored (duplicate_ignored_by blank); person-ignored copies
+are excluded. Acts only with 2+ members, 1+ live, none entered in QB, none skip-QB. Keeper = earliest
+copy whose sender isn't a store scanner (sender_store_map), else earliest copy; keeper made live/clean,
+others ignored as duplicates of it (shared group, reason, edit_log by the actor). Idempotent; swaps a
+vendor copy back in if a scan had won first-arrived. Dry run 2026-10-13: 2 sets — Garden of Life (keep
+#305, ignore #581/#582) and iHerb #946953025 (keep #207 Yu's forwarded order confirmation, ignore #103
+the Maple scan). **Not applied by Claude; the next classify run applies them.**
+
+Display: `/duplicates` Vendor row shows the standard name under a differing printed one ("American
+Health" / "= Garden Of Life") via a new Jinja filter `std_vendor` (`review_app._std_vendor`). Tests:
+`PaymentDuplicateSweep` in `tests/test_db_rollback.py` (6). Suite: 105 pass.
