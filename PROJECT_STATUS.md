@@ -5758,3 +5758,5 @@ by exact id in one checked transaction; the test now sets `autocommit = False`, 
 of live counts confirmed the suite writes nothing. Tests: `tests/test_investigations.py` (the real runner
 with a stand-in process stopped mid-run — process killed, record not overwritten; stop without a process;
 stop/late finish/delete/sweep on rolled-back rows; Stop button on /requests). Suite: 111 pass.
+- 2026-10-13: `/no-live-copy` — the "A person marked a copy" and "Confirmed" sections are now collapsed
+  `<details>` (count + one-line description in the summary), so the page opens on the to-do list only.

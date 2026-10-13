@@ -60,14 +60,23 @@
   {{ group_table(needs) }}
 {% endif %}
 
+{# Below the to-do list: reference only, so collapsed by default (2026-10-13). #}
+<style>
+  details.nlc-more { margin-top:28px; }
+  details.nlc-more > summary { cursor:pointer; font-weight:700; font-size:17px; margin-bottom:8px; }
+</style>
 {% if person %}
-<h3 style="margin-top:28px;">A person marked a copy <span class="muted">({{ person|length }})</span></h3>
-<p class="muted">Every copy is marked a duplicate here too, but at least one by a person, so it's probably deliberate. Not counted on the dashboard.</p>
-{{ group_table(person) }}
+<details class="nlc-more">
+  <summary>A person marked a copy <span class="muted" style="font-weight:400;">({{ person|length }}) — probably deliberate, not counted on the dashboard</span></summary>
+  <p class="muted">Every copy is marked a duplicate here too, but at least one by a person.</p>
+  {{ group_table(person) }}
+</details>
 {% endif %}
 
 {% if confirmed %}
-<h3 style="margin-top:28px;">Confirmed <span class="muted">({{ confirmed|length }})</span></h3>
-{{ group_table(confirmed, show_confirm=False, show_undo=True) }}
+<details class="nlc-more">
+  <summary>Confirmed <span class="muted" style="font-weight:400;">({{ confirmed|length }}) — checked and left as duplicates</span></summary>
+  {{ group_table(confirmed, show_confirm=False, show_undo=True) }}
+</details>
 {% endif %}
 {% endblock %}
