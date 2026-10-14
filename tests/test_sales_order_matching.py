@@ -132,6 +132,7 @@ class SalesOrderMatching(unittest.TestCase):
         suspect, reason, group = self.row("invoices", inv, "duplicate_suspect, duplicate_reason, duplicate_group_id")
         self.assertTrue(suspect)
         self.assertIn("says $120.00", reason)
+        self.assertTrue(reason.startswith("Already entered in QuickBooks, amount changed"), reason)
         self.assertEqual(self.row("invoices", rec, "duplicate_group_id")[0], group, "shown together")
 
     def test_both_entered_is_a_possible_double_entry(self):
@@ -141,7 +142,7 @@ class SalesOrderMatching(unittest.TestCase):
         for rid in (rec, inv):
             suspect, reason = self.row("invoices", rid, "duplicate_suspect, duplicate_reason")
             self.assertTrue(suspect)
-            self.assertIn("BOTH marked entered", reason)
+            self.assertTrue(reason.startswith("Already entered in QuickBooks, twice?"), reason)
 
     def test_order_held_twice_is_resolved_once(self):
         oid, rec, fn = self.released("ZZ9006", 100.00, entered=True)

@@ -5210,6 +5210,8 @@ on the LAN. Colleagues open the printed LAN URL; the launcher also prints the ex
 ---
 
 ## 10. Open issues / next steps
+
+- [x] **Rule collisions found 2026-10-14**: Joel decided all but the Lakewood Rx wording; built the same afternoon (see "Joel's rule decisions applied" at the end). Was: 9 findings, decisions pending. See "Rule-collision analysis (2026-10-14)" at the end of this file. Top two: the exclusion's "contains" match keeps Standard Process out of QB ("Anda" is inside "Standard"), and the same vendor has two Setup rows with opposite Exclude ticks.
 - [ ] **Watch cost/volume:** with the broadened query, every inbox email is fetched +
       classified (non-invoices land as spam/correspondence, `route_to: none`). Scope via
       `GMAIL_QUERY` (label/from:) if the inbox is noisy.
@@ -6112,3 +6114,499 @@ The rewritten rule triggers one re-check of the open queue (~126 items) on the n
 
 **Tests.** [tests/test_sales_order_matching.py](tests/test_sales_order_matching.py), 9 tests. The suite has 159 tests,
 all passing. The pipeline changes take effect from the next classify run, with no restart needed.
+
+### QuickBooks memo links: new layout, and they open on every computer (2026-10-14)
+
+**Layout (Joel).** The memo is now `FILE      <<|>>      E:   EMAIL`: 6 spaces each side of `<<|>>`, 3 after `E:`.
+It was `FILE | E: EMAIL`. Built by `_qb_memo` (review_app), used on QB Entry and in the Excel export.
+
+**Links from another computer gave "This site can't be reached".** A memo copied on the server PC read
+`http://localhost:8000/l/...`. On any other computer, localhost is that computer itself.
+- New `_link_base(request)` builds short links on this PC's office-network address instead
+  (192.168.5.60:8000 on 10/14; same socket trick as `run_web._lan_ip`).
+- A colleague's own address, or `LINK_BASE_URL` when it's set, is used as before.
+- Used at the three places links are built: the QB page, the Excel export, and Payments.
+- Short links are built when the page is shown, so every row shows the new address after the restart.
+- Checked: `http://192.168.5.60:8000/l/fwfgvYm` → 302 to the Drive file. The firewall rule "Invoice Review 8000"
+  (all profiles) is in place.
+- Memos already pasted into QuickBooks still say localhost. Replacing `localhost` with `192.168.5.60` makes them work.
+- If the router ever gives this PC another address, new links follow it but old memos don't. A DHCP reservation, or
+  `LINK_BASE_URL=http://192.168.5.60:8000`, would pin it.
+
+**Released sales orders: the flag spells out that the record is already in QuickBooks** (Joel).
+- "Already entered in QuickBooks, amount changed: sales order #… is in QuickBooks for $…, but its invoice #…, which
+  came later, says $…. Fix the bill in QuickBooks if the invoice is right, then keep one of the two here and make sure
+  it's marked entered, so the bill isn't entered again."
+- "Already entered in QuickBooks, twice? Sales order #… and its invoice #… are both marked entered in QuickBooks, so
+  the bill may be in QuickBooks twice. Delete the extra one in QuickBooks, then keep one of the two here."
+- The several-invoices case starts "Already entered in QuickBooks:" when the order was entered.
+
+**Possible duplicates shows QuickBooks status and the reason.** Two new rows above the links:
+- **In QuickBooks:** "✓ Already entered" / "Not entered".
+- **Why flagged:** the duplicate check's own words, on flagged and kept-out copies only. A cleared flag can leave old
+  text behind.
+- `list_duplicate_candidates` reads `duplicate_reason` and `entered_in_qb` from the tables. The `all_records` view has
+  no reason column, and its payment `entered_in_qb` is NULL.
+
+**Tests.** New [tests/test_memo_links.py](tests/test_memo_links.py) (6). Also +1 in test_duplicate_sets, and
+test_sales_order_matching asserts the new wording. The suite has 166 tests, all passing; 1 is skipped while a run
+holds the lock.
+- review_app changes need a web-app restart (run `notice.py` first).
+- The classify wording applies from the next run.
+
+### Rule-collision analysis (2026-10-14, Joel: "a thorough analysis to see if the rules collide")
+
+Read: the prompt, the 23 learnings, the store notes, every code gate, the Setup tables, the duplicate / reminder /
+sales-order / QB-match / review-queue rules, and the open review queue (130 items). All data checks were read-only.
+Findings, most harmful first:
+
+1. **Exclusion matches names that merely contain an excluded name.** `is_excluded_vendor` is "contains, either
+   direction".
+   - "Anda" is inside "St**anda**rd Process": 3 Refuah bills are kept out of QB, none entered — #CD7742741 $1,336.00
+     (9/17), #CD7775770 $152.00 (10/6), #CD7789015 $129.00 (10/13).
+   - The same match would catch BOO BOO BANDAGE and Landau's Health Tree, and any new "…anda…", "Numed…", or a bare
+     "Maple" / "Pharmacy" / "Rx" / "Smith".
+   - Excluded bills skip review too, so it's silent. Quick fix "Enter in QuickBooks" can't override an exclusion.
+   - The backfill never un-excludes.
+2. **The same vendor has two Setup rows, with opposite Exclude ticks:** Parmed / Parmed Pharmaceuticals, Auburn /
+   Auburn Pharmaceuticals, BluPax + BluPax Pharma / Blupax Pharmaceuticals, Masters / Masters Pharmaceuticals, and
+   JCP&L "&" / "and".
+   - Today these are excluded only through the loose match in #1.
+   - So fixing #1 without merging these rows would send these wholesalers' bills to QB entry (ParMed alone: 93
+     invoices).
+   - "Cong Chasudim Tovim" is both its own row and an alias of KALITZOIM.
+3. **"Ignore payment confirmations" matches exact spellings only.** It misses "Jersey Central Power & Light (JCP&L)",
+   "JCP&L" and "NJNG (New Jersey Natural Gas)".
+   - 7 utility payments recorded before the setting are still live and not entered: JCP&L ×3 (Aug/Sep, store
+     unknown) and NJNG ×4 (recorded 10/13).
+4. **Card vs. address vs. scanner disagree on the store.**
+   - The prompt calls each one decisive, and code always applies the card, but the AI still flags the conflict.
+   - Open now: Garden of Life #52099183 $438.40 and #52081242 $246.88 (card 8400 → 3M, ship-to Refuah), and Stiac
+     Laundry (printed Madison, card 2957 → Refuah).
+   - The same split makes "store conflict" duplicate pairs when a Refuah scan meets the vendor's emailed copy.
+   - Learning #4662 settles it only for Emerson/Fullscript, and only for Maple/3M.
+5. **Carepax.** Learning #4660 says Carepax = BMW. The Setup store rule allows Carepax → BMW only for Sageteq and
+   Microsoft, so every other vendor billing Carepax goes to review: Schwartz & Company CPAs #236738 $1,800 and Twin
+   Rocks #001140 $51 are open now.
+6. **Old sales-order flags.** 8 open items (#3570, #3571, #3572, #3578, #3579, #3584, #3652, #3698) said "processed as
+   an invoice per policy … watch for a duplicate". They were held under the old learning, and a released order keeps
+   the AI's original flag.
+   - The 11:00 re-check settled 6 of them: 5 recorded, and Bened Life #126877 held.
+   - It stopped at its cap before reaching #3698 Rockland #9673920 $1,940, #3699 Forever Living #USA7833422 $694.47,
+     #3700 Venture Respiratory #99577 $2,437.43 and #3701 Melissa & Doug #27231649 $1,485.48. These still carry the old
+     flag. One run re-reads them: `python classify_emails.py --retry-id=3698,3699,3700,3701`.
+7. **"Keep this one" can set aside the copy already in QuickBooks.**
+   - The pipeline never auto-ignores an entered copy, but keeping a not-entered copy marks the entered one as the
+     duplicate.
+   - The kept copy then shows on QB Entry as not entered, so the bill can be entered twice.
+   - The page now shows "In QuickBooks" per copy. Proposed: the kept copy inherits the entered mark.
+8. **Revised invoices are decided twice.**
+   - The AI flags "REVISED/UPDATED" → review (8 open).
+   - Once answered, the duplicate check sees the original at another amount and flags the copy again as "likely
+     REVISED" on Possible duplicates (29 live there).
+9. **Wording / setup contradictions** (little effect today):
+   - 3M's store note says "382 Route 59 = Maple Pharmacy/NY". BMW's note and #4646 say 382 Rt 59 Ste 276 is the shared
+     back office; Maple is 59 Rt 59 Ste 143.
+   - The prompt says "the six names" and tells the AI to flag the Lakewood Rx Inc / Rx Fleet address. But Lakewood Rx
+     is a store (36 invoices, 12 payments), and learnings map Sageteq "Lakewood Rx" and Accuscript to it.
+   - #4648 (store transfers → credit memo + bill): our pharmacies are excluded vendors, so both sides always stay out
+     of QB. Some transfer credit memos have vendor = the same store.
+   - #4651 (ignore Institute for Advanced Judaic Studies) isn't backed by an Exclude tick, so the unlisted-skip gate
+     would send its next bill to review.
+   - #4645 (utility pay confirmations, "no need") overlaps the new tick. For an unticked utility, an empty answer goes
+     to review.
+   - #4654 "packing slip … not helpful" vs #4653 (a priced packing slip is held).
+   - #4666 asks the AI to cross-reference our records, which it can't see.
+   - JCP&L bills are excluded, but NJNG bills aren't (3 waiting).
+   - Excluded bills never reach review even with no amount, though the amount gate's note says AP needs it.
+   - Setup card mapping fills only blank stores, while at read time a card overrides any store.
+   - 21 vendor spellings reach their Setup row only by fuzzy match. Duplicates and QB names use the fuzzy match;
+     "Trust line-item totals" / "Ignore payment confirmations" don't.
+
+Nothing was changed for these. Waiting on Joel's decisions (see §10).
+
+### 11:00 run results, the Rockland wording, and --retry-id with a list (2026-10-14)
+
+**The 10/14 11:00 run** (46.9 min, OK).
+- Learnings re-check: stopped at the 45-minute cap after 100 of 130 items. 32 resolved, 98 kept. The other 30 keep
+  their flags, and the re-check won't run again for the same learnings.
+- Sales orders: 6 held BluPax orders were superseded by invoices under other numbers, as the dry run predicted:
+  - Madison #1992625 → #1204976 $151.90, and #1992627 → #1205032 $4.16;
+  - Maple #1992654 → #1205019 $151.20, and #1992657 → #1205087 $44.30;
+  - Westgate #1992669 → #1205152 $115.67, and #1992670 → #1205077 $71.64.
+- 1 released order was matched: Rockland #9636677 and invoice #34910 are both entered in QB, so both are flagged.
+- 2 new holds until 10/17: Bened Life #126877 $1,386 (review #3652), and Rockland $869.50 dated 9/22 (review #3578;
+  re-read with no order number).
+- Masterko #35045 was recorded and auto-ignored as a duplicate of a copy already on file. Masterko #35057, Wellspring
+  Meds #1730473, Fun Salon #25290 and Releaf Healing #59270 were recorded clean.
+- Review queue: 99 open.
+
+**Rockland flag reworded.** The run started before the wording change, so invoices 2612 and 2288 got the old "BOTH
+marked entered" text. Both now carry the new "Already entered in QuickBooks, twice?" text (`edit_log`, `claude (asked by
+joel)`, old text kept there).
+
+**`--retry-id` takes a list.** `--retry-id=3698,3699,3700,3701` re-reads several open items in one run (new
+`_parse_retry_ids`; `#` and spaces are tolerated). Ids not found are named in the run log. Tests:
+[tests/test_retry_ids.py](tests/test_retry_ids.py) (3). The suite has 169 tests, all passing.
+
+### Joel's rule decisions applied; memo links on the PC's network name; a run no longer undoes Setup learnings (2026-10-14, afternoon)
+
+Joel's answers to the rule-collision findings, as built. All data changes went through
+[apply_rule_decisions_20261014.py](apply_rule_decisions_20261014.py). It does a dry run by default and writes with
+`--apply`; it was applied at 12:10. Every change is in `edit_log` as `claude (asked by joel)`, and a rerun finds nothing
+left to do.
+
+**Links that survive changes and open on every computer.** Joel's question: can new links survive any change, and open
+on other computers and on the network?
+- This PC is on the office domain (carepax.com). The domain's name server maps `CP0010.carepax.com` to it and updates
+  the name automatically when the PC gets a new address.
+- New `_network_name()` reads that name with `socket.getfqdn()` and uses it only if it resolves. A failed lookup is
+  retried after 10 minutes.
+- `_link_base` now always uses it, however the page was opened; `LINK_BASE_URL` still wins. Without a network name it
+  falls back to the LAN address.
+- Checked: `http://CP0010.carepax.com:8000/l/fwfgvYm` → 302 to the Drive file.
+- The one change a name can't survive is moving the app to another computer. An IT-made name such as
+  `invoices.carepax.com` (then `LINK_BASE_URL`) would cover that.
+
+**1–2. Exclusions match whole vendor names; duplicate vendor rows merged** (Joel: "yes").
+- `is_excluded_vendor` compares `_norm_vendor_std_key` keys: case, punctuation, &/and and Inc/LLC don't matter.
+  `_excluded_vendor_keys()` is new. `web_db._excluded_vendor_sql` lists the record/ledger spellings that rule accepts.
+- Merged, keeping the row with the QB names and account and ticking Exclude:
+  - Parmed → Parmed Pharmaceuticals
+  - Auburn → Auburn Pharmaceuticals
+  - BluPax + BluPax Pharma → Blupax Pharmaceuticals
+  - Masters → Masters Pharmaceuticals
+  - Jersey Central Power and Light → Jersey Central Power & Light
+
+  The other row's spellings became aliases, and that row was deleted.
+- Standard Process #CD7742741 $1,336.00, #CD7775770 $152.00 and #CD7789015 $129.00 (Refuah) are back on QB Entry, with a
+  note. They already had Drive documents and QB names.
+- Check afterwards: the only kept-out vendor that whole names no longer cover is plain "Amazon" (1 Westgate bill, still
+  kept out). Its new bills will go to review. If it's the same account as Amazon Business, add "Amazon" as a spelling.
+
+**3. "Ignore payment confirmations" spellings** (yes).
+- Added JCP&L and "Jersey Central Power & Light (JCP&L)" to JCP&L, and "NJNG (New Jersey Natural Gas)" to NJ Natural
+  Gas.
+- JCP&L payments 60, 170 and 171 are set aside (manual ignore, with a note).
+- Correction to the analysis: the 4 NJNG payments had already been set aside on 10/13 at 18:28.
+
+**4. Card vs. document → review** (Joel: "we really need a review in such a case").
+- `apply_card_store_map(rec, reviewer_answered)`: when the AI put a record under a different store than the mapped
+  card's, the record goes to review naming both. The store still becomes the card's, as before.
+- On a reprocess with a reviewer's answer, the AI's store stands, with a note and no flag. A Quick fix store is never
+  touched.
+- The prompt's card paragraph now says to flag a real disagreement, unless a learning says which side wins (Emerson /
+  Fullscript).
+
+**5. Carepax: no change.** Joel: usually BMW, but there are exceptions ("Schwartz and Company is Carepax directly"). So
+Carepax still counts as BMW automatically only for Sageteq and Microsoft, and other vendors billed to Carepax come to
+review. Add a vendor to that Setup › Store rules row once it's always BMW.
+
+**6. "Keep this one" carries the entered mark** (yes, "if … no financial impact").
+- `keep_and_ignore_others`: the kept copy becomes entered (`edit_log`) when a copy set aside was entered with the same
+  amount and store.
+- Otherwise nothing carries over, and a flash message says the set-aside copy was in QuickBooks with different details.
+
+**7. A revised invoice a person answered isn't flagged again** (yes).
+- New branch in `apply_duplicate_checks` for a "possible" match on a copy reprocessed with a reviewer's answer: the
+  answered copy is kept and the earlier version set aside (`supersede_duplicate_invoice`).
+- If the earlier version is entered in QB, the copy is flagged "Already entered in QuickBooks, amount changed …"
+  instead (Joel's own rule for entered bills).
+- The review item's "Multiple versions …" notice now says what answering does.
+
+**8. Store named vs. back-office address** (Joel's guidance).
+- The 3M store note now says 59 Route 59 Ste 143 is Maple, and 382 Route 59 Ste 276 is the shared back office and
+  doesn't decide.
+- New prompt paragraph: a store clearly named decides. When an address is the only clue, look at the bigger picture
+  (what was billed, the history); otherwise flag.
+- New `_sender_history_hint` adds a `[HISTORY — … by store …]` line, from `database.store_history_for_sender`:
+  - only for an outside sender with 2+ earlier records where one store has at least 80% (31 of 89 regular senders);
+  - never for our own domains or the scanner/contact mailboxes.
+
+**9. Transfer learning deleted** (Joel: "outdated, can be deleted"). The 12:00 run put it back at 12:24, and it was
+deleted again at 12:25 (see the learnings fix). **IAJS** and **NJ Natural Gas** have Exclude ticked; the backfill kept 3
+NJNG bills out of QB.
+
+**Learnings no longer undone by a run.**
+- `database.save_learnings` deleted every learning and re-inserted the list the run loaded at its start. So any Setup
+  add, edit or delete made during a run was reverted when it ended, and every learning got a new id each run.
+- Now a run calls `save_learnings(rows, added=...)` → `database.add_learnings`, which inserts only the rules it added.
+
+**`--retry-id` list** (from the 11:00 results): see the section above.
+
+**"Six stores" / Lakewood Rx wording:** done at ~13:00 (Joel: yes); see the next section.
+
+**Incident, 12:13–12:24.** A read-only check script of mine held a transaction open while its own `init_db` ALTER TABLE
+waited. Every query on those tables queued behind it, and the 12:00 run was blocked for about 10 minutes. It was stopped
+at 12:24, and the run finished OK at 12:24 (24.5 min). Lesson recorded in the working-conventions memory.
+
+**Tests.**
+- New [tests/test_rule_decisions.py](tests/test_rule_decisions.py) (16) and the rewritten
+  [tests/test_memo_links.py](tests/test_memo_links.py) (7).
+- The suite has 186 tests, all passing.
+- The pipeline parts apply from the next run. Learnings changed, so the 12:30 run re-checks the queue (up to 45 min).
+- The web parts (links, Keep this one, the exclusion filter, Possible duplicates rows) need a web-app restart.
+
+### Store list follows Setup; the two Maples spelled out; the Sept 17 link work checked (2026-10-14, ~13:00)
+
+**The "app update" conversation (Joel asked to check it).** This is the 2026-09-17 briefing in another session: "Make
+short-link destinations host-independent (survive a future move off localhost/LAN)".
+- What it did is still in place:
+  - link targets are stored app-relative;
+  - `/l/{code}` resolves app-owned targets against the host at click time;
+  - `LINK_BASE_URL` is the config switch "whenever a stable domain is ready".
+- `LINK_BASE_URL` was never set, so the host prefix was whatever address the page was opened on (localhost on the
+  server PC). That is the broken link Joel's colleague hit.
+- Today's `_network_name` fills that gap, and `LINK_BASE_URL` still wins, so the planned domain switch works as
+  designed.
+
+**Store list follows Setup › Stores** (Joel: "as we go and add stores, this should be updated").
+- The prompt no longer names or counts the stores: "the six names" and the separate "Lakewood Rx Inc … flag for review"
+  line are gone.
+- The three `store_matched` choice lists are now `%%STORE_CHOICES%%`, built from the stores table in
+  `build_system_prompt`.
+- Lakewood Rx's store row now has its address (10 Prag Blvd #203, Monroe, NY 10950), its legal name (Lakewood Rx Inc,
+  formerly Rx Fleet Inc), and a note: BMW Tech LLC and Carepax share the building, so the name on the bill decides.
+- A brand-new store still needs its QuickBooks name column (`name_*` in vendor_name_map, `_STORE_KEY`, the
+  `qb_match.STORE_MAP` tab) — a code change.
+
+**The two Maples** (Joel: "We have a Maple in New York. We have a Maple in New Jersey, which is 3M.").
+- 3M's note now spells it out. "Maple" / "Maple Pharmacy" alone can be either: Maple NY = Maple Pharmacy (Maple Rx NY
+  LLC, 59 Route 59 Ste 143, Monsey) or Maple NJ = 3M Pharmacy (Maple Rx NJ LLC, 1091 River Ave, Lakewood). The legal name
+  or the store address decides. The 382 Route 59 back office does NOT mean Maple NY.
+- Maple Pharmacy's note starts "This is Maple NY".
+- BMW's note began "This is the SAME office address as Maple Pharmacy", which contradicted Maple's own note and #4646.
+  It now says it's the shared back office, not Maple's store, and "ANY of our stores" (was "the six stores").
+- All four rows were edited through `web_db.edit_reference` (`edit_log`, `claude (asked by joel)`).
+
+**Open: where do Schwartz & Company's Carepax bills go?** Joel: "Schwartz is always Carepax. No need for review."
+- Schwartz bills every store separately, by legal name. Only #236738 ($1,800, revised to $450; 4 open review items)
+  is addressed to Carepax.
+- Carepax isn't a store in the app. In QuickBooks, "Carepax" appears only as the memo on Abbott Nutrition bills in
+  Maple's books.
+- Asked Joel: file Schwartz's Carepax bills under BMW, under Maple, or keep them out of QuickBooks entry.
+
+**Found: Schwartz #236187 ($1,800, 7/30) is in QuickBooks twice.**
+- In BMW's books (entered 9/8 by kk) and in Maple's (entered 10/7 by KK); see qb_imports/batch_6.
+- The bill is addressed to Maple Rx NY LLC (Maple's legal name) at the back-office address.
+- In the app the live copy is the BMW one (matched by the QB import), and the Maple copies are set aside as duplicates.
+- Told Joel.
+
+Tests: +1 in test_rule_decisions, so 17 there; the suite has 187. The pipeline parts apply from the next classify run
+(the 12:30 run had already built its prompt).
+
+### Carepax store; colors on Possible duplicates; "Last QuickBooks entry by store" on the dashboard (2026-10-14, ~13:20)
+
+**Old memo links in QuickBooks** (Joel asked whether they'll stop working).
+- Nothing changes for them. A localhost link opens only on the server PC, as before. One made from another computer
+  (the 192.168.5.60 address) opens everywhere while the PC keeps that address.
+- Replacing "localhost" with "CP0010.carepax.com" in the address bar opens a localhost link from any office computer.
+- They couldn't be counted: the QuickBooks export (qb_imports/batch_6) has no links in any field.
+
+**Carepax is an 8th store** (Joel: "Add a new store: Carepax"; "Schwartz is always Carepax. No need for review.").
+- Code, the same pattern as Lakewood Rx:
+  - `name_carepax` on vendor_name_map and account_name_map (MIGRATIONS);
+  - `vendor_exclusion_spellings` reads it;
+  - `load_vendor_standardization`, `_STORE_KEY`, `qb_match.STORE_MAP` (a "Carepax" tab) and `STORE_COL`;
+  - `web_db` `_REF` / `_QB_NAME_STORE_COL` / `_STORE_NAME_COLS`;
+  - the Setup forms (review_app) and the qb_reconcile help text.
+  - Columns appear on the next init (classify run or web restart).
+- Data (logged):
+  - Setup › Stores row "Carepax" (10 Prag Blvd, Monroe, NY; sort 8). Its note: Schwartz's Carepax bills are Carepax's;
+    Sageteq/Microsoft → BMW; any other vendor's Carepax bill → review ("usually BMW, but not always").
+  - Store rule: Carepax → Carepax, only for Schwartz & Company. Checked against the live rules:
+    - Schwartz → Carepax: no review;
+    - Twin Rocks → Carepax or BMW: review;
+    - Sageteq → BMW: no review.
+- The 4 open Schwartz items are all invoice #236738 ($1,800, revised to $450): #3576, #3589, #3657, #3658. Suggested
+  to Joel: answer the $450 one with Store: Carepax, and ignore the rest.
+
+**The two Maples** (Joel: "Maple Pharmacy" can mean either; we can't rely on it alone). Confirmed: that's what the
+3M / Maple notes now say.
+
+**Schwartz #236187** (Joel: an exception, it belongs to BMW). In the app it's already BMW: the BMW copy (forwarded by
+Joel 8/31) is marked entered by the QB reconcile import, and the two Maple copies are set aside, not entered. Only the
+Maple entry in QuickBooks (10/7) needs deleting.
+
+**Possible duplicates: colors where copies differ** (Joel: "colors for the differences in bill numbers … I no longer
+see it").
+- Nothing was lost. The red outlier amount (9/23) is still there. The character-level highlight (10/8) was only ever on
+  QB match review.
+- Since 10/14 copies with different numbers share a set, so `_mark_set_differences` (web_db) now marks:
+  - `number_vs`: highlight the differing characters with `diff_against`, against the number most copies share;
+  - `store_diff` / `date_diff`: a store or date no other copy shares, in red.
+- A legend line was added. On 10/14's 10 sets: 16 number highlights (e.g. Boiron F[I]261367[9]4 vs F12613674); every
+  store and date agreed.
+
+**Dashboard: "Last QuickBooks entry by store"** (Joel's idea).
+- `web_db.last_qb_entry_by_store()` gives, per store in Setup order: the last time a person marked records entered
+  (invoices, credit memos, payments), and how many that sitting covered (no gap over `QB_ENTRY_GAP_MINUTES`, 60).
+- Marks containing " via " (the QB reconcile import / recheck / confirm / unmatched backfill) and "auto…" marks don't
+  count. It uses the records' `entered_qb_at` / `entered_qb_by`, with no new table.
+- Each store links to /qb?store=…&entered=yes.
+- On 10/14:
+  - Maple 10/12 13:31 (217 records), Madison 10/12 13:46 (75), 3M 10/12 13:58 (87), Refuah 8/10 (1);
+  - Westgate, BMW, Lakewood Rx and Carepax show "—": their entered marks all came from the 10/8 QB upload.
+
+**Tests.** test_rule_decisions now has 21 (duplicate-set marks, store list follows Setup, last QB entry). The suite
+has 191. The web parts need a web-app restart; the pipeline parts and the Carepax data apply from the next classify
+run.
+
+### Every Carepax bill → BMW except Schwartz; store rules shown to the AI; Schwartz #236738 put right (2026-10-14, ~13:50)
+
+**Joel: "all Carepax goes to BMW, besides Schwartz or any other one we're going to make an exception for."**
+- Setup › Store rules row 1 is now "Carepax" = BMW for every vendor except Schwartz & Company. It was "only Sageteq,
+  Microsoft".
+- An exception is added by listing the vendor there. Row 11 (Carepax → Carepax, Schwartz only, added at ~13:15) was
+  removed as redundant.
+- The Carepax store note: a bill addressed to Carepax is BMW's, except from the vendors that rule excepts, whose
+  Carepax bills are Carepax's own.
+- Checked against the live rules:
+  - Schwartz → Carepax, Twin Rocks / Abbott / Sageteq / Microsoft → BMW: no review;
+  - Twin Rocks → Carepax: review.
+- The AI now sees the Setup rules. New `%%STORE_RULES%%` section built by `_store_rule_prompt_line` from
+  `STORE_SCOPE_RULES` (`build_system_prompt(store_rules=…)`). Before, the rules were only a code check: the AI guessed
+  from learnings and the gate sent the guesses to review.
+
+**Why #3658 wasn't under Carepax, and what happened to #236738.**
+- #3658 was flagged on 10/7 with the AI's store guess (BMW); adding a store doesn't touch existing review items.
+- At 13:35 Joel answered #3576 ("revised amount $450, date 9/23") and #3589 (Quick fix store Carepax) in one run:
+  - #3576 was recorded under Maple at $450. The AI read the "Maple - …" review file name and the maplerx.com sender
+    as the store.
+  - #3589 was recorded under Carepax at $1,800.
+  - Neither was flagged. The answered-revision branch (afternoon) found no saved earlier version, because the other
+    one was answered in the same run and wasn't saved yet. So it kept the copy clean and set nothing aside.
+- At 13:40 Joel set both aside himself ("Don't enter in QB").
+- Fixed (logged, `claude (asked by joel)`):
+  - 4736 ($450) moved to Carepax, back on QB entry (`set_record_ignored False`), QB names refreshed to the standard
+    names (`refresh_qb_names`; no Carepax spellings yet);
+  - 4737 ($1,800) set aside as replaced by the $450 revision;
+  - review #3658, a third copy of the same $450 bill, dismissed (restorable from Ignored).
+- Code:
+  - The answered-revision branch now runs only when the earlier version is a saved record. Otherwise the copy is
+    flagged as a possible duplicate, as before 10/14.
+  - Prompt: a file name starting with a store name ("Maple - …") is the system's own earlier guess, not evidence.
+  - Maple's store note no longer says maplerx.com belongs to Maple: staff forward bills for every store from there.
+
+**Open with Joel.**
+- Abbott #622312457 (#3639) and Medline #2447729361 (#3650) are billed to Carepax but ship to Yedei Chesed, 130
+  Grandview Ave. QuickBooks has Abbott's earlier Carepax bills in Maple's books (memo "Carepax"). Under the new rule
+  they'd be BMW, so Joel was asked whether Abbott should stay with Maple.
+- #3687 (Twin Rocks, $51) and the 2 remaining old sales-order items (#3699, #3700) can be re-read:
+  `python classify_emails.py --retry-id=3687,3699,3700`.
+
+Tests: test_rule_decisions now has 23 (same-run revision; store rules reach the AI). The suite has 193.
+
+### Abbott/Medline Carepax bills → Maple; cost of goods on a back office goes to review; Bened Life "in QB" (2026-10-14, ~14:00)
+
+**Carepax exceptions** (Joel: Abbott and Medline "stay with Maple").
+- Setup › Store rules, all logged:
+  - row 1: "Carepax" = BMW for every vendor except Schwartz & Company, Abbott, Medline;
+  - "Carepax" → Carepax only for Schwartz & Company (re-added);
+  - "Carepax" → Maple Pharmacy only for Abbott, Medline.
+- The Carepax store note now points to those rules. To add an exception: list the vendor on row 1 and add (or extend)
+  the row that says where its Carepax bills go.
+- Checked against the live rules:
+  - Schwartz → Carepax, Abbott/Medline → Maple, Twin Rocks/Sageteq → BMW: no review;
+  - Twin Rocks → Maple, Abbott → Carepax: review.
+- `_store_rule_prompt_line(rule, covered)`: an "only these vendors" line drops "… alone does not decide the store"
+  when the same reference also has an "every vendor except" rule. The AI now reads, e.g., '"Carepax" on a bill from
+  Abbott, Medline means Maple Pharmacy.'
+- Abbott #622312457 ($694) is already recorded under Maple and entered (QB recheck), so review #3639 is a second copy.
+  Medline #2447729361 ($568.38, #3650) has no record yet.
+
+**Back office: cost of goods goes to review** (Joel: "any kind of cost of goods sold that's billed to BMW should be
+flagged because BMW is a back office and not selling any goods. Same with Lakewood RX.").
+- New Setup › Stores checkbox "Back office (sells no goods)": `stores.back_office`, in MIGRATIONS, `_REF['stores']`
+  bool_cols, and the review_app form. Ticked for BMW and Lakewood Rx.
+- `apply_back_office_goods_gate(rec, reviewer_answered)`: an invoice or credit memo on a back-office store whose
+  QuickBooks account is cost of goods goes to review.
+  - Cost of goods (`_is_goods_account`) = the "Purchase" accounts (Purchase:Vitamins / OTC Purchase / Rx Generics / …)
+    or Inventory.
+  - The account is the record's `standard_account`, or worked out on a copy via `apply_vendor_standardization`.
+  - Runs in `apply_review_gates` and `build_result_rows`. It skips a Quick fix store or a reviewer's answer (no loop).
+- `_store_prompt_line` adds "Back office: it sells no goods, so a bill for merchandise … isn't this company's; find
+  the pharmacy it's for".
+- No current live BMW or Lakewood Rx bill has such an account.
+- The column was added live at 13:58 with `lock_timeout 3s` (no run in progress).
+- Note: `_ref_clean` always sends every bool col, so a partial `edit_reference('stores', …)` without `back_office`
+  unticks it. Pass it alone, as done here.
+
+**Bened Life "in QB"** (Joel: it never landed on QB entry?).
+- It did: Bened Life #125057 ($346.50, 8/31, Maple), recorded 10/1, was on QB entry until KK entered it in Maple's
+  books on 10/7 13:12 (directly in QuickBooks).
+- The 10/8 QB upload matched it and marked it entered ("joel via QB reconcile import").
+- The $1,386 Bened Life #126877 is a held sales order until 10/17, not a record.
+
+**Re-read** Twin Rocks #3687, Abbott #3639, Medline #3650 and the 2 old sales-order items:
+`python classify_emails.py --retry-id=3687,3639,3650,3699,3700`.
+
+Tests: test_rule_decisions now has 26 (back-office goods ×2, rule wording). The suite has 196.
+
+### Auto-matched list per QB upload; held orders in record search; duplicates labels; stale ledger stores (2026-10-14, ~14:20)
+
+**Where an auto-matched QB bill shows** (Joel couldn't find Bened Life #125057 under Pending unmatched → All).
+- Pending unmatched lists only QuickBooks rows that matched nothing, and QB match review only the doubtful ones. An
+  exact match was on no page.
+- New `/qb-reconcile/matched?batch_id=…&search=…` (`web_db.qb_batch_auto_matches`, `qb_reconcile_matched.html`):
+  - lists the records an upload marked entered by itself;
+  - found by `entered_qb_by = '<uploader> via QB reconcile import'` within the hour after `uploaded_at`;
+  - searchable by vendor or number.
+- The "Auto-matched" count on /qb-reconcile links to it; the unmatched page points there.
+- Check: batch 6, search "bened" → Bened Life #125057, Maple, 8/31, $346.50.
+
+**Held sales orders in record search** (Joel: should show, labelled held).
+- New `all_records` arm (WEB_DDL, applied at web start): `record_type 'sales_order'`, `email_status 'Held'`, notes
+  "Held sales order: recorded on MM/DD/YY if no invoice comes first". Only `status = 'held'`.
+- Browse: amber "Held (sales order)" pill linking to /sales-orders, plus the type filter option.
+- The `outcome` macro shows the notes; `/records/sales_order/…` redirects to /sales-orders.
+- The review-item breadcrumb (`records_for_source_email`) and the tracked-items lookup leave held orders out.
+- Test: the view is applied inside the rolled-back test transaction.
+
+**Possible duplicates labels** (Joel: "Invoice 1980" reads as a bill number; never mix invoices and payments).
+- The top-left cell says "Invoices" or "Payments" for the whole set. Each copy says "Record 1980" (tooltip: the app's
+  record number).
+- The sets were never mixed: checked all 12 on 10/14; sets are built per record type. `list_duplicate_candidates`
+  now also drops any record of another type than its set (a guard).
+
+**Stale duplicate-ledger stores** (found when Joel re-read Abbott #3639).
+- The re-read copy was flagged "already recorded to BMW". Joel had moved record 1604 BMW → Maple on 9/23, but
+  invoice_history kept BMW.
+- 7 live records had a ledger row with another store, including today's #236738 store change. Fixed three ways:
+  - `update_record_field(… 'store' …)` now updates the record's invoice_history / payment_history row, logged
+    "(store edited on its record)";
+  - `find_live_invoice` returns `store_matched`. In the store_conflict branch, a saved copy whose CURRENT store equals
+    the new copy's is a plain duplicate: auto-ignored "[first-arrived]", "since moved to <store>";
+  - data: the 7 ledger rows were synced (logged `claude (asked by joel) (synced to record N)`), and 4913 (the Abbott
+    copy) was set aside as a duplicate of the entered 1604.
+- The 14:06 re-read (Joel) also recorded Medline #2447729361 under Maple and Twin Rocks #001140 under BMW. #3700 was
+  resolved.
+- #3699 Forever Living now waits only on a vendor mapping ("Forever Living Products" isn't in Setup › Vendor names).
+
+Tests: test_rule_decisions now has 29; the suite has 199. The web parts need the web-app restart; the view arm applies
+then.
+
+### Split-payment sweep: a payment recorded both as a total and split by invoice keeps the total (2026-10-14, ~14:40)
+
+**The case.** Anda ACH HJEO7TVORL, $23,754.47, Maple, 9/23:
+- record 227 (Anda's own notice) was the total; 228, a second copy of that notice, was already set aside;
+- on 10/14 12:40 cspitzer forwarded the notice with its invoice list, and the AI recorded 18 payments (1791–1808), one
+  per applied invoice, adding up to the total;
+- `check_duplicate_payment` saw the same reference with different amounts, so Possible duplicates showed one
+  19-copy set.
+- It was the only such case in the data.
+
+**Joel: "keep 227 and make it automatic".** New `resolve_split_payments(actor, dry_run)` (classify_emails), run in
+`main()` right after the payment-duplicate sweep, actor "auto-resolved (split-payment sweep)".
+- Group: same standard vendor + reference (alphanumerics) + store.
+- When exactly one live payment has no applied invoice (the total), and 2+ live payments that each name an applied
+  invoice add up to it to the cent:
+  - the total is kept, its suspect flag cleared, and "[Applied to N invoices (…): <invoice> $<amount>; …]" appended
+    to its notes;
+  - the lines are set aside as ignored duplicates of it, sharing a group id, with a reason.
+- Nothing happens if any of them is entered in QB or skip-QB. Logged and idempotent.
+- Applied now to the Anda case (actor `claude (asked by joel)`): 227 kept with the 18-invoice list in its notes,
+  1791–1808 set aside. A second pass finds nothing.
+
+Tests: SplitPayments in test_rule_decisions (2). The suite has 201. Pipeline only, so it runs from the next classify
+run.

@@ -122,7 +122,7 @@
       <div><label>Vendor contains</label><input name="vendor" value="{{ params.vendor }}"></div>
       <div><label>Record type</label>
         <select name="record_type"><option value="">any</option>
-          {% for t in ['invoice','credit_memo','payment','review'] %}<option value="{{ t }}" {{ 'selected' if params.record_type==t }}>{{ t }}</option>{% endfor %}
+          {% for t in ['invoice','credit_memo','payment','review','sales_order'] %}<option value="{{ t }}" {{ 'selected' if params.record_type==t }}>{{ t }}</option>{% endfor %}
         </select></div>
       <div><label>Status</label>
         <select name="status"><option value="">any</option>
@@ -185,7 +185,8 @@
     <tbody>
     {% for r in rows %}
       {% set is_review = r.record_type == 'review' %}
-      <tr{% if is_review %} style="background:#f7fbff;"{% endif %}>
+      {% set is_held = r.record_type == 'sales_order' %}
+      <tr{% if is_review %} style="background:#f7fbff;"{% elif is_held %} style="background:#fffbeb;"{% endif %}>
         <td>{{ r.record_type }}</td>
         <td class="nowrap">{{ (r.store_matched | store_label) or '—' }}</td>
         <td class="nowrap">{{ r.vendor_matched or '—' }}</td>
@@ -202,6 +203,7 @@
         <td class="muted" style="white-space:nowrap;">{{ (r.received_at | us_datetime) or '—' }}</td>
         <td class="flags-cell">
           {% if is_review %}<span class="pill rev">In review</span>{% endif %}
+          {% if is_held %}<a class="pill" style="background:#fef3c7;color:#92400e;" href="/sales-orders" title="{{ r.notes or '' }}">Held (sales order)</a>{% endif %}
           {% if r.skip_qb_import %}<span class="pill skip">skip QB</span>{% endif %}
           {% if r.duplicate_ignored %}<span class="pill" style="background:#fee2e2;color:#b91c1c;" title="{{ r.duplicate_of or '' }}">Duplicate — kept out of QB</span>{% if r.duplicate_of %} <a href="/browse?email={{ r.duplicate_of|urlencode }}" title="the record this duplicates">↗</a>{% endif %}
             {% if r.record_type in ['invoice','payment'] %}

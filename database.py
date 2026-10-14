@@ -592,6 +592,13 @@ ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS trust_line_item_totals BOOL
 -- "payment received" / AutoPay emails, already seen in the bank) are read but not recorded as payments
 -- and not sent to review. Off for every vendor until someone ticks it in Setup › Vendor names.
 ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS ignore_payment_confirmations BOOLEAN NOT NULL DEFAULT FALSE;
+-- Carepax, an 8th store (2026-10-14, Joel: "Add a new store: Carepax"): its QuickBooks spelling of each
+-- vendor and account, like the other stores' name_* columns.
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS name_carepax TEXT;
+ALTER TABLE account_name_map ADD COLUMN IF NOT EXISTS name_carepax TEXT;
+-- A back-office company (2026-10-14, Joel: BMW and Lakewood Rx sell no goods), so a cost-of-goods bill filed
+-- to it goes to review (classify_emails.apply_back_office_goods_gate). Ticked in Setup › Stores.
+ALTER TABLE stores ADD COLUMN IF NOT EXISTS back_office BOOLEAN NOT NULL DEFAULT FALSE;
 -- Which invoice a payment settles, when the remittance states it. Disambiguates a shared
 -- payment/batch reference_number applied to several different invoices in one document.
 ALTER TABLE payments        ADD COLUMN IF NOT EXISTS invoice_number TEXT;
@@ -821,6 +828,7 @@ SELECT btrim(s.name) AS name, vm.exclude_from_qb, vm.exclude_from_statement_reco
   UNION ALL SELECT vm.name_westgate
   UNION ALL SELECT vm.name_bmw
   UNION ALL SELECT vm.name_lakewood_rx
+  UNION ALL SELECT vm.name_carepax
   UNION ALL SELECT x FROM regexp_split_to_table(coalesce(vm.aliases, ''), E'\n') AS x
   ) s(name)
  WHERE (vm.exclude_from_qb OR vm.exclude_from_statement_recon)
@@ -998,7 +1006,7 @@ def load_stores():
     conn = connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute("SELECT store_name, aliases, address, notes "
+            cur.execute("SELECT store_name, aliases, address, notes, back_office "
                         "FROM stores ORDER BY sort_order, id")
             return [dict(r) for r in cur.fetchall()]
     finally:
@@ -1132,7 +1140,7 @@ def load_vendor_standardization():
         conn.close()
     store_cols = {"3m": "name_3m", "madison": "name_madison", "maple": "name_maple",
                   "refuah": "name_refuah", "westgate": "name_westgate",
-                  "bmw": "name_bmw", "lakewood_rx": "name_lakewood_rx"}
+                  "bmw": "name_bmw", "lakewood_rx": "name_lakewood_rx", "carepax": "name_carepax"}
 
     def _bare(v):
         return (v or "").strip().lower()
@@ -2629,6 +2637,27 @@ def load_learnings():
         conn.close()
 
 
+def add_learnings(rows):
+    """Insert the learned rules a classify run ADDED (from reviewers' "Notes to Learn"); never deletes
+    or rewrites one. A run used to save_learnings() — delete every learning, then re-insert the list it
+    loaded when it started — so a learning added, edited or deleted in Setup while a run was going was
+    undone when the run ended (the store-transfer learning Joel had deleted came back at 12:24 on
+    2026-10-14), and every learning got a new id each run."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            for row in rows:
+                rule = (row.get("Learned Rule") or "").strip()
+                if rule:
+                    cur.execute(
+                        "INSERT INTO learnings (learned_rule, date_added, from_email) VALUES (%s,%s,%s) "
+                        "ON CONFLICT (learned_rule) DO NOTHING",
+                        (rule, _date(row.get("Date Added")), row.get("From Email")))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def save_learnings(rows):
     conn = connect()
     try:
@@ -2752,6 +2781,31 @@ def email_from_addresses():
         conn.close()
 
 
+def store_history_for_sender(sender):
+    """{store: count} of the invoices, credit memos and payments recorded so far from emails sent by
+    `sender` (case-insensitive), most first. Copies set aside as duplicates and records with no store
+    don't count. classify_emails._sender_history_hint's tie-breaker (2026-10-14)."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                WITH f AS (SELECT filename FROM emails WHERE lower(from_address) = lower(%s))
+                SELECT store_matched, count(*) FROM (
+                    SELECT store_matched FROM invoices
+                     WHERE email_filename IN (SELECT filename FROM f) AND duplicate_ignored IS NOT TRUE
+                    UNION ALL
+                    SELECT store_matched FROM credit_memos WHERE email_filename IN (SELECT filename FROM f)
+                    UNION ALL
+                    SELECT store_matched FROM payments
+                     WHERE email_filename IN (SELECT filename FROM f) AND duplicate_ignored IS NOT TRUE
+                ) r
+                WHERE lower(btrim(coalesce(store_matched, ''))) NOT IN ('', 'unknown')
+                GROUP BY store_matched ORDER BY 2 DESC, 1""", (sender,))
+            return {s: n for s, n in cur.fetchall()}
+    finally:
+        conn.close()
+
+
 # One classify run at a time (2026-10-12, for the scheduled run): each run full-replaces review_queue and
 # the duplicate ledger, so two overlapping runs would drop each other's work. A Postgres session-level
 # advisory lock is held for the whole run on its own connection; it works across computers and is freed
@@ -2848,13 +2902,15 @@ def find_live_invoice(source_file, vendor_matched, invoice_number):
             # duplicate_ignored too (2026-10-12): an already-ignored prior means a person kept a
             # DIFFERENT copy, so the caller must not "supersede" it again and keep the new copy clean.
             cur.execute(
-                "SELECT id, entered_in_qb, duplicate_group_id, vendor_matched, duplicate_ignored FROM invoices "
-                "WHERE email_filename = %s AND lower(invoice_number) = lower(%s) ORDER BY id DESC",
+                "SELECT id, entered_in_qb, duplicate_group_id, vendor_matched, duplicate_ignored, store_matched "
+                "FROM invoices WHERE email_filename = %s AND lower(invoice_number) = lower(%s) ORDER BY id DESC",
                 (source_file, invoice_number or ""))
             for r in cur.fetchall():
                 if ce._norm_vendor_dedupe(r[3]) == target or ce._dedupe_vendor_key(r[3]) == std_target:
+                    # store_matched: the record's CURRENT store, which a person may have corrected after the
+                    # ledger row was written (2026-10-14).
                     return {"id": r[0], "entered_in_qb": bool(r[1]), "duplicate_group_id": r[2],
-                            "duplicate_ignored": bool(r[4])}
+                            "duplicate_ignored": bool(r[4]), "store_matched": r[5]}
             return None
     finally:
         conn.close()

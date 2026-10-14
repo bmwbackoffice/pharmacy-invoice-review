@@ -436,7 +436,14 @@ def dashboard(request: Request):
         {"label": "Cards → store", "count": d["cards"], "href": "/cards",
          "note": "card last-4 with no store mapping"},
     ] if user["role"] == "admin" else []
-    return render(request, "dashboard.html", user, work=work, health=health)
+    # When each store's records were last entered in QuickBooks, and how many that sitting (2026-10-14).
+    try:
+        qb_entry = web_db.last_qb_entry_by_store()
+    except Exception as e:
+        print(f"(dashboard: last QB entry by store failed: {e})")
+        qb_entry = []
+    return render(request, "dashboard.html", user, work=work, health=health, qb_entry=qb_entry,
+                  qb_entry_gap=web_db.QB_ENTRY_GAP_MINUTES)
 
 
 # --------------------------------------------------------------------------- #
@@ -1343,6 +1350,59 @@ def sales_order_ignore(request: Request, order_id: int):
     return RedirectResponse("/sales-orders", status_code=302)
 
 
+_NETWORK_NAME = {"name": None, "checked": 0.0}   # this PC's full network name, looked up at most every 10 min
+
+
+def _network_name():
+    """This PC's full network name (e.g. CP0010.carepax.com) when the office network's name server
+    resolves it, else None. On the office domain that name follows the PC: the domain's name server is
+    updated automatically when the router hands the PC a new address, so a link built on it keeps
+    working (Joel, 2026-10-14: links that survive changes and open on every computer)."""
+    import socket
+    import time
+    if _NETWORK_NAME["name"] or time.time() - _NETWORK_NAME["checked"] < 600:
+        return _NETWORK_NAME["name"]
+    _NETWORK_NAME["checked"] = time.time()
+    try:
+        fqdn = (socket.getfqdn() or "").strip().rstrip(".")
+        if "." in fqdn and not fqdn.lower().startswith("localhost"):
+            socket.gethostbyname(fqdn)           # only a name the network can actually resolve
+            _NETWORK_NAME["name"] = fqdn
+    except OSError:
+        pass
+    return _NETWORK_NAME["name"]
+
+
+def _link_base(request):
+    """The host new short links / CSV file links are built on: LINK_BASE_URL when set; else this PC's
+    full network name (_network_name), whichever address the page was opened with — it opens on every
+    computer on the office network and survives the PC getting a new address. Without a network name:
+    the host this request came in on, except 'localhost' (a browser on the server PC itself), which
+    becomes this PC's office-network (LAN) address. A link copied on the server PC into a QuickBooks memo
+    used to read http://localhost:8000/l/..., which only opens on the server PC (2026-10-14)."""
+    if web_db.LINK_BASE_URL:
+        return web_db.LINK_BASE_URL
+    port = request.url.port
+    name = _network_name()
+    if name:
+        return f"{request.url.scheme}://{name}" + (f":{port}" if port else "")
+    base = str(request.base_url).rstrip("/")
+    host = request.url.hostname or ""
+    if host in ("localhost", "127.0.0.1", "::1"):
+        import socket
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))           # no packet is sent; picks the outbound interface
+            ip = s.getsockname()[0]
+        except OSError:
+            ip = ""
+        finally:
+            s.close()
+        if ip and not ip.startswith("127."):
+            return f"{request.url.scheme}://{ip}" + (f":{port}" if port else "")
+    return base
+
+
 @app.get("/l/{code}")
 def short_link(request: Request, code: str):
     """Resolve an internal short link and 302 to its target. 'file' targets are already
@@ -1397,14 +1457,15 @@ QB_DATA_ATTR = {"Vendor": "vendor", "Account": "account", "Store": "store", "Inv
                 "Gmail Link": "gmail", "Memo": "memo"}
 def _qb_memo(short_file, short_gmail):
     """One combined, paste-ready memo string. The doc link comes first with no label
-    (it's the primary link); the email link is prefixed 'E:' to distinguish it. A missing
-    half is dropped; neither -> ''. e.g. 'http://host/l/AAA | E: http://host/l/BBB'."""
+    (it's the primary link); the email link is prefixed 'E:' to distinguish it, with a wide
+    '<<|>>' separator so the two read apart in QuickBooks (Joel, 2026-10-14). A missing
+    half is dropped; neither -> ''. e.g. 'http://host/l/AAA      <<|>>      E:   http://host/l/BBB'."""
     parts = []
     if short_file:
         parts.append(short_file)
     if short_gmail:
-        parts.append(f"E: {short_gmail}")
-    return " | ".join(parts)
+        parts.append(f"E:   {short_gmail}")
+    return "      <<|>>      ".join(parts)
 
 
 def _sanitize_qb_columns(cols):
@@ -1528,7 +1589,7 @@ def qb_list(request: Request, entered: str = "no", run: str = "", email: str = "
     # Compact internal short links for the File / Gmail / Records links (so the copied
     # rows + CSV paste small into QB memos). Resolved in ONE db round-trip for all rows
     # (deduped by URL, so codes are stable across loads).
-    base = str(request.base_url).rstrip("/")
+    base = _link_base(request)          # this PC's network name, not localhost (memo links open on every PC)
 
     def _abs(link):
         return (base + link) if link and link.startswith("/") else (link or "")
@@ -1688,7 +1749,7 @@ def qb_export(request: Request, entered: str = "no", run: str = "", email: str =
                   if rt and rid.isdigit()}
         if wanted:
             rows = [r for r in rows if (r.get("record_type"), r.get("record_id")) in wanted]
-    base = str(request.base_url).rstrip("/")
+    base = _link_base(request)          # this PC's network name, not localhost (memo links open on every PC)
 
     def _abs(link):  # local preview paths -> absolute so the CSV link is clickable
         return (base + link) if link and link.startswith("/") else (link or "")
@@ -1802,7 +1863,20 @@ async def record_duplicate_keep(request: Request, record_type: str, record_id: i
         rtype, _, rid = str(token).partition(":")
         if rtype in ("invoice", "payment") and rid.isdigit():
             others.append((rtype, int(rid)))
-    web_db.keep_and_ignore_others(record_type, record_id, others, user["username"])
+    res = web_db.keep_and_ignore_others(record_type, record_id, others, user["username"]) or {}
+    if res.get("carried"):
+        return _redirect_with_flash(back, "Kept. A copy you set aside was already entered in QuickBooks with the "
+                                          "same amount and store, so the kept copy is now marked entered too.")
+    if res.get("differs"):
+        d = res["differs"][0]
+        try:
+            amt = f"${float(d.get('amount')):,.2f}"
+        except (TypeError, ValueError):
+            amt = "another amount"
+        return _redirect_with_flash(back, (
+            f"Kept, but note: a copy you set aside was already entered in QuickBooks "
+            f"({web_db.store_label(d.get('store')) or 'no store'}, {amt}), and it isn't the same as the copy you kept, "
+            f"so the kept copy is not marked entered. Fix the bill in QuickBooks, then mark the kept copy entered."))
     return RedirectResponse(back, status_code=302)
 
 
@@ -1932,6 +2006,19 @@ def qb_reconcile_reject(request: Request, candidate_id: int):
     return RedirectResponse(request.headers.get("referer") or "/qb-reconcile/review", status_code=302)
 
 
+@app.get("/qb-reconcile/matched", response_class=HTMLResponse)
+def qb_reconcile_matched(request: Request, batch_id: int = 0, search: str = ""):
+    """The records one upload marked entered by itself (exact QuickBooks matches), searchable by vendor or
+    number (2026-10-14: an auto-matched bill such as Bened Life #125057 was on no page)."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    batch, rows = web_db.qb_batch_auto_matches(batch_id, search)
+    if not batch:
+        return RedirectResponse("/qb-reconcile", status_code=302)
+    return render(request, "qb_reconcile_matched.html", user, batch=batch, rows=rows, search=search.strip())
+
+
 @app.get("/qb-reconcile/unmatched", response_class=HTMLResponse)
 def qb_reconcile_unmatched(request: Request, status: str = "pending"):
     """QB export rows that matched no app record at upload — they wait here and resolve
@@ -2034,7 +2121,7 @@ def payments_export(request: Request, store: str = "", entered: str = "", run: s
                                 show_ignored=(ignored == "1"), group=group or None,
                                 show_skipped=(skipped == "1"), missing=missing or None,
                                 **_payment_search(request)[0])
-    base = str(request.base_url).rstrip("/")
+    base = _link_base(request)          # this PC's network name, not localhost (memo links open on every PC)
 
     def _abs(link):
         return (base + link) if link and link.startswith("/") else (link or "")
@@ -2189,6 +2276,8 @@ def record_detail(request: Request, record_type: str, record_id: int, flagged: s
     user = current_user(request)
     if not user:
         return _login_redirect()
+    if record_type == "sales_order":            # a held order in Browse (2026-10-14): its page is Sales orders
+        return RedirectResponse("/sales-orders", status_code=302)
     if record_type not in ("invoice", "credit_memo", "payment", "review"):
         return RedirectResponse("/browse", status_code=302)
     raw = web_db.get_record(record_type, record_id)
@@ -2527,6 +2616,7 @@ REFERENCE_PAGES = {
             {"name": "aliases", "label": "Aliases / DBAs / legal name", "type": "textarea"},
             {"name": "address", "label": "Address", "type": "text"},
             {"name": "notes", "label": "Notes (extra guidance)", "type": "textarea"},
+            {"name": "back_office", "label": "Back office (sells no goods)", "type": "checkbox"},
         ],
     },
     "vendor_name_map": {
@@ -2565,6 +2655,7 @@ REFERENCE_PAGES = {
             {"name": "name_westgate", "label": "Westgate", "type": "text"},
             {"name": "name_bmw", "label": "BMW", "type": "text"},
             {"name": "name_lakewood_rx", "label": "Lakewood Rx", "type": "text"},
+            {"name": "name_carepax", "label": "Carepax", "type": "text"},
         ],
     },
     "account_name_map": {
@@ -2579,6 +2670,7 @@ REFERENCE_PAGES = {
             {"name": "name_westgate", "label": "Westgate", "type": "text"},
             {"name": "name_bmw", "label": "BMW", "type": "text"},
             {"name": "name_lakewood_rx", "label": "Lakewood Rx", "type": "text"},
+            {"name": "name_carepax", "label": "Carepax", "type": "text"},
         ],
     },
     "vendor_account_assignment": {

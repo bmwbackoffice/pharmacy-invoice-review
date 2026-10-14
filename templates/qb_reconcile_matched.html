@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<h2>Auto-matched by a QuickBooks upload <span class="muted">({{ rows | length }}{% if search %} found{% endif %})</span></h2>
+<p class="muted">The records this upload marked <strong>entered in QB</strong> by itself, because a QuickBooks bill
+matched them exactly (upload {{ (batch.uploaded_at | us_datetime) or '' }}, {{ batch.filename or '' }}, by
+{{ batch.uploaded_by or '—' }}). The doubtful matches are on <a href="/qb-reconcile/review?batch_id={{ batch.id }}">QB match
+review</a>, and QuickBooks rows that matched nothing are on <a href="/qb-reconcile/unmatched">Pending unmatched rows</a>.
+<a href="/qb-reconcile">← back to reconcile</a></p>
+
+<form method="get" action="/qb-reconcile/matched" class="card" style="display:flex; gap:6px; align-items:center; flex-wrap:wrap;">
+  <input type="hidden" name="batch_id" value="{{ batch.id }}">
+  <input type="text" name="search" value="{{ search }}" placeholder="Vendor or bill number" style="min-width:240px; padding:5px 9px;">
+  <button class="btn" type="submit" style="padding:5px 12px;">Search</button>
+  {% if search %}<a class="btn secondary" href="/qb-reconcile/matched?batch_id={{ batch.id }}">Show all</a>{% endif %}
+</form>
+
+{% if not rows %}
+  <div class="card muted">{% if search %}Nothing matched by this upload fits "{{ search }}".{% else %}This upload matched no records by itself.{% endif %}</div>
+{% else %}
+<div class="card" style="padding:0;">
+<table>
+  <thead><tr>
+    <th>Store</th><th>Vendor</th><th>Type</th><th>Number</th><th>Date</th><th class="num">Amount</th><th>Still entered</th><th></th>
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ (r.store_matched | store_label) or '—' }}</td>
+      <td>{{ r.vendor_matched or '—' }}</td>
+      <td class="muted">{{ r.record_type.replace('_', ' ') }}</td>
+      <td>{{ r.number or '—' }}</td>
+      <td class="muted" style="white-space:nowrap;">{{ (r.record_date | us_date) or '—' }}</td>
+      <td class="num">{{ money(r.amount) }}</td>
+      <td>{{ 'yes' if r.entered_in_qb else 'no (unmarked later)' }}</td>
+      <td><a href="/records/{{ r.record_type }}/{{ r.record_id }}">Details</a></td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

@@ -32,7 +32,7 @@ import database
 STORE_MAP = {
     "3m": "3M Pharmacy", "madison": "Madison Pharmacy", "maple": "Maple Pharmacy",
     "refuah": "Refuah Pharmacy", "westgate": "Westgate Pharmacy",
-    "bmw": "BMW", "lakewood rx": "Lakewood Rx",
+    "bmw": "BMW", "lakewood rx": "Lakewood Rx", "carepax": "Carepax",
 }
 _WANTED_COLS = ("type", "date", "num", "name", "amount")
 
@@ -256,7 +256,7 @@ STORE_COL = {
     "3M Pharmacy": "name_3m", "Madison Pharmacy": "name_madison",
     "Maple Pharmacy": "name_maple", "Refuah Pharmacy": "name_refuah",
     "Westgate Pharmacy": "name_westgate", "BMW": "name_bmw",
-    "Lakewood Rx": "name_lakewood_rx",
+    "Lakewood Rx": "name_lakewood_rx", "Carepax": "name_carepax",
 }
 _OVERRIDE_ELIGIBLE_REASON = "number + amount match; vendor did not resolve to the same standard vendor"
 _FILL_ONLY_REASON = "vendor + amount match, date within 10 days; number missing/mismatched"

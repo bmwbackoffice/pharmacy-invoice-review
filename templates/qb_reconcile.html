@@ -13,7 +13,7 @@ each time you do QB entry.</p>
     <button class="btn" type="submit">Upload &amp; reconcile</button>
   </form>
   <p class="muted" style="font-size:12px; margin:6px 0 0;">.xlsx only. Worksheet tabs read:
-    3M, Madison, Maple, Refuah, Westgate, BMW, Lakewood Rx. Columns matched by header text
+    3M, Madison, Maple, Refuah, Westgate, BMW, Lakewood Rx, Carepax. Columns matched by header text
     (Type / Date / Num / Name / Amount) — order can shift between exports.</p>
 </div>
 
@@ -39,7 +39,7 @@ each time you do QB entry.</p>
       <td>{{ b.filename or '—' }}</td>
       <td class="muted">{{ b.uploaded_by or '—' }}</td>
       <td>{{ b.n_rows }}</td>
-      <td>{{ b.n_auto_matched }}</td>
+      <td>{% if b.n_auto_matched %}<a href="/qb-reconcile/matched?batch_id={{ b.id }}" title="The records this upload marked entered by itself">{{ b.n_auto_matched }}</a>{% else %}0{% endif %}</td>
       <td>{{ b.n_doubtful }}</td>
       <td>{{ b.n_statement_resolved }}</td>
       <td>{{ b.n_no_match }}</td>

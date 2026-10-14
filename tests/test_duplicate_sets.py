@@ -75,6 +75,26 @@ class GroupLinkedCopiesShareASet(unittest.TestCase):
         self.assertEqual(got[self.misread][1], True, "the misread copy is kept out")
         self.assertEqual(self.sets(), [sorted([self.other_a, self.other_b])], "the group's set is settled")
 
+    def test_page_says_which_copy_is_already_in_quickbooks_and_why(self):
+        reason = "Already entered in QuickBooks, twice? ZZ test reason."
+        self.cur.execute("UPDATE invoices SET entered_in_qb = TRUE WHERE id = %s", (self.scan,))
+        self.cur.execute("UPDATE invoices SET duplicate_reason = %s WHERE id = %s", (reason, self.misread))
+        recs = {r["record_id"]: r for s in web_db.list_duplicate_candidates() for r in s["records"]
+                if r["record_type"] == "invoice"}
+        self.assertEqual((recs[self.scan]["entered_in_qb"], recs[self.misread]["entered_in_qb"]), (True, False))
+        self.assertEqual(recs[self.misread]["duplicate_reason"], reason)
+        import review_app
+        from starlette.testclient import TestClient
+        saved = review_app.current_user
+        review_app.current_user = lambda r: {"id": -424242, "username": "zz-test", "role": "reviewer",
+                                             "display_name": "zz", "active": True}
+        try:
+            html = TestClient(review_app.app).get("/duplicates").text
+        finally:
+            review_app.current_user = saved
+        self.assertIn("Already entered", html)
+        self.assertIn(reason, html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -182,9 +182,19 @@ USE_DRIVE = _drive_enabled(_ARGS, os.environ.get("UPLOAD_TO_DRIVE"), USE_DB)
 #   --retry-open-all   : re-run EVERY open item once (broad — after any improvement).
 RETRY_UNREADABLE = "--retry-unreadable" in _ARGS
 RETRY_OPEN_ALL = "--retry-open-all" in _ARGS
-# Reprocess ONE specific open review item by its displayed id (from the Review page), without
+# Reprocess specific open review items by their displayed ids (from the Review page), without
 # touching any other open item. Ids are kept across runs (save_review_queue keeps each row's id).
+# One id, or several separated by commas (--retry-id=3698,3699 — 2026-10-14: the four items a
+# capped learnings re-check didn't reach).
 RETRY_ID = next((a.split("=", 1)[1] for a in _ARGS if a.startswith("--retry-id=")), None)
+
+
+def _parse_retry_ids(value):
+    """'3698, #3699,3700' -> {'3698', '3699', '3700'}; None / '' -> empty set."""
+    return {p.strip().lstrip("#").strip() for p in (value or "").split(",") if p.strip().lstrip("#").strip()}
+
+
+RETRY_IDS = _parse_retry_ids(RETRY_ID)
 # One-off maintenance: remove redundant re-record rows (the churned-filename dup bug).
 DEDUPE_RECORDS = "--dedupe-records" in _ARGS
 # Sales orders / order acknowledgements / priced packing slips are HELD this many days before
@@ -383,19 +393,27 @@ CA_BUNDLE = Path(__file__).parent / "ca_bundle.pem"
 
 # SYSTEM_PROMPT_TEMPLATE holds everything EXCEPT the two curated lists, which are
 # now editable DB reference data (stores; the Exclude from QB flags on vendor_name_map). build_system_prompt()
-# splices them in at run time via the %%STORE_LINES%% / %%EXCLUDED_VENDORS%% /
+# splices them in at run time via the %%STORE_LINES%% / %%STORE_CHOICES%% / %%EXCLUDED_VENDORS%% /
 # %%CARD_STORE_MAP%% sentinels (plain .replace, not str.format — the prompt contains
 # literal { } from the JSON schema). Seed defaults live in database.py (DEFAULT_STORES /
 # DEFAULT_EXCLUDED_VENDORS / DEFAULT_CARD_STORE_MAP), which is also the Excel-mode fallback.
+# Nothing here names or counts the stores (2026-10-14): the text said "the six names" and kept a
+# separate "Lakewood Rx Inc … flag for review" line after Lakewood Rx became a store. Store facts live
+# in Setup › Stores, so a store added there reaches the AI with no code change.
 SYSTEM_PROMPT_TEMPLATE = """You are an invoice processing assistant for a multi-location pharmacy group. Your job is to analyze incoming emails and extract structured data.
 
-Pharmacy entities, with known aliases/DBAs and physical addresses (use these addresses to resolve store identity when the store name on an invoice doesn't match one of the six names below):
+Our stores (the pharmacies and our other companies), with known aliases/DBAs and physical addresses (use these addresses to resolve store identity when the store name on an invoice doesn't match one of the names below):
 
 %%STORE_LINES%%
 
-Other known related entity (NOT one of the six operating pharmacies — if this address appears, flag needs_human_review rather than assuming it maps to a specific store): Lakewood Rx Inc, formerly Rx Fleet Inc — 10 Prag Blvd #203, Monroe, NY 10950.
-
 An address match is a strong signal even when the name on the invoice doesn't match any entity name above — e.g. an invoice billed to "Lakewood Pharmacy" (not a real entity name) but shipped to 911 E County Line Rd, Lakewood NJ should be matched to Refuah Pharmacy by address, not left as unknown.
+
+A store clearly NAMED on the document (as the customer, bill-to, ship-to, or on the location line) decides, even when the shared back-office address (BMW's, above) is printed too — some stores still list that address. When an address is the ONLY clue, look at the bigger picture before deciding: does what was billed fit one store, and does the [HISTORY] line (when the message has one) show this sender's earlier bills going to one store? Choose that store only when the bigger picture makes it clear; otherwise set store_confidence to low and needs_human_review to true.
+
+Store rules from Setup › Store rules (a code check enforces them, so follow them exactly):
+%%STORE_RULES%%
+
+A file name that starts with one of our store names (e.g. "Maple - …" or "BMW - …") was given by this system from an earlier guess, when the item went to review. It is NOT evidence of the store: decide from the document itself.
 
 Vendors excluded from QuickBooks import (skip_qb_import: true): %%EXCLUDED_VENDORS%%
 
@@ -407,7 +425,7 @@ Some vendors send ONE combined invoice (single invoice number/document) that spl
 
 On ANY record (invoice, credit memo, or payment), if a card ending is shown or mentioned anywhere on the document or memo (e.g. "Visa ending 1234", "xxxx-1234", "card ****1234", "paid with card ending 1234"), ALWAYS capture its last 4 digits in that record's "card_last4" (digits only). Leave it null only when no card ending is shown.
 
-Card last-4 to store: the card usually identifies which pharmacy the document belongs to. For any invoice, credit memo, or payment whose card ends in one of these last-4 digits, set that record's store_matched to the mapped store with HIGH confidence and do NOT flag it for review merely because the store would otherwise be uncertain:
+Card last-4 to store: the card usually identifies which pharmacy the document belongs to. For any invoice, credit memo, or payment whose card ends in one of these last-4 digits, set that record's store_matched to the mapped store with HIGH confidence and do NOT flag it for review merely because the store would otherwise be uncertain. The exception is a real disagreement: when the document itself clearly names a DIFFERENT one of our stores (as the customer, bill-to or ship-to, or by that store's address), set store_matched to the store the document names, set needs_human_review to true, and say in review_reason which store the document names and which store the card belongs to, unless a learned rule below says which one wins for that vendor:
 %%CARD_STORE_MAP%%
 
 Shipment/delivery notifications and account statements are informational, not actionable — they don't have an invoice or payment being submitted. Set needs_human_review to false and route_to to "none" for these UNLESS something is actually wrong (e.g. a disputed amount) — don't flag them for review just because the store or amount isn't fully certain.
@@ -457,7 +475,7 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
   "route_to": "accounts_payable | BMW | owner | none",
   "routing_reason": "string",
   "vendor_matched": "normalized vendor name if this email is about a specific vendor, else null — ALWAYS fill this in when identifiable, even for statements/shipment notices/correspondence that have no invoices/payments below",
-  "store_matched": "Maple Pharmacy | Madison Pharmacy | Refuah Pharmacy | Westgate Pharmacy | 3M Pharmacy | BMW | Lakewood Rx | unknown, or null if not applicable — ALWAYS fill this in when identifiable, even for statements/shipment notices/correspondence",
+  "store_matched": "%%STORE_CHOICES%%, or null if not applicable — ALWAYS fill this in when identifiable, even for statements/shipment notices/correspondence",
   "reference_number": "order #, statement #, tracking #, or other identifying number mentioned, or null — used as a fallback identifier when there's no formal invoice/payment number. Do NOT use a persistent customer/account number (one that would appear identically on every document for this account); prefer a per-transaction identifier, else null.",
   "invoices": [
     {
@@ -466,7 +484,7 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
       "vendor_confidence": "high | medium | low",
       "skip_qb_import": true/false,
       "store_raw": "as it appears in the email",
-      "store_matched": "Maple Pharmacy | Madison Pharmacy | Refuah Pharmacy | Westgate Pharmacy | 3M Pharmacy | BMW | Lakewood Rx | unknown",
+      "store_matched": "%%STORE_CHOICES%%",
       "store_confidence": "high | medium | low",
       "invoice_number": "string or null",
       "invoice_date": "YYYY-MM-DD or null",
@@ -499,7 +517,7 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
       "vendor_confidence": "high | medium | low",
       "skip_qb_import": true/false,
       "store_raw": "as it appears in the email",
-      "store_matched": "Maple Pharmacy | Madison Pharmacy | Refuah Pharmacy | Westgate Pharmacy | 3M Pharmacy | BMW | Lakewood Rx | unknown",
+      "store_matched": "%%STORE_CHOICES%%",
       "store_confidence": "high | medium | low",
       "credit_memo_number": "string or null",
       "credit_memo_date": "YYYY-MM-DD or null",
@@ -704,18 +722,38 @@ def load_card_store_map():
     return {_norm_last4(c): s for c, s in database.DEFAULT_CARD_STORE_MAP}
 
 
-def apply_card_store_map(rec):
+def apply_card_store_map(rec, reviewer_answered=False):
     """Deterministic store override (safety net): if this record's card_last4 is on
     the card→store map, set its store_matched to the mapped store. One card = one
     store, so this is authoritative and overrides the model. Applies uniformly to
     invoice, credit_memo and payment records; mirrors the prompt's map instruction.
     Additive — a no-op when the record has no mapped card (CARD_STORE_MAP empty in
-    Excel mode until curated), so the CLI is unaffected until cards are mapped."""
+    Excel mode until curated), so the CLI is unaffected until cards are mapped.
+
+    The card and the document can disagree (2026-10-14, Joel: "we really need a review in such a
+    case"). When the AI put the record under a DIFFERENT one of our stores than the card's (it read
+    another store on the document: customer, bill-to, ship-to or a store's address), the record goes
+    to review naming both. Garden of Life bills shipped to Refuah but paid with 3M's card 8400 used to
+    be switched to 3M silently whenever the AI didn't flag them itself. On a reprocess with a
+    reviewer's answer the AI's store stands (the person saw the conflict) and nothing is flagged, so
+    it can't loop."""
     if rec.get("_reviewer_store"):
         return                      # a reviewer picked the store on Quick fix (apply_reviewer_fixes)
     last4 = _norm_last4(rec.get("card_last4"))
-    if last4 and last4 in CARD_STORE_MAP:
-        rec["store_matched"] = CARD_STORE_MAP[last4]
+    if not (last4 and last4 in CARD_STORE_MAP):
+        return
+    card_store = CARD_STORE_MAP[last4]
+    read = (rec.get("store_matched") or "").strip()
+    if _norm(read) in _STORE_KEY and _norm(read) != _norm(card_store):
+        if reviewer_answered:
+            _append_text(rec, "notes", f"[Store kept as {read}, after a reviewer's answer; card ending {last4} "
+                                       f"is mapped to {card_store}.]")
+            return
+        rec["needs_human_review"] = True
+        _append_text(rec, "review_reason", (
+            f"The document points to {read}, but card ending {last4} belongs to {card_store} (Setup › Cards). "
+            f"Pick the right store (Quick fix › Store) before this goes to QuickBooks."))
+    rec["store_matched"] = card_store
 
 
 def load_class_rules():
@@ -1131,23 +1169,26 @@ def apply_review_gates(classification):
     apply_vendor_standardization_gate()."""
     if not classification:
         return
+    answered = bool(classification.get("_reviewer_answered"))
     for inv in classification.get("invoices") or []:
         if inv.get("is_sales_order"):
             continue                              # held, not recorded/reviewed here
-        apply_card_store_map(inv)
+        apply_card_store_map(inv, answered)
         apply_store_review_gate(inv)
         apply_scoped_learning_gate(inv)
         apply_date_review_gate(inv, "invoice_date")
         apply_amount_review_gate(inv, "invoice_amount")
         apply_vendor_standardization_gate(inv)
+        apply_back_office_goods_gate(inv, answered)            # cost of goods filed to BMW / Lakewood Rx (2026-10-14)
         apply_unlisted_skip_gate(inv, "invoice", classification)   # before files are saved: a real bill gets one
     for cm in classification.get("credit_memos") or []:
-        apply_card_store_map(cm)
+        apply_card_store_map(cm, answered)
         apply_store_review_gate(cm)
         apply_scoped_learning_gate(cm)
         apply_date_review_gate(cm, "credit_memo_date")
         apply_amount_review_gate(cm, "credit_amount")
         apply_vendor_standardization_gate(cm)
+        apply_back_office_goods_gate(cm, answered)
         apply_unlisted_skip_gate(cm, "credit_memo", classification)
     # A vendor ticked "Ignore payment confirmations" (Setup): its payments are dropped here, before any
     # gate, so they're neither recorded nor sent to review (2026-10-13).
@@ -1159,7 +1200,7 @@ def apply_review_gates(classification):
         print(f"  ignored {len(pays) - len(kept)} payment confirmation(s) — vendor set to "
               f"\"Ignore payment confirmations\" in Setup")
     for pay in kept:
-        apply_card_store_map(pay)
+        apply_card_store_map(pay, answered)
         apply_store_review_gate(pay, is_payment=True)
         apply_date_review_gate(pay, "payment_date")
         apply_amount_review_gate(pay, "payment_amount")
@@ -1264,7 +1305,7 @@ def load_vendor_standardization():
 _STORE_KEY = {
     "maple pharmacy": "maple", "madison pharmacy": "madison",
     "refuah pharmacy": "refuah", "westgate pharmacy": "westgate",
-    "3m pharmacy": "3m", "bmw": "bmw", "lakewood rx": "lakewood_rx",
+    "3m pharmacy": "3m", "bmw": "bmw", "lakewood rx": "lakewood_rx", "carepax": "carepax",
 }
 
 
@@ -1372,6 +1413,53 @@ def apply_vendor_standardization(rec):
     a_names = VENDOR_STD["account_names"].get(account) or {}
     rec["qb_vendor"] = (v_names.get(store_key) if store_key else None) or standard
     rec["qb_account"] = (a_names.get(store_key) if store_key else None) or account
+
+
+# Cost-of-goods accounts in our QuickBooks chart: the "Purchase" accounts (Purchase:Vitamins, Purchase:OTC Purchase,
+# Purchase:Rx Generics, …) and Inventory.
+_GOODS_ACCOUNT_PREFIXES = ("purchase", "inventory")
+_BACK_OFFICE = None      # {normalized store name} ticked Back office in Setup › Stores; loaded once per run
+
+
+def _is_goods_account(account):
+    a = _norm(account)
+    return bool(a) and any(a == p or a.startswith(p + ":") for p in _GOODS_ACCOUNT_PREFIXES)
+
+
+def _back_office_stores():
+    global _BACK_OFFICE
+    if _BACK_OFFICE is None:
+        try:
+            _BACK_OFFICE = {_norm(s.get("store_name")) for s in load_stores() if s.get("back_office")}
+        except Exception as e:
+            print(f"(could not read the back-office stores: {e})")
+            _BACK_OFFICE = set()
+    return _BACK_OFFICE
+
+
+def apply_back_office_goods_gate(rec, reviewer_answered=False):
+    """Joel, 2026-10-14: "any kind of cost of goods sold that's billed to BMW should be flagged because BMW is a
+    back office and not selling any goods. Same with Lakewood RX." An invoice / credit memo whose store is ticked
+    Back office in Setup › Stores, and whose QuickBooks account is cost of goods (_is_goods_account; the vendor's
+    account from Setup, worked out here on a copy when the record doesn't carry it yet), goes to review. Not when a
+    person picked the store (Quick fix) or answered the item: the person decided, so it can't loop. Idempotent."""
+    if rec.get("_reviewer_store") or reviewer_answered:
+        return
+    if _norm(rec.get("store_matched")) not in _back_office_stores():
+        return
+    account = rec.get("standard_account")
+    if not account and VENDOR_STD:
+        probe = {"vendor_matched": rec.get("vendor_matched"), "vendor_name_raw": rec.get("vendor_name_raw"),
+                 "store_matched": rec.get("store_matched")}
+        apply_vendor_standardization(probe)
+        account = probe.get("standard_account")
+    if not _is_goods_account(account):
+        return
+    rec["needs_human_review"] = True
+    _append_text(rec, "review_reason", (
+        f"{rec.get('store_matched')} is a back office and sells no goods, but this bill's QuickBooks account is "
+        f"{account} (cost of goods). It's probably a pharmacy's bill: pick the right store (Quick fix › Store) before "
+        f"this goes to QuickBooks."))
 
 
 def apply_vendor_standardization_gate(rec):
@@ -1601,22 +1689,54 @@ def _store_prompt_line(s):
         if not line.rstrip().endswith((".", "!", "?")):
             line += "."
         line += f" {notes}"
+    if s.get("back_office"):            # Setup › Stores "Back office (sells no goods)" (2026-10-14)
+        if not line.rstrip().endswith((".", "!", "?")):
+            line += "."
+        line += (" Back office: it sells no goods, so a bill for merchandise (vitamins, OTC, Rx and the like) "
+                 "isn't this company's; find the pharmacy it's for.")
     return line
 
 
-def build_system_prompt(stores=None, excluded_vendors=None, card_store_map=None):
+def _store_rule_prompt_line(rule, covered=()):
+    """One Setup › Store rules row as an instruction for the AI (2026-10-14: the rules were a code check the AI
+    never saw, so it put e.g. Carepax bills under BMW for vendors the rule didn't cover, and they went to review).
+    `covered`: references that also have an "every vendor except" rule, which already says what the reference
+    means for everyone else (Carepax = BMW, except Schwartz → Carepax and Abbott/Medline → Maple)."""
+    ref, store = (rule.get("reference") or "").strip(), (rule.get("store_matched") or "").strip()
+    vendors = ", ".join(v.strip() for v in (rule.get("vendors") or []) if (v or "").strip())
+    if not ref or not store:
+        return ""
+    if _norm(rule.get("applies_to")) == _STORE_RULE_EXCEPT:
+        return (f'- "{ref}" on a bill means {store}, for every vendor'
+                + (f" except: {vendors}." if vendors else "."))
+    line = f'- "{ref}" on a bill from {vendors or "(no vendor)"} means {store}.'
+    if _norm(ref) not in covered:
+        line += f' On a bill from any other vendor, "{ref}" alone does not decide the store.'
+    return line
+
+
+def build_system_prompt(stores=None, excluded_vendors=None, card_store_map=None, store_rules=None):
     """Splice the current stores + excluded-vendor list + card→store map into the
     prompt template."""
     stores = stores if stores is not None else load_stores()
     excluded_vendors = excluded_vendors if excluded_vendors is not None else load_excluded_vendors()
     card_store_map = card_store_map if card_store_map is not None else load_card_store_map()
+    if store_rules is None:
+        store_rules = STORE_SCOPE_RULES if STORE_SCOPE_RULES is not None else load_store_scope_rules()
+    covered = {_norm(r.get("reference")) for r in store_rules if _norm(r.get("applies_to")) == _STORE_RULE_EXCEPT}
+    rule_lines = "\n".join(l for l in (_store_rule_prompt_line(r, covered) for r in store_rules) if l) or "(none)"
     store_lines = "\n".join(_store_prompt_line(s) for s in stores) or "(none configured)"
+    # The store_matched choices follow Setup › Stores too (2026-10-14): they were a fixed list.
+    store_choices = " | ".join([n for n in ((st.get("store_name") or "").strip() for st in stores) if n]
+                               + ["unknown"])
     vendor_list = ", ".join(v for v in excluded_vendors if v) or "(none configured)"
     card_lines = "\n".join(f"- {last4} -> {store}"
                            for last4, store in sorted(card_store_map.items())
                            if last4 and store) or "(none configured)"
     return (SYSTEM_PROMPT_TEMPLATE
             .replace("%%STORE_LINES%%", store_lines)
+            .replace("%%STORE_CHOICES%%", store_choices)
+            .replace("%%STORE_RULES%%", rule_lines)
             .replace("%%EXCLUDED_VENDORS%%", vendor_list)
             .replace("%%CARD_STORE_MAP%%", card_lines))
 
@@ -1682,6 +1802,50 @@ def _contact_store_hint(text):
         f"different store if the invoice document ITSELF clearly and "
         f"explicitly states a different pharmacy.]"
     )
+
+
+_SENDER_HISTORY = {}     # sender -> {store: count}, read once per run (one run = one process)
+
+
+def _own_email_domains():
+    """Our own mail domains: scanners and staff send for every store, so their history says nothing
+    about one bill's store."""
+    own = {"maplerx.com", "lakewoodrx.com", "carepax.com"}
+    for addr in list(SENDER_STORE_MAP) + list(CONTACT_STORE_MAP):
+        if "@" in addr:
+            own.add(addr.rsplit("@", 1)[1].lower())
+    return own
+
+
+def _sender_history_hint(text):
+    """A tie-breaker for the store (2026-10-14, Joel: when an address is the only clue, look at the
+    bigger picture, "like if the service billed makes sense or if there is history matching"): the
+    stores of the bills and payments recorded so far from this email's sender. Only for an outside
+    sender with at least 2 earlier records; never for our own mailboxes (scanners carry their own store
+    signal, and staff forward bills for every store). Empty string otherwise, in Excel mode, or if the
+    read fails."""
+    if not USE_DB:
+        return ""
+    sender = _extract_sender(text)
+    if not sender or "@" not in sender or sender in SENDER_STORE_MAP or sender in CONTACT_STORE_MAP:
+        return ""
+    if sender.rsplit("@", 1)[1] in _own_email_domains():
+        return ""
+    if sender not in _SENDER_HISTORY:
+        try:
+            _SENDER_HISTORY[sender] = _database().store_history_for_sender(sender)
+        except Exception as e:
+            print(f"  (could not read the store history for {sender}: {e})")
+            _SENDER_HISTORY[sender] = {}
+    hist = _SENDER_HISTORY[sender]
+    total = sum(hist.values())
+    # Only when one store clearly dominates: a wholesaler that bills every store says nothing.
+    if total < 2 or max(hist.values()) < 0.8 * total:
+        return ""
+    counts = ", ".join(f"{s} {n}" for s, n in sorted(hist.items(), key=lambda x: (-x[1], x[0])))
+    return (f"\n\n[HISTORY — bills and payments recorded so far from {sender}, by store: {counts}. A tie-breaker "
+            f"only: use it when the document itself doesn't make the store clear (for example only the shared "
+            f"back-office address appears). Never use it over a store the document names.]")
 
 
 def load_emails():
@@ -2864,6 +3028,8 @@ def classify_email(client, filename, text, attachments, learnings_text="", revie
     text += _sender_store_hint(text)
     # And when a To/Cc recipient identifies the store (third-party biller emailing us).
     text += _contact_store_hint(text)
+    # The stores this sender's earlier bills went to: a tie-breaker when only an address hints (2026-10-14).
+    text += _sender_history_hint(text)
 
     if skipped:
         text += (
@@ -3284,9 +3450,15 @@ def load_learnings():
     return _rows_to_learnings_text(rows)
 
 
-def save_learnings(rows):
+def save_learnings(rows, added=None):
+    """Store the run's learnings. In the database only `added` (the rules this run added) is inserted,
+    so a learning added, edited or deleted in Setup while the run was going isn't undone at its end
+    (database.add_learnings, 2026-10-14). Without `added`, the whole list replaces the table, as before."""
     if USE_DB:
-        _database().save_learnings(rows)
+        if added is not None:
+            _database().add_learnings(added)
+        else:
+            _database().save_learnings(rows)
     if WRITE_EXCEL:
         _write_xlsx(LEARNINGS_PATH, LEARNINGS_FIELDNAMES, rows, "Learnings")
 
@@ -3395,6 +3567,13 @@ def _stable_review_key(source_email, vendor_matched, number):
     return f"{source_email}::{v}::{n}" if (v or n) else source_email
 
 
+def _excluded_vendor_keys():
+    """Every excluded spelling (load_excluded_vendors), normalized the way Setup › Vendor names
+    spellings are compared (_norm_vendor_std_key: case, punctuation, '&'/'and' and legal suffixes
+    like Inc / LLC don't matter)."""
+    return {k for k in (_norm_vendor_std_key(e) for e in load_excluded_vendors()) if k}
+
+
 def is_excluded_vendor(vendor_matched):
     """True if this vendor is on the QuickBooks exclusion list (skip_qb_import).
     The list is every spelling of each Setup › Vendor names row ticked Exclude from QB
@@ -3402,17 +3581,16 @@ def is_excluded_vendor(vendor_matched):
     spliced into the model-facing prompt,
     so there's one source of truth. Read fresh each call so a live UI edit in the
     long-running web app takes effect immediately (this is only called by the UI's
-    skip_qb re-evaluation, not in the CLI's hot loop). Matches by normalized
-    substring either direction so 'Anda New'/'Anda' and 'BluPax Pharma'/'BluPax'
-    both resolve."""
-    name = _norm(vendor_matched)
-    if not name:
-        return False
-    for excluded in load_excluded_vendors():
-        ex = _norm(excluded)
-        if ex and (ex in name or name in ex):
-            return True
-    return False
+    skip_qb re-evaluation, not in the CLI's hot loop).
+
+    Matches a WHOLE name: the vendor must be one of the excluded spellings (_excluded_vendor_keys).
+    Until 2026-10-14 any name that merely CONTAINED an excluded spelling, or was contained in one,
+    matched: 'Anda' is inside 'Standard Process', so three Standard Process bills were kept out of
+    QuickBooks without review (Joel: whole names only). A new spelling of an excluded vendor isn't
+    excluded until it's added to that vendor's row in Setup; until then a bill the AI skipped for it
+    goes to review (apply_unlisted_skip_gate), never silently into QuickBooks."""
+    key = _norm_vendor_std_key(vendor_matched)
+    return bool(key) and key in _excluded_vendor_keys()
 
 
 def _amounts_equal(a, b):
@@ -4036,7 +4214,8 @@ def _match_released_orders(db, released, invoices, order_record_ids):
         onum = o.get("number") or "(no #)"
         if len(cands) > 1:
             nums = ", ".join(f"#{i['invoice_number'] or '?'}" for i in cands)
-            reason = (f"Sales order #{onum} (${float(o.get('amount') or 0):,.2f}) matches several invoices ({nums}); "
+            reason = (("Already entered in QuickBooks: " if rec["entered_in_qb"] else "")
+                      + f"Sales order #{onum} (${float(o.get('amount') or 0):,.2f}) matches several invoices ({nums}); "
                       f"keep the one that is its invoice.")
             changes = [(i["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
                                   "duplicate_reason": reason}) for i in cands]
@@ -4049,8 +4228,10 @@ def _match_released_orders(db, released, invoices, order_record_ids):
         inum = inv["invoice_number"] or "(no #)"
         same_amount = _amounts_equal(rec["amount"], inv["amount"])
         if rec["entered_in_qb"] and inv["entered_in_qb"]:
-            reason = (f"Sales order #{onum} and its invoice #{inum} are BOTH marked entered in QuickBooks — check "
-                      f"QuickBooks for a double entry, then keep one.")
+            # Spelled out that the problem is a record ALREADY in QuickBooks (Joel, 2026-10-14).
+            reason = (f"Already entered in QuickBooks, twice? Sales order #{onum} and its invoice #{inum} are both "
+                      f"marked entered in QuickBooks, so the bill may be in QuickBooks twice. Delete the extra one "
+                      f"in QuickBooks, then keep one of the two here.")
             changes = [(inv["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
                                     "duplicate_reason": reason}),
                        (rec["id"], {"duplicate_suspect": True, "duplicate_group_id": gid, "duplicate_reason": reason})]
@@ -4078,8 +4259,10 @@ def _match_released_orders(db, released, invoices, order_record_ids):
                                     "duplicate_reason": f"Invoice for sales order #{onum}, already entered in QuickBooks "
                                                         f"with the same amount: kept out."})]
         else:
-            reason = (f"Sales order #{onum} was entered in QuickBooks for ${float(rec['amount'] or 0):,.2f}; its invoice "
-                      f"#{inum} says ${float(inv['amount'] or 0):,.2f}. Check the QuickBooks entry, then keep one.")
+            reason = (f"Already entered in QuickBooks, amount changed: sales order #{onum} is in QuickBooks for "
+                      f"${float(rec['amount'] or 0):,.2f}, but its invoice #{inum}, which came later, says "
+                      f"${float(inv['amount'] or 0):,.2f}. Fix the bill in QuickBooks if the invoice is right, then "
+                      f"keep one of the two here and make sure it's marked entered, so the bill isn't entered again.")
             changes = [(inv["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
                                     "duplicate_reason": reason}),
                        (rec["id"], {"duplicate_group_id": gid})]
@@ -4385,7 +4568,22 @@ def apply_duplicate_checks(results, history, payment_history=None):
                 prior_live = USE_DB and _database().find_live_invoice(
                     dup_of, (prior or {}).get("vendor_matched") or inv.get("vendor_matched"),
                     (prior or {}).get("invoice_number") or inv.get("invoice_number"))
-                if prior_live and prior_live.get("duplicate_ignored"):
+                if (prior_live and not prior_live.get("duplicate_ignored")
+                        and _norm(prior_live.get("store_matched")) == _norm(inv.get("store_matched"))):
+                    # Not a conflict after all: the ledger still had the earlier copy's OLD store, but its record has
+                    # since been moved to this copy's store (Abbott #622312457: BMW -> Maple by Joel on 9/23; a copy
+                    # read on 10/14 was flagged against "BMW"). So this is a plain duplicate of that record.
+                    inv["is_duplicate_suspect"] = True
+                    inv["duplicate_ignored"] = True
+                    inv["duplicate_of"] = dup_of
+                    inv["duplicate_group_id"] = gid
+                    inv["duplicate_reason"] = (
+                        f"Invoice #{inv.get('invoice_number')} from {inv.get('vendor_matched')} for "
+                        f"{_fmt_amount(inv.get('invoice_amount')) or 'the same amount'} was already recorded from "
+                        f"{dup_of} (since moved to {inv.get('store_matched')}) — this is a duplicate copy, "
+                        f"auto-ignored [first-arrived].")
+                    append_to_history = False
+                elif prior_live and prior_live.get("duplicate_ignored"):
                     _flag_ignored_prior(inv, dup_of, gid)   # someone already kept another copy
                     append_to_history = False
                 elif prior_live and not prior_live.get("entered_in_qb") and not c.get("_reviewer_answered"):
@@ -4467,6 +4665,52 @@ def apply_duplicate_checks(results, history, payment_history=None):
                     inv["duplicate_of"] = dup_of
                     inv["duplicate_group_id"] = gid
                     append_to_history = False
+            elif (status == "possible" and c.get("_reviewer_answered") and USE_DB
+                  and _database().find_live_invoice(
+                      dup_of, (prior or {}).get("vendor_matched") or inv.get("vendor_matched"),
+                      (prior or {}).get("invoice_number") or inv.get("invoice_number"))):
+                # (Only when the earlier version is a SAVED record. One answered in this same run isn't saved
+                # yet, so nothing could be set aside and both stayed live: Schwartz #236738, 10/14 13:35, two
+                # versions answered together, $450 under Maple and $1,800 under Carepax. Those fall through
+                # to the possible-duplicate flag below, so a person keeps one.)
+                # A person answered this copy's review item: the AI flags a REVISED / UPDATED invoice
+                # for review, and once answered the duplicate check used to flag the same copy AGAIN
+                # as a "likely revised" possible duplicate (Joel, 2026-10-14: once a person has
+                # answered, don't flag it again). The answered copy is kept and the earlier version
+                # set aside as replaced, unless that version is already entered in QuickBooks: then
+                # QuickBooks has to be fixed, so it's flagged, saying so.
+                gid = _group_id_for(prior, "invoice")
+                prior_live = _database().find_live_invoice(   # by the prior's own spelling, as above
+                    dup_of, (prior or {}).get("vendor_matched") or inv.get("vendor_matched"),
+                    (prior or {}).get("invoice_number") or inv.get("invoice_number"))
+                num, vendor = inv.get("invoice_number"), inv.get("vendor_matched")
+                was_txt = _fmt_amount((prior or {}).get("invoice_amount")) or "another amount"
+                now_txt = _fmt_amount(inv.get("invoice_amount")) or "another amount"
+                inv["duplicate_ignored"] = False
+                inv["duplicate_group_id"] = gid
+                if prior_live and prior_live.get("entered_in_qb") and not prior_live.get("duplicate_ignored"):
+                    inv["is_duplicate_suspect"] = True
+                    inv["duplicate_of"] = dup_of
+                    inv["duplicate_reason"] = (
+                        f"Already entered in QuickBooks, amount changed: invoice #{num} from {vendor} is in "
+                        f"QuickBooks for {was_txt}, but this copy, answered in review, says {now_txt}. Fix the "
+                        f"bill in QuickBooks if this copy is right, then keep one of the two here and make sure "
+                        f"it's marked entered, so the bill isn't entered again.")
+                    append_to_history = False
+                    print(f"  {vendor} #{num}: answered in review, but the earlier version is already in "
+                          f"QuickBooks for {was_txt} -> flagged.")
+                else:
+                    if prior_live and not prior_live.get("duplicate_ignored"):
+                        _database().supersede_duplicate_invoice(
+                            prior_live["id"], r["filename"],
+                            f"Replaced by the version of invoice #{num} answered in review ({now_txt}, from "
+                            f"{r['filename']}); this earlier version said {was_txt}.", gid)
+                        print(f"  {vendor} #{num}: answered in review -> kept it, set aside the earlier "
+                              f"version ({was_txt}, id={prior_live['id']}).")
+                    inv["is_duplicate_suspect"] = False
+                    inv["duplicate_reason"] = None
+                    inv["duplicate_of"] = None
+                    append_to_history = True   # so a later copy dedupes against this one
             else:
                 inv["is_duplicate_suspect"] = status in ("duplicate", "possible")
                 inv["duplicate_reason"] = reason
@@ -4702,6 +4946,89 @@ def resolve_payment_duplicates(actor, dry_run=False):
     return {"resolved": resolved}
 
 
+def resolve_split_payments(actor, dry_run=False):
+    """Post-save sweep (2026-10-14, Joel: "keep 227 and make it automatic"). One payment can reach us in two
+    shapes: as ONE total (the vendor's notice: Anda ACH HJEO7TVORL, $23,754.47, 9/23, record 227) and SPLIT by
+    invoice (the same notice forwarded with its invoice list on 10/14: 18 payments, one per applied invoice,
+    adding up to the total). The duplicate check only sees the same reference with different amounts, so it
+    flagged every line against the total and a person faced an 18-copy set.
+    A group = same standard vendor + reference number + store. When it has exactly one live payment with no
+    applied invoice (the total) and 2+ live payments that each name an applied invoice and add up to the total
+    to the cent: the total is kept (its suspect flag cleared) with the invoice list added to its notes, and the
+    lines are set aside as ignored duplicates of it, sharing a group id. Only when none is entered in
+    QuickBooks or skip-QB (those go to a person). Each change is logged. Idempotent. Returns {"resolved": [...]};
+    dry_run writes nothing."""
+    if not USE_DB:
+        return {"resolved": []}
+    import secrets as _secrets
+    import psycopg2.extras as _extras
+    db = _database()
+    conn = db.connect()
+    conn.autocommit = False
+    resolved = []
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, vendor_matched, store_matched, reference_number, invoice_number, amount, email_filename, "
+                "       notes, duplicate_suspect, duplicate_group_id, entered_in_qb, skip_qb_import "
+                "  FROM payments WHERE duplicate_ignored IS NOT TRUE AND amount IS NOT NULL "
+                "   AND coalesce(btrim(reference_number), '') <> ''")
+            groups = {}
+            for r in cur.fetchall():
+                ref = re.sub(r"[^a-z0-9]", "", (r["reference_number"] or "").lower())
+                if ref:
+                    key = (_dedupe_vendor_key(r["vendor_matched"] or ""), ref, _norm(r["store_matched"]))
+                    groups.setdefault(key, []).append(r)
+            for key, members in groups.items():
+                totals = [m for m in members if not (m["invoice_number"] or "").strip()]
+                lines = sorted((m for m in members if (m["invoice_number"] or "").strip()),
+                               key=lambda m: (m["invoice_number"] or "").strip())
+                if len(lines) < 2:
+                    continue
+                cents = round(sum(float(m["amount"]) for m in lines) * 100)
+                matching = [t for t in totals if round(float(t["amount"]) * 100) == cents]
+                if len(matching) != 1:
+                    continue                          # no total, or two equal totals (the payment-duplicate sweep's job)
+                total = matching[0]
+                if any(m["entered_in_qb"] or m["skip_qb_import"] for m in [total] + lines):
+                    continue                          # anything touching QB entry is left to a person
+                gid = (total.get("duplicate_group_id")
+                       or next((m["duplicate_group_id"] for m in lines if m.get("duplicate_group_id")), None)
+                       or _secrets.token_hex(4).upper())
+                listing = "; ".join(f"{(m['invoice_number'] or '').strip()} {_fmt_amount(m['amount'])}" for m in lines)
+                note = (f"[Applied to {len(lines)} invoices (from the copy split by invoice, {lines[0]['email_filename']}, "
+                        f"set aside): {listing}.]")
+                reason = (f"Part of payment {total['reference_number']} ({_fmt_amount(total['amount'])}, "
+                          f"{total['email_filename']}), the same payment split by invoice. The total is the one to "
+                          f"enter; its notes list every invoice. Resolved by the split-payment sweep.")
+                resolved.append({"keep_id": total["id"], "ignored_ids": [m["id"] for m in lines],
+                                 "vendor": total.get("vendor_matched"), "amount": float(total["amount"]),
+                                 "reference": total.get("reference_number")})
+                if dry_run:
+                    continue
+                notes = total["notes"] or ""
+                if note not in notes:
+                    new_notes = (notes + " " + note).strip()
+                    cur.execute("UPDATE payments SET notes=%s WHERE id=%s", (new_notes, total["id"]))
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES ('payments',%s,'notes',%s,%s,%s)", (total["id"], notes or None, new_notes, actor))
+                cur.execute("UPDATE payments SET duplicate_suspect=FALSE, duplicate_reason=NULL, duplicate_of=NULL, "
+                            "duplicate_group_id=%s, edited_at=now() WHERE id=%s", (gid, total["id"]))
+                if total["duplicate_suspect"]:
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES ('payments',%s,'duplicate_suspect','true','false',%s)", (total["id"], actor))
+                for m in lines:
+                    cur.execute("UPDATE payments SET duplicate_suspect=TRUE, duplicate_ignored=TRUE, duplicate_reason=%s, "
+                                "duplicate_of=%s, duplicate_group_id=%s, edited_at=now() WHERE id=%s",
+                                (reason, total["email_filename"], gid, m["id"]))
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES ('payments',%s,'duplicate_ignored','false','true',%s)", (m["id"], actor))
+        conn.commit() if not dry_run else conn.rollback()
+    finally:
+        conn.close()
+    return {"resolved": resolved}
+
+
 def flag_number_misread_duplicates(actor, dry_run=False):
     """Catch duplicates the number-based dedup MISSES: same normalized vendor + amount + invoice_date
     + store but DIFFERENT invoice numbers (a misread digit — e.g. Emerson E29402997 vs E29402597 for
@@ -4893,6 +5220,9 @@ def enrich_flagged_with_duplicate_info(results, history):
                 notice = (f"Multiple versions of invoice #{inv.get('invoice_number')} from "
                           f"{inv.get('vendor_matched')} exist — see the Group link on this row "
                           f"for all of them before answering. ")
+                if status == "possible":   # apply_duplicate_checks' answered-revision branch (2026-10-14)
+                    notice += ("Answering keeps this version and sets the earlier one aside, unless that one "
+                               "is already entered in QuickBooks. ")
                 inv["review_reason"] = notice + (inv.get("review_reason") or "")
 
 
@@ -5175,7 +5505,7 @@ def build_result_rows(results):
             # a corrected store also reaches any review row / split-file name.
             if inv.get("is_sales_order"):
                 continue                      # HELD in pending_sales_orders, not recorded here
-            apply_card_store_map(inv)
+            apply_card_store_map(inv, bool(c.get("_reviewer_answered")))
             apply_store_review_gate(inv)   # unresolved store -> force review, never silent to QB
             apply_scoped_learning_gate(inv)   # Carepax→BMW leak onto a non-Sageteq vendor -> force review
             apply_date_review_gate(inv, "invoice_date")   # no date -> force review, never silent to QB
@@ -5184,6 +5514,7 @@ def build_result_rows(results):
             apply_vendor_exclusion(inv)   # deterministic: excluded vendor -> skip_qb_import True
             apply_unlisted_skip_gate(inv, "invoice", c)   # ...and a skip for an unlisted vendor -> review
             apply_vendor_standardization(inv)   # canonical vendor/account + store-specific QB names
+            apply_back_office_goods_gate(inv, bool(c.get("_reviewer_answered")))
             if routes_to_review("invoice", inv):
                 review_dropped.append((r, "invoice", inv))
                 continue
@@ -5228,7 +5559,7 @@ def build_result_rows(results):
             rows.append(row)
 
         for cm in credit_memos:
-            apply_card_store_map(cm)
+            apply_card_store_map(cm, bool(c.get("_reviewer_answered")))
             apply_store_review_gate(cm)   # unresolved store -> force review, never silent to QB
             apply_scoped_learning_gate(cm)   # Carepax→BMW leak onto a non-Sageteq vendor -> force review
             apply_date_review_gate(cm, "credit_memo_date")   # no date -> force review, never silent to QB
@@ -5237,6 +5568,7 @@ def build_result_rows(results):
             apply_vendor_exclusion(cm)   # deterministic: excluded vendor -> skip_qb_import True
             apply_unlisted_skip_gate(cm, "credit_memo", c)
             apply_vendor_standardization(cm)   # canonical vendor/account + store-specific QB names
+            apply_back_office_goods_gate(cm, bool(c.get("_reviewer_answered")))
             if routes_to_review("credit_memo", cm):
                 review_dropped.append((r, "credit_memo", cm))
                 continue
@@ -5273,7 +5605,7 @@ def build_result_rows(results):
 
         for pay in payments:
             # Card last-4 -> store (safety net), same helper as invoices/credit memos.
-            apply_card_store_map(pay)
+            apply_card_store_map(pay, bool(c.get("_reviewer_answered")))
             apply_store_review_gate(pay, is_payment=True)   # payments always gated (all vendors enter QB)
             apply_date_review_gate(pay, "payment_date")   # no date -> force review, never silent to QB
             apply_amount_review_gate(pay, "payment_amount")   # no/derived total -> force review
@@ -5822,6 +6154,8 @@ def main():
     RECEIVED_AT = load_received_dates()
 
     learnings_rows, _ = load_learnings()
+    # What the run started with: only rules it adds are saved at the end (save_learnings, 2026-10-14).
+    learnings_at_start = {(r.get("Learned Rule") or "").strip() for r in learnings_rows}
     existing_rows, processed_filenames = load_existing_results()
 
     to_results = []          # results destined for results.xlsx (+ history)
@@ -5876,10 +6210,11 @@ def main():
         retry_items = list(queue_carryover)
     elif RETRY_UNREADABLE:
         retry_items = [r for r in queue_carryover if _is_unreadable_review_item(r)]
-    elif RETRY_ID:
-        retry_items = [r for r in queue_carryover if str(r.get("Id")) == str(RETRY_ID)]
-        if not retry_items:
-            print(f"--retry-id={RETRY_ID}: no OPEN review item with that id was found "
+    elif RETRY_IDS:
+        retry_items = [r for r in queue_carryover if str(r.get("Id")) in RETRY_IDS]
+        missing = sorted(RETRY_IDS - {str(r.get("Id")) for r in retry_items})
+        if missing:
+            print(f"--retry-id: no OPEN review item #{', #'.join(missing)} was found "
                   f"— it may already be resolved or ignored (check the Review page).")
     if retry_items:
         _tids = {id(r) for r in retry_items}
@@ -6210,6 +6545,11 @@ def main():
             for r in pd["resolved"]:
                 print(f"    {r['vendor']} ${r['amount']} @ {r['store']}: kept id {r['keep_id']}, "
                       f"ignored {r['ignored_ids']}")
+        # One payment recorded both as a total and split by invoice: keep the total (2026-10-14).
+        ss = resolve_split_payments("auto-resolved (split-payment sweep)")
+        for r in ss["resolved"]:
+            print(f"  SPLIT-PAYMENT: {r['vendor']} {r['reference']} ${r['amount']:,.2f}: kept the total (id "
+                  f"{r['keep_id']}), set aside {len(r['ignored_ids'])} invoice line(s)")
         sp = resolve_store_preferred_duplicates("auto-resolved (store-preferred backstop)")
         if sp["resolved"]:
             print(f"  STORE-PREFERRED: auto-resolved {len(sp['resolved'])} exact-duplicate set(s) "
@@ -6355,7 +6695,8 @@ def main():
             print(f"Stamped emails status for {n} handled email(s) with no recorded row "
                   f"(review-routed, unreadable, or informational).")
 
-    save_learnings(learnings_rows)
+    save_learnings(learnings_rows, added=[r for r in learnings_rows
+                                          if (r.get("Learned Rule") or "").strip() not in learnings_at_start])
 
     # ---- Reconcile HELD sales orders: supersede (an invoice arrived) or release (hold
     # elapsed → record now, queue if it needs review). Runs AFTER this run's records are

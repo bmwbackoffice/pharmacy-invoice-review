@@ -34,6 +34,7 @@
 
 {% macro outcome(r) -%}
   {%- if r.record_type == 'review' -%}In review
+  {%- elif r.record_type == 'sales_order' -%}{{ r.notes or 'Held sales order' }}
   {%- elif r.entered_in_qb -%}Entered in QB
   {%- elif r.duplicate_ignored -%}Duplicate — kept out of QB
   {%- elif r.skip_qb_import and r.ignored_by -%}Kept out of QB by {{ r.ignored_by }} — recorded, not entered in QB

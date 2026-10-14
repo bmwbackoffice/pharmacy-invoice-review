@@ -14,12 +14,17 @@
   .duptable td.rowlabel, .duptable th.rowlabel { background:#fafbfc; color:var(--muted); font-weight:600; }
   .duptable td.amt { text-align:left; font-variant-numeric:tabular-nums; font-weight:700; }
   .duptable td.amtdiff { color:var(--bad); }   /* the outlier amount(s) in a disagreeing set */
+  /* A store / date no other copy shares (same rule as the amounts), and the characters that differ in
+     a bill number (diff_against, as on QB match review) — web_db._mark_set_differences. */
+  .duptable td.celldiff { color:var(--bad); font-weight:600; }
+  .duptable .diffchar { color:#dc2626; font-weight:700; background:#fee2e2; border-radius:2px; padding:0 1px; }
 </style>
 <h2>Possible Duplicates
   <span class="muted">({{ dup_groups|length }} set{{ '' if dup_groups|length == 1 else 's' }} to review)</span>
 </h2>
 <p class="muted">Each table is one document's copies side by side — the likely <strong>original</strong> plus
-every copy still flagged as a possible duplicate. Per copy: <strong>mark it a duplicate</strong> (kept out of QB,
+every copy still flagged as a possible duplicate; <span style="color:var(--bad); font-weight:600;">red</span> marks
+where the copies differ (in a bill number, just the characters that differ). Per copy: <strong>mark it a duplicate</strong> (kept out of QB,
 keeps the others) or <strong>dismiss the flag</strong> if it isn't actually a duplicate. Resolved sets drop
 off this page. Excluded-vendor <em>invoices</em> are left out (they never enter QB anyway); payments are
 always shown.</p>
@@ -83,23 +88,24 @@ always shown.</p>
       <table class="duptable">
         <thead>
           <tr>
-            <th class="rowlabel"></th>
+            {# The set's one record type, top left (2026-10-14, Joel): a set is only ever invoices or only payments. #}
+            <th class="rowlabel" style="color:var(--ink); font-size:13.5px; vertical-align:bottom;">{{ 'Payments' if g.record_type == 'payment' else 'Invoices' }}</th>
             {% for r in g.records %}
             <th style="background:{{ '#eef2f7' if r.duplicate_ignored else ('#eef4fb' if r.duplicate_suspect else '#f0f9f4') }};{{ 'color:var(--muted);' if r.duplicate_ignored }}">
               {{ 'Duplicate (kept out)' if r.duplicate_ignored else ('Possible duplicate' if r.duplicate_suspect else 'Likely Correct') }}
-              <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;">{{ r.record_type.replace('_', ' ') | title }} #{{ r.record_id }}</div>
+              <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;" title="The app's record number (not the bill's number)">Record {{ r.record_id }}</div>
             </th>
             {% endfor %}
           </tr>
         </thead>
         <tbody>
           <tr><td class="rowlabel">Store</td>
-            {% for r in g.records %}<td>{{ (r.store_matched | store_label) or '—' }}</td>{% endfor %}</tr>
+            {% for r in g.records %}<td class="{{ 'celldiff' if r.store_diff }}">{{ (r.store_matched | store_label) or '—' }}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">Vendor</td>
             {% for r in g.records %}<td>{{ r.vendor_matched or '—' }}
               {%- set sv = r.vendor_matched | std_vendor %}{% if sv %}<div class="muted" style="font-size:12px;" title="Standard name in Setup › Vendor names — this is why the copies are in one set">= {{ sv }}</div>{% endif %}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">{{ 'Reference #' if g.record_type == 'payment' else 'Invoice #' }}</td>
-            {% for r in g.records %}<td>{{ r.number or '—' }}</td>{% endfor %}</tr>
+            {% for r in g.records %}<td>{% if r.number_vs is not none and r.number %}{{ r.number | diff_against(r.number_vs) }}{% else %}{{ r.number or '—' }}{% endif %}</td>{% endfor %}</tr>
           {% if g.record_type == 'payment' and g.records | selectattr('applied_invoice') | list %}
           <tr><td class="rowlabel" title="The invoice the remittance says this payment settles. One reference can pay several invoices, so different invoice numbers here mean different payments.">Applied to invoice</td>
             {% for r in g.records %}<td>{{ r.applied_invoice or '—' }}</td>{% endfor %}</tr>
@@ -109,11 +115,20 @@ always shown.</p>
             {% set k = ('%.2f'|format(r.amount)) if r.amount is not none else '∅' %}
             <td class="amt{{ ' amtdiff' if (amt_multi and ns.keys.count(k) == 1) }}">{{ money(r.amount) }}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">Date</td>
-            {% for r in g.records %}<td>{{ (r.record_date | us_date) or '—' }}</td>{% endfor %}</tr>
+            {% for r in g.records %}<td class="{{ 'celldiff' if r.date_diff }}">{{ (r.record_date | us_date) or '—' }}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">Received</td>
             {% for r in g.records %}<td>{{ (r.received_at | us_datetime) or '—' }}</td>{% endfor %}</tr>
           <tr><td class="rowlabel">Sender Email</td>
             {% for r in g.records %}<td>{{ r.sender or '—' }}</td>{% endfor %}</tr>
+          <tr><td class="rowlabel" title="Marked entered in QuickBooks (on the QB Entry or Payments page)">In QuickBooks</td>
+            {% for r in g.records %}<td>{% if r.entered_in_qb %}<strong style="color:#137547;">&#10003; Already entered</strong>{% else %}<span class="muted">Not entered</span>{% endif %}</td>{% endfor %}</tr>
+          {# The duplicate check's own words, on the flagged / kept-out copies (a cleared flag can leave old text). #}
+          {% set why = namespace(any=false) %}
+          {% for r in g.records %}{% if r.duplicate_reason and (r.duplicate_suspect or r.duplicate_ignored) %}{% set why.any = true %}{% endif %}{% endfor %}
+          {% if why.any %}
+          <tr><td class="rowlabel">Why flagged</td>
+            {% for r in g.records %}<td style="white-space:normal; min-width:180px; max-width:320px; font-size:12px;">{{ r.duplicate_reason if (r.duplicate_reason and (r.duplicate_suspect or r.duplicate_ignored)) else '—' }}</td>{% endfor %}</tr>
+          {% endif %}
           <tr><td class="rowlabel">Links</td>
             {% for r in g.records %}
             <td style="white-space:nowrap;">

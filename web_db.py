@@ -251,7 +251,21 @@ CREATE OR REPLACE VIEW all_records AS
            e.from_address, e.received_at, FALSE,
            rq.duplicate_group_id,
            NULL::text, NULL::timestamptz
-      FROM review_queue rq LEFT JOIN emails e ON e.filename = rq.source_email;
+      FROM review_queue rq LEFT JOIN emails e ON e.filename = rq.source_email
+    UNION ALL
+    -- Held sales orders (2026-10-14, Joel: a held order "should show up in record search, with a label that it's
+    -- held"): record_type 'sales_order', record_id = pending_sales_orders.id, email_status 'Held', notes = when it's
+    -- recorded. Only while held; a released order is a normal invoice record, a superseded one has its invoice.
+    SELECT 'sales_order', so.id, coalesce(so.source_email, so.source_file), so.store_matched, so.vendor_matched,
+           so.number, so.order_date, so.amount, NULL::boolean, FALSE,
+           NULL::boolean, NULL::boolean, so.file_path, so.gmail_link, so.held_at::date,
+           'Held sales order: recorded on ' || to_char(so.release_after, 'MM/DD/YY') || ' if no invoice comes first',
+           'Held', NULL::text, NULL::text, FALSE, NULL::text,
+           e.from_address, e.received_at, FALSE,
+           NULL::text,
+           NULL::text, NULL::timestamptz
+      FROM pending_sales_orders so LEFT JOIN emails e ON e.filename = coalesce(so.source_email, so.source_file)
+     WHERE so.status = 'held';
 
 -- App change/feature requests: same review lifecycle as flags (pending -> dismiss/approve ->
 -- optional read-only investigation -> build -> done), but NOT tied to any accounting record.
@@ -828,7 +842,8 @@ def list_email_siblings(source_email):
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute("SELECT record_type, record_id, vendor_matched, number, amount, "
                         "skip_qb_import, entered_in_qb FROM all_records "
-                        "WHERE email_filename = %s ORDER BY record_type, number", (source_email,))
+                        "WHERE email_filename = %s AND record_type <> 'sales_order' "
+                        "ORDER BY record_type, number", (source_email,))
             return cur.fetchall()
     finally:
         conn.close()
@@ -1184,7 +1199,7 @@ def list_tracked(status="open"):
             if files:
                 cur.execute("SELECT email_filename, record_type, amount, store_matched, "
                             "entered_in_qb, skip_qb_import FROM all_records "
-                            "WHERE record_type <> 'review' AND email_filename = ANY(%s)", (files,))
+                            "WHERE record_type NOT IN ('review', 'sales_order') AND email_filename = ANY(%s)", (files,))
                 for r in cur.fetchall():
                     recs.setdefault(r["email_filename"], r)   # first match wins
             for t in tracked:
@@ -1605,22 +1620,71 @@ def keep_and_ignore_others(kept_type, kept_id, others, username):
     `others` (list of (record_type, record_id) tuples) as a confirmed duplicate,
     excluded from QB, linked back to the kept record via duplicate_of. Mirrors
     clicking 'Ignore this one' on each of the others individually, but atomic and
-    one click. Invoices/payments only, same as set_duplicate_ignored."""
-    kept_table = {"invoice": "invoices", "payment": "payments"}.get(kept_type)
-    kept_email = None
+    one click. Invoices/payments only, same as set_duplicate_ignored.
+
+    The kept copy takes over the "entered in QuickBooks" mark of a copy set aside here, when the
+    two match in amount and store (2026-10-14, Joel: "if the information is basically the same,
+    meaning no financial impact"). Before, keeping a copy that wasn't marked entered over one that
+    was left the bill on QB Entry as not entered, ready to be entered twice. When the entered copy's
+    amount or store differs, nothing carries over (QuickBooks needs fixing first) and the result
+    says so. Returns {"carried": bool, "differs": [{"amount", "store"} of each such entered copy]}."""
+    tables = {"invoice": "invoices", "payment": "payments"}
+    kept_table = tables.get(kept_type)
+    kept, entered_others = None, []
     if kept_table:
         conn = connect()
         try:
-            with conn.cursor() as cur:
-                cur.execute(f"SELECT email_filename FROM {kept_table} WHERE id = %s", (kept_id,))
-                row = cur.fetchone()
-                kept_email = row[0] if row else None
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"SELECT email_filename, amount, store_matched, entered_in_qb FROM {kept_table} "
+                            f"WHERE id = %s", (kept_id,))
+                kept = cur.fetchone()
+                for other_type, other_id in others:
+                    if other_type not in tables:
+                        continue
+                    cur.execute(f"SELECT amount, store_matched FROM {tables[other_type]} "
+                                f"WHERE id = %s AND entered_in_qb IS TRUE AND duplicate_ignored IS NOT TRUE",
+                                (other_id,))
+                    row = cur.fetchone()
+                    if row:
+                        entered_others.append(row)
         finally:
             conn.close()
+    kept_email = kept["email_filename"] if kept else None
     for other_type, other_id in others:
         set_duplicate_ignored(other_type, other_id, True, username, duplicate_of=kept_email)
     if kept_table:
         clear_duplicate_flag(kept_type, kept_id, username)
+    result = {"carried": False, "differs": []}
+    if not kept or kept["entered_in_qb"] or not entered_others:
+        return result
+
+    def _same(o):
+        try:
+            same_amount = abs(float(o["amount"]) - float(kept["amount"])) < 0.005
+        except (TypeError, ValueError):
+            same_amount = False
+        return same_amount and ((o["store_matched"] or "").strip().lower()
+                                == (kept["store_matched"] or "").strip().lower())
+
+    if any(_same(o) for o in entered_others):
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"UPDATE {kept_table} SET entered_in_qb = TRUE, entered_qb_by = %s, "
+                            f"entered_qb_at = now() WHERE id = %s AND entered_in_qb IS NOT TRUE",
+                            (username, kept_id))
+                if cur.rowcount:
+                    cur.execute(
+                        "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES (%s,%s,'entered_in_qb','False','True',%s)",
+                        (kept_table, kept_id, f"{username} (kept over a copy already entered in QuickBooks)"))
+            conn.commit()
+        finally:
+            conn.close()
+        result["carried"] = True
+    else:
+        result["differs"] = [{"amount": o["amount"], "store": o["store_matched"]} for o in entered_others]
+    return result
 
 
 # --------------------------------------------------------------------------- #
@@ -2271,6 +2335,24 @@ def update_record_field(record_type, record_id, ui_field, new_value, username):
                         (table, record_id, col, str(old) if old is not None else None,
                          str(value) if value is not None else None, username))
 
+            # A store edit reaches the record's duplicate-ledger row too (2026-10-14). The ledger kept the old store:
+            # Abbott #622312457 was moved BMW -> Maple here on 9/23, and a later copy under Maple was flagged as "already
+            # recorded to BMW" (a store conflict with a copy entered in QuickBooks) instead of being a plain duplicate.
+            if ui_field == "store" and record_type in ("invoice", "payment"):
+                ledger, num_col, amt_col = (("invoice_history", "invoice_number", "invoice_amount") if record_type == "invoice"
+                                            else ("payment_history", "reference_number", "amount"))
+                rec_num = row.get("invoice_number") if record_type == "invoice" else row.get("reference_number")
+                cur.execute(f"SELECT id, store_matched FROM {ledger} WHERE source_file = %s "
+                            f"AND lower(coalesce({num_col}, '')) = lower(coalesce(%s, '')) "
+                            f"AND abs(coalesce({amt_col}, 0) - coalesce(%s, 0)) < 0.005",
+                            (row.get("email_filename"), rec_num, row.get("amount")))
+                for h in cur.fetchall():
+                    if (h["store_matched"] or "") != (value or ""):
+                        cur.execute(f"UPDATE {ledger} SET store_matched = %s WHERE id = %s", (value, h["id"]))
+                        cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                    "VALUES (%s,%s,'store_matched',%s,%s,%s)",
+                                    (ledger, h["id"], h["store_matched"], value, f"{username} (store edited on its record)"))
+
             # Re-evaluate derived flags when the inputs to them change.
             if record_type in ("invoice", "credit_memo") and ui_field == "vendor":
                 skip = ce.is_excluded_vendor(value)
@@ -2337,16 +2419,27 @@ def update_record_field(record_type, record_id, ui_field, new_value, username):
 
 def _excluded_vendor_sql(mode, col):
     """WHERE fragment for the QuickBooks-excluded-vendors filter, matching the pipeline's
-    is_excluded_vendor rule (normalized substring EITHER direction) via an EXISTS against the
-    vendor_exclusion_spellings view (vendor_name_map rows flagged exclude_from_qb, expanded to all
-    their spellings). mode: 'exclude' (hide excluded), 'only' (keep only excluded), else '' (include
-    all). No params needed."""
+    is_excluded_vendor rule exactly: the vendor spellings on records and in the ledger that
+    is_excluded_vendor says yes to (a WHOLE-name match since 2026-10-14; it used to be "contains,
+    either direction", which caught Standard Process through 'Anda') are listed into the SQL.
+    mode: 'exclude' (hide excluded), 'only' (keep only excluded), else '' (include all). No params
+    needed."""
     if mode not in ("exclude", "only"):
         return ""
-    is_excl = (f"({col} IS NOT NULL AND {col} <> '' AND EXISTS (SELECT 1 FROM vendor_exclusion_spellings ev "
-               f"WHERE ev.exclude_from_qb IS TRUE AND ("
-               f"position(lower(ev.name) in lower({col})) > 0 "
-               f"OR position(lower({col}) in lower(ev.name)) > 0)))")
+    import classify_emails as ce
+    from psycopg2 import sql as pgsql
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT DISTINCT vendor_matched FROM all_records WHERE coalesce(vendor_matched, '') <> '' "
+                        "UNION SELECT DISTINCT vendor_matched FROM invoice_history "
+                        " WHERE coalesce(vendor_matched, '') <> ''")
+            keys = ce._excluded_vendor_keys()
+            hits = sorted({v.strip().lower() for (v,) in cur.fetchall() if ce._norm_vendor_std_key(v) in keys})
+            listed = pgsql.Literal(hits).as_string(cur) if hits else None
+    finally:
+        conn.close()
+    is_excl = (f"(lower(btrim(coalesce({col}, ''))) = ANY({listed}::text[]))" if listed else "FALSE")
     return is_excl if mode == "only" else f"NOT {is_excl}"
 
 
@@ -2597,6 +2690,20 @@ def list_duplicate_candidates():
                 applied = {r["id"]: r["invoice_number"] for r in cur.fetchall()}
             for r in rows + ignored_rows + no_ref_rows + group_rows:
                 r["applied_invoice"] = applied.get(r["record_id"]) if r["record_type"] == "payment" else None
+            # Why each copy was flagged, and whether it's already entered in QuickBooks — shown on the page
+            # so a flag about a bill already in QuickBooks says so (2026-10-14). The all_records view
+            # carries neither for payments (entered_in_qb is NULL there), so both come from the tables.
+            extra = {}
+            for table, rtype in (("invoices", "invoice"), ("payments", "payment")):
+                ids = [r["record_id"] for r in rows + ignored_rows + no_ref_rows + group_rows
+                       if r["record_type"] == rtype]
+                if ids:
+                    cur.execute(f"SELECT id, duplicate_reason, entered_in_qb FROM {table} WHERE id = ANY(%s)", (ids,))
+                    extra.update({(rtype, x["id"]): x for x in cur.fetchall()})
+            for r in rows + ignored_rows + no_ref_rows + group_rows:
+                x = extra.get((r["record_type"], r["record_id"])) or {}
+                r["duplicate_reason"] = x.get("duplicate_reason")
+                r["entered_in_qb"] = bool(x.get("entered_in_qb"))
     finally:
         conn.close()
 
@@ -2666,6 +2773,9 @@ def list_duplicate_candidates():
             groups.setdefault(("payment", "~group", r["duplicate_group_id"]), []).append(r)
     out = []
     for key, recs in groups.items():
+        # Never invoices and payments in one set (Joel, 2026-10-14). Every set is built per record type, so this is
+        # only a guard against a future change: anything of another type is left out.
+        recs = [r for r in recs if r["record_type"] == key[0]]
         # A duplicate SET needs ≥2 copies to compare. A lone record (a suspect whose sibling is gone,
         # or a stale flag) self-matches the SQL EXISTS but has nothing to compare against — don't
         # surface it as a one-record "set".
@@ -2680,6 +2790,7 @@ def list_duplicate_candidates():
                     or next((x for x in recs if not x.get("duplicate_ignored")), None) or recs[0])
         latest_flag = max((str(x.get("date_added") or "") for x in recs
                            if x.get("duplicate_suspect") and not x.get("duplicate_ignored")), default="")
+        _mark_set_differences(recs)
         out.append({
             "key": "|".join(str(k) for k in key),
             "record_type": key[0],
@@ -2689,6 +2800,40 @@ def list_duplicate_candidates():
         })
     out.sort(key=lambda g: g["_sort"], reverse=True)
     return out
+
+
+def _mark_set_differences(recs):
+    """Where a duplicate set's copies disagree, so the page can color it (2026-10-14, Joel: the colors
+    for differences in bill numbers were gone). Copies with different numbers share a set since that
+    day (a misread number; a sales order beside its invoice), and nothing showed which characters
+    differ. Sets on each record:
+      number_vs   — the number to highlight this copy's number against, character by character
+                    (the diff_against filter, as on QB match review), or None when it agrees;
+      store_diff / date_diff — this copy's store / date is the odd one out (red, like the amounts).
+    A value counts as odd one out when the set disagrees and no other copy shares it."""
+    def norm(v):
+        return " ".join(str(v or "").lower().split())
+
+    def odd_ones(values):
+        if len(set(values)) <= 1:
+            return [False] * len(values)
+        return [values.count(v) == 1 for v in values]
+
+    for r, odd in zip(recs, odd_ones([norm(r.get("store_matched")) for r in recs])):
+        r["store_diff"] = odd
+    for r, odd in zip(recs, odd_ones([norm(r.get("record_date")) for r in recs])):
+        r["date_diff"] = odd
+    numbers = [norm(r.get("number")) for r in recs]
+    if len(set(numbers)) <= 1:
+        for r in recs:
+            r["number_vs"] = None
+        return
+    # The reference: the number most copies share (ties: the first copy's, the likely original).
+    ref = max(numbers, key=lambda n: (numbers.count(n), -numbers.index(n)))
+    ref_shown = next(r.get("number") for r, n in zip(recs, numbers) if n == ref)
+    first_other = next(r.get("number") for r, n in zip(recs, numbers) if n != ref)
+    for r, n in zip(recs, numbers):
+        r["number_vs"] = (first_other if n == ref else ref_shown) or ""
 
 
 def orphaned_history_records():
@@ -2810,6 +2955,40 @@ def confirm_no_live_copy(record_type, vendor_key, number_key, username, confirm=
                     (f"{record_type} {vendor_key} #{number_key}",
                      "open" if confirm else "confirmed", "confirmed" if confirm else "open", username))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def qb_batch_auto_matches(batch_id, search=""):
+    """The records one QuickBooks upload marked entered by itself, because a QuickBooks bill matched them
+    exactly (2026-10-14, Joel looking for Bened Life #125057: auto-matches were on no page; Pending unmatched lists
+    only QB rows that matched nothing, and QB match review only the doubtful ones). Found by the mark the upload
+    leaves: entered_qb_by '<uploader> via QB reconcile import', stamped within the hour after the upload. `search`
+    narrows by vendor or number. Returns (batch, [{record_type, record_id, store_matched, vendor_matched, number,
+    amount, record_date, entered_in_qb}]), store then vendor order; (None, []) for an unknown batch."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM qb_import_batches WHERE id = %s", (batch_id,))
+            batch = cur.fetchone()
+            if not batch:
+                return None, []
+            actor = f"{batch['uploaded_by']} via QB reconcile import"
+            arms = []
+            for rtype, table, num, dcol in (("invoice", "invoices", "invoice_number", "invoice_date"),
+                                            ("credit_memo", "credit_memos", "credit_memo_number", "credit_memo_date"),
+                                            ("payment", "payments", "reference_number", "payment_date")):
+                arms.append(f"SELECT '{rtype}' AS record_type, id AS record_id, store_matched, vendor_matched, "
+                            f"{num} AS number, amount, {dcol} AS record_date, entered_in_qb FROM {table} "
+                            f"WHERE entered_qb_by = %(actor)s AND entered_qb_at >= %(at)s - interval '1 minute' "
+                            f"AND entered_qb_at < %(at)s + interval '1 hour'")
+            where = ""
+            if (search or "").strip():
+                where = " WHERE vendor_matched ILIKE %(q)s OR number ILIKE %(q)s"
+            cur.execute("SELECT * FROM (" + " UNION ALL ".join(arms) + ") m" + where +
+                        " ORDER BY store_matched, lower(vendor_matched), number",
+                        {"actor": actor, "at": batch["uploaded_at"], "q": f"%{(search or '').strip()}%"})
+            return batch, cur.fetchall()
     finally:
         conn.close()
 
@@ -3010,6 +3189,51 @@ def get_active_notice():
     """The current notice {message, active_until} or None — used both for the initial page
     render and the /api/notice polling endpoint. Delegates to database."""
     return database.get_active_notice()
+
+
+QB_ENTRY_GAP_MINUTES = 60   # marks this close together count as one sitting at QuickBooks
+
+
+def last_qb_entry_by_store(gap_minutes=QB_ENTRY_GAP_MINUTES):
+    """For the dashboard (Joel, 2026-10-14: "the last date we made an import for each store … track every time
+    someone clicks 'entered to QB'"): per store, when records were last marked entered in QuickBooks by a
+    person, and how many records that sitting covered. A sitting is a run of marks with no gap longer than
+    `gap_minutes`. Invoices, credit memos and payments all count. Automatic marks don't: the QB reconcile
+    import / recheck / confirm / unmatched backfill ("… via …") and "auto-…" ones. Uses the records' own
+    entered_qb_at / entered_qb_by, so a mark someone later undid isn't counted. Returns
+    [{"store", "last_at", "count"}] in the stores' display order; last_at is None for a store with no
+    entries in the last 180 days."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT store_matched, entered_qb_at FROM (
+                    SELECT store_matched, entered_qb_at, entered_qb_by FROM invoices WHERE entered_in_qb IS TRUE
+                    UNION ALL
+                    SELECT store_matched, entered_qb_at, entered_qb_by FROM credit_memos WHERE entered_in_qb IS TRUE
+                    UNION ALL
+                    SELECT store_matched, entered_qb_at, entered_qb_by FROM payments WHERE entered_in_qb IS TRUE
+                ) x
+                WHERE entered_qb_at > now() - interval '180 days'
+                  AND coalesce(btrim(entered_qb_by), '') <> ''
+                  AND entered_qb_by NOT ILIKE '%% via %%' AND entered_qb_by NOT ILIKE 'auto%%'
+                ORDER BY entered_qb_at DESC""")
+            marks = cur.fetchall()
+    finally:
+        conn.close()
+    by_store = {}
+    for store, at in marks:
+        by_store.setdefault((store or "").strip().lower(), []).append(at)
+    out = []
+    for name in store_names():
+        times = by_store.get(name.strip().lower()) or []
+        count = 0
+        for i, at in enumerate(times):                # newest first: count back to the first long gap
+            if i and (times[i - 1] - at).total_seconds() > gap_minutes * 60:
+                break
+            count += 1
+        out.append({"store": name, "last_at": times[0] if times else None, "count": count})
+    return out
 
 
 def dashboard_counts():
@@ -3367,7 +3591,8 @@ def delete_learning_web(rule, username):
 
 _REF = {
     "stores":           {"unique": "store_name",
-                         "cols": ["store_name", "display_name", "aliases", "address", "notes"],
+                         "cols": ["store_name", "display_name", "aliases", "address", "notes", "back_office"],
+                         "bool_cols": {"back_office"},
                          "order": "sort_order, id"},
     "vendor_name_map": {"unique": "standard_vendor_name",
                          "cols": ["standard_vendor_name", "exclude_from_qb",
@@ -3375,14 +3600,14 @@ _REF = {
                                   "ignore_payment_confirmations",
                                   "aliases", "name_3m",
                                   "name_madison", "name_maple", "name_refuah",
-                                  "name_westgate", "name_bmw", "name_lakewood_rx"],
+                                  "name_westgate", "name_bmw", "name_lakewood_rx", "name_carepax"],
                          "bool_cols": {"exclude_from_qb", "exclude_from_statement_recon",
                                        "trust_line_item_totals", "ignore_payment_confirmations"},
                          "order": "lower(standard_vendor_name)"},
     "account_name_map": {"unique": "standard_account_name",
                           "cols": ["standard_account_name", "name_3m", "name_madison",
                                    "name_maple", "name_refuah", "name_westgate",
-                                   "name_bmw", "name_lakewood_rx"],
+                                   "name_bmw", "name_lakewood_rx", "name_carepax"],
                           "order": "lower(standard_account_name)"},
     "vendor_account_assignment": {"unique": "standard_vendor_name",
                           "cols": ["standard_vendor_name", "standard_account_name"],
@@ -3421,7 +3646,7 @@ def _ref_log(cur, table, record_id, field, old, new, username):
 _QB_NAME_STORE_COL = {
     "maple pharmacy": "name_maple", "madison pharmacy": "name_madison",
     "refuah pharmacy": "name_refuah", "westgate pharmacy": "name_westgate",
-    "3m pharmacy": "name_3m", "bmw": "name_bmw", "lakewood rx": "name_lakewood_rx",
+    "3m pharmacy": "name_3m", "bmw": "name_bmw", "lakewood rx": "name_lakewood_rx", "carepax": "name_carepax",
 }
 _QB_NAME_TARGETS = {
     # map table:        (record column holding the standard name, record column to refresh)
@@ -3558,7 +3783,7 @@ def standard_account_names():
 _STORE_NAME_COLS = [
     ("name_3m", "3M"), ("name_madison", "Madison"), ("name_maple", "Maple"),
     ("name_refuah", "Refuah"), ("name_westgate", "Westgate"), ("name_bmw", "BMW"),
-    ("name_lakewood_rx", "Lakewood Rx"),
+    ("name_lakewood_rx", "Lakewood Rx"), ("name_carepax", "Carepax"),
 ]
 
 
@@ -3930,8 +4155,8 @@ def exclude_vendor(vendor_name, username):
     """One-click 'ignore this vendor': flag this vendor exclude_from_qb=TRUE on vendor_name_map (the
     unified vendor list) so its invoices/credit memos never enter QuickBooks (read by
     classify_emails.is_excluded_vendor on the next run). IDEMPOTENT: if the name is already covered by
-    the exclusion list (normalized substring EITHER direction — e.g. "Abbott" when "Abbott
-    Laboratories" is already excluded), it's a quiet no-op. Otherwise it sets the flag on the exact
+    the exclusion list (is_excluded_vendor — one of the excluded spellings, matched as a whole name since
+    2026-10-14), it's a quiet no-op. Otherwise it sets the flag on the exact
     standard-name row, or creates a minimal vendor_name_map row for an exclude-only vendor. Returns
     'added', 'exists', or None (blank name). Logged to edit_log, same as a reference-page edit."""
     name = (vendor_name or "").strip()
