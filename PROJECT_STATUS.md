@@ -5788,3 +5788,56 @@ Suite: 121 pass.
   /scheduled-runs, and the Review queue page (always shown; highlighted with "N answered items waiting to be
   processed" when there are any). The red banner keeps only its Details link (its usual cause, the PC being
   off, isn't fixed by running the classifier). Tests updated (`test_run_now_banner.py`, 11). Suite: 122 pass.
+
+### Re-read records missing a store, date or amount (`requeue_missing_info.py`) (2026-10-13)
+
+The QB-10 banner showed 17 payments waiting for QuickBooks entry with no amount and/or date; some also have no store. They were saved
+between 8/10 and 10/7 by older readings. Most of their emails do carry the data:
+- JCP&L AutoPay: "Total Payment: $1159.64 … Payment Date: 09/22/2026".
+- NJNG: "Bill Amount: 55.00".
+- Herbal Health "Paid Invoice" emails show no amount in their text, but link to the BillerGenie page, which the
+  pipeline now fetches (§5ah).
+
+So they're re-read under today's rules. Each comes back complete, or the store/date/amount checks flag it and it
+goes to the Review queue.
+
+**[requeue_missing_info.py](requeue_missing_info.py)** (dry run by default; `--commit` to act)
+- **Selection:** exactly the records the banner counts (`web_db._missing_info_sql`): not entered, not skip-QB,
+  not an ignored duplicate. It covers invoices, credit memos and payments; no bills qualified on 10/13.
+- **Requeue:** grouped by source email, done like `requeue_by_vendor.py` (it reuses `_find_source_eml`):
+  - backs up every row of the affected emails to `<table>_requeue_backup_<ts>`;
+  - moves the `.eml` back to `test_emails/`;
+  - sets `emails.status='fetched'`.
+- **Rerun:** the next scheduled run, or "Apply changes now", re-reads them. `save_results` deletes each email's
+  old rows first, so nothing is doubled and a record that goes to review leaves Payments.
+
+**Split-file records**
+- Payment #302 (JCP&L #81209852) was saved from a review split file that no longer exists (`… 10.7.2026__2.pdf`).
+  It also has no ledger row.
+- Requeueing its original email alone would have left #302 next to the new copy.
+- The script traces such a record to its original email by the Gmail message id in its link. That id must match
+  exactly one `emails` row, and the email must be on disk.
+- `--commit` then points the record at that email (logged to `edit_log` as `requeue_missing_info`), so the rerun
+  replaces it.
+
+**What it leaves alone (listed, never requeued)**
+- Any email with a record a person acted on, because a rerun re-reads every record of the email:
+  - an edited field (`edited_by`; only the web Edit page sets it);
+  - a manual ignore (`ignored_by`);
+  - a duplicate decision (non-blank `duplicate_ignored_by`; the pipeline's own auto-ignores leave it blank).
+- Records entered in QB don't hold an email back, because a rerun keeps them entered (LC-18).
+- Records whose email isn't on disk.
+
+**Dry run, 2026-10-13:** 17 payments in 15 emails, all on disk, none held.
+- Twin Rocks ×2, NJNG ×4, JCP&L AutoPay ×2 (including #302), Herbal Health ×4, Stiac Laundry ×1.
+- A&S Sales ×4 in 2 emails. The complete #112 from the same email is re-read too.
+- No other `emails` row shares their Gmail message ids, so the rerun won't skip any as a re-pull.
+
+**Tests:** [tests/test_requeue_missing_info.py](tests/test_requeue_missing_info.py), 3 tests. They use one
+connection that is rolled back, and temporary folders stand in for the email folders.
+- Plan: targets, siblings, the split-file trace, a held email, an email not on disk.
+- Commit: files moved, status set, re-point plus its `edit_log` row, backup made, and `save_results` then
+  replaces the re-pointed record.
+- A dry run changes nothing.
+
+The suite now has 125 tests, all passing. Live data was checked unchanged afterwards.
