@@ -5949,3 +5949,42 @@ Card 6641 → Maple: its 17 saved payments were already Maple, and no invoice ha
 - `tests/test_gates.py` › `RecordlessEmailsAndIgnoredConfirmations`, 10 tests. The suite has 145 tests, all
   passing.
 - The pipeline change applies from the next classify run. The Setup checkbox needs a web-app restart.
+
+### Mapping a card fills in the store on records waiting for QuickBooks (2026-10-13)
+
+Joel mapped card 6641 and asked whether that updates what's already in the app. It didn't: `assign_card_store`
+only saved the mapping, so only documents read afterwards used it.
+
+**New: `web_db.apply_card_map_to_records(username, last4=None)`.**
+- **What it updates:** invoices, credit memos and payments not yet entered in QB that carry the card AND have a
+  blank or 'unknown' store. They get the mapped store.
+- **How it finds the card:** the record's `card_last4`, or the same strict card-ending cue the Cards tab reads from
+  a payment's reference or a record's notes.
+- **What it leaves alone:**
+  - a record that already has a store;
+  - entered records;
+  - review items, which carry no card and pick the mapping up when they're re-read.
+- **Follow-up and logging:** the store-dependent QuickBooks vendor / account names are re-derived
+  (`refresh_qb_names`). Each change is logged to `edit_log` as "<user> (card NNNN mapped to <store>)".
+- **Where it runs:**
+  - Cards tab, `POST /cards/assign`, for that card. The page says how many records got the store.
+  - Setup › Card → store (`_reference_saved_redirect` now takes the username), for every mapped card. Shows
+    `?card_updated=N`.
+- **First run:** a rolled-back dry run over all current mappings changes 0 records. Card 6641's 17 payments were
+  already Maple.
+- **Tests:** [tests/test_card_mapping.py](tests/test_card_mapping.py), 2 tests:
+  - only blank / unknown, not-entered records change; set stores, entered records and other cards stay; the card
+    is read from a reference too; changes are logged; a second run changes nothing;
+  - the Cards tab reports the count.
+  The suite now has 147 tests, all passing.
+- **Needs a web-app restart.**
+
+**The 5:30 PM run (10/13).**
+- It re-read about 46+ answered BluPax copies. Each re-flagged all 16 payments of the one-page receipt, so a run
+  that normally takes minutes was still going after an hour.
+- Claude's attempt to stop the classifier process was blocked by the permission system. Joel stops it, or
+  `scheduled_run.py` stops it at its 90-minute limit (~19:00, TIMED OUT).
+- When the lock frees:
+  - the 226 BluPax review copies are dismissed (Joel: yes). They're all from receipt 6077NY0059, and their 16
+    amounts are exactly the payments already recorded under Maple (#945–#960);
+  - the 2 Herbal Health empty payments are requeued.

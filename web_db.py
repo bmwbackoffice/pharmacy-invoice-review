@@ -4131,6 +4131,69 @@ def assign_card_store(last4, store, username):
         conn.close()
 
 
+def apply_card_map_to_records(username, last4=None):
+    """When a card is mapped to a store (Cards tab or Setup › Card → store, 2026-10-13), give that store
+    to records waiting for QuickBooks entry that carry the card and have NO store yet (blank or
+    'unknown'): invoices, credit memos and payments, not entered in QB. The card is the record's
+    card_last4, or the same strict card-ending cue the Cards tab reads from the payment reference or the
+    notes. A record that already has a store is left alone, and review items aren't touched (they carry
+    no card; they pick the mapping up when they're re-read). The QuickBooks vendor / account names that
+    depend on the store are re-derived. Every change is logged. last4=None applies every mapped card.
+    Returns [(table, record_id, last4, store)]."""
+    conn = connect()
+    conn.autocommit = False
+    changed = []
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT card_last4, store_matched FROM card_store_map")
+            mapping = {database.norm_last4(r["card_last4"]): (r["store_matched"] or "").strip()
+                       for r in cur.fetchall() if database.norm_last4(r["card_last4"])}
+            if last4 is not None:
+                key = database.norm_last4(last4)
+                mapping = {key: mapping[key]} if key in mapping else {}
+            mapping = {k: v for k, v in mapping.items() if v}
+            no_store = ("entered_in_qb IS NOT TRUE AND (coalesce(btrim(store_matched), '') = '' "
+                        "OR lower(btrim(store_matched)) = 'unknown')")
+            std_vendors, std_accounts = set(), set()
+            for table, text_cols in (("invoices", ("notes",)), ("credit_memos", ("notes",)),
+                                     ("payments", ("reference_number", "notes"))):
+                if not mapping:
+                    break
+                extra = ", standard_vendor, standard_account" if table != "payments" else ""
+                cur.execute(f"SELECT id, card_last4, store_matched, {', '.join(text_cols)}{extra} "
+                            f"FROM {table} WHERE {no_store}")
+                for r in cur.fetchall():
+                    card = database.norm_last4(r["card_last4"]) or next(
+                        (c for c in (_card_from_reference(r.get(col)) for col in text_cols) if c), "")
+                    store = mapping.get(card)
+                    if not store:
+                        continue
+                    cur.execute(f"UPDATE {table} SET store_matched = %s, edited_at = now() "
+                                f"WHERE id = %s AND {no_store}", (store, r["id"]))
+                    if cur.rowcount != 1:
+                        continue
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                "changed_by) VALUES (%s,%s,'store_matched',%s,%s,%s)",
+                                (table, r["id"], r["store_matched"], store,
+                                 f"{username} (card {card} mapped to {store})"))
+                    changed.append((table, r["id"], card, store))
+                    if table != "payments":
+                        std_vendors.add(r.get("standard_vendor"))
+                        std_accounts.add(r.get("standard_account"))
+            # The QuickBooks names follow the store (per-store spellings in Setup).
+            if std_vendors - {None, ""}:
+                refresh_qb_names(cur, "vendor_name_map", username, standard_names=sorted(std_vendors - {None, ""}))
+            if std_accounts - {None, ""}:
+                refresh_qb_names(cur, "account_name_map", username, standard_names=sorted(std_accounts - {None, ""}))
+        conn.commit()
+        return changed
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Invoice history viewer — READ-ONLY (protects duplicate-detection integrity).
 # --------------------------------------------------------------------------- #

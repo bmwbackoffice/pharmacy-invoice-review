@@ -2732,11 +2732,18 @@ def _sync_account_class_rules(why):
         print(f"(account class rules after {why} failed: {e})")
 
 
-def _reference_saved_redirect(table):
+def _reference_saved_redirect(table, username=""):
     """Redirect back to a reference page after a successful save. For the vendor-standardization
     tables, first re-resolve existing unentered records against the now-updated mappings and pass
-    the resolved count through for a one-line flash."""
+    the resolved count through for a one-line flash. For Card → store, give the mapped store to
+    records waiting for QuickBooks that carry the card and have no store yet (2026-10-13)."""
     _sync_account_class_rules(table)
+    if table == "card_store_map":
+        try:
+            n = len(web_db.apply_card_map_to_records(username or "someone"))
+            return RedirectResponse(f"/reference/{table}?card_updated={n}", status_code=302)
+        except Exception as e:
+            print(f"(card → store update after save failed: {e})")
     if table in _VENDOR_STD_TABLES:
         try:
             import classify_emails as ce
@@ -2781,7 +2788,7 @@ async def reference_add(request: Request, table: str):
         web_db.add_reference(table, values, user["username"])
     except ValueError as e:
         return RedirectResponse(f"/reference/{table}?error={quote(str(e))}", status_code=302)
-    return _reference_saved_redirect(table)
+    return _reference_saved_redirect(table, user["username"])
 
 
 @app.post("/reference/vendor-name-map/attach-spelling")
@@ -2865,7 +2872,7 @@ async def reference_edit(request: Request, table: str, record_id: int):
         web_db.edit_reference(table, record_id, values, user["username"])
     except ValueError as e:
         return RedirectResponse(f"/reference/{table}?error={quote(str(e))}", status_code=302)
-    return _reference_saved_redirect(table)
+    return _reference_saved_redirect(table, user["username"])
 
 
 @app.post("/reference/{table}/{record_id}/delete")
@@ -2888,26 +2895,33 @@ def reference_delete(request: Request, table: str, record_id: int):
 # --------------------------------------------------------------------------- #
 
 @app.get("/cards", response_class=HTMLResponse)
-def cards_page(request: Request, error: str = ""):
+def cards_page(request: Request, error: str = "", updated: int = -1, card: str = ""):
     user = current_user(request)
     if not user:
         return _login_redirect()
     return render(request, "cards.html", user, cards=web_db.list_seen_cards(),
-                  stores=web_db.store_names(), error=error)
+                  stores=web_db.store_names(), error=error, updated=updated, card=card)
 
 
 @app.post("/cards/assign")
 async def cards_assign(request: Request):
+    """Map a card to a store, then give that store to the records waiting for QuickBooks that carry the
+    card and have no store yet (web_db.apply_card_map_to_records, 2026-10-13)."""
     user = current_user(request)
     if not user:
         return _login_redirect()
     form = await request.form()
+    last4 = form.get("card_last4", "")
     try:
-        web_db.assign_card_store(form.get("card_last4", ""),
-                                 form.get("store_matched", ""), user["username"])
+        web_db.assign_card_store(last4, form.get("store_matched", ""), user["username"])
     except ValueError as e:
         return RedirectResponse(f"/cards?error={quote(str(e))}", status_code=302)
-    return RedirectResponse("/cards", status_code=302)
+    try:
+        n = len(web_db.apply_card_map_to_records(user["username"], last4))
+    except Exception as e:
+        print(f"(card → store update after mapping {last4} failed: {e})")
+        n = -1
+    return RedirectResponse(f"/cards?updated={n}&card={quote(last4)}", status_code=302)
 
 
 # --------------------------------------------------------------------------- #

@@ -34,6 +34,12 @@
 <p class="muted">{{ page.help }} Edits here take effect on the next <code>classify_emails.py</code> run.</p>
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% set _card_n = request.query_params.get('card_updated') %}
+{% if _card_n is not none %}
+  <div class="ok-msg">Saved. {% if _card_n|int %}{{ _card_n }} record{{ '' if _card_n|int == 1 else 's' }} waiting for
+    QuickBooks that had no store now {{ 'has' if _card_n|int == 1 else 'have' }} it from {{ 'its' if _card_n|int == 1 else 'their' }} card.{% else %}No record waiting for QuickBooks needed a store from these cards.{% endif %}
+    Review items aren't changed: they pick a card up when they're re-read.</div>
+{% endif %}
 {% set _qb_n = resolved|default(0)|int %}
 {% set _st_n = stmt_resolved|default(0)|int %}
 {% set _ex_n = (request.query_params.get('excluded') or 0)|int %}

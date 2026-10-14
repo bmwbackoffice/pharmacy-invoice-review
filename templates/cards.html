@@ -10,6 +10,12 @@ Assignments feed <a href="/reference/card_store_map">Card → store</a> and take
 <code>classify_emails.py</code> run.</p>
 
 {% if error %}<div class="error">{{ error }}</div>{% endif %}
+{% if updated is not none and updated >= 0 %}
+<div class="ok-msg">Card {{ card }} saved.
+  {% if updated %}{{ updated }} record{{ '' if updated == 1 else 's' }} waiting for QuickBooks that had no store now
+  {{ 'has' if updated == 1 else 'have' }} it.{% else %}No record waiting for QuickBooks needed its store.{% endif %}
+  Review items aren't changed: they pick the card up when they're re-read.</div>
+{% endif %}
 
 <div class="card" style="padding:0;">
   <table>
