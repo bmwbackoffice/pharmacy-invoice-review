@@ -2040,6 +2040,76 @@ def find_released_sales_order(vendor, number):
         conn.close()
 
 
+def load_released_sales_orders(since_days=45):
+    """Released held orders not yet matched to their invoice (matched_invoice empty), held within the
+    last `since_days` — the ones a later invoice can still replace or confirm (2026-10-14)."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM pending_sales_orders WHERE status = 'released' "
+                        "AND coalesce(matched_invoice, '') = '' AND held_at > now() - %s * interval '1 day' "
+                        "ORDER BY id", (since_days,))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def invoices_for_order_matching(stores, since_days=120):
+    """Invoices in these stores added in the last `since_days`, with what matching a sales order to its
+    invoice needs. Vendor, number, amount and date are compared by the caller."""
+    if not stores:
+        return []
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, email_filename, vendor_matched, store_matched, invoice_number, amount, "
+                        "invoice_date, entered_in_qb, duplicate_ignored, duplicate_suspect, duplicate_of, "
+                        "duplicate_group_id, file_path, notes FROM invoices "
+                        "WHERE store_matched = ANY(%s) AND date_added > now() - %s * interval '1 day' "
+                        "ORDER BY id", (list(stores), since_days))
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+def resolve_order_with_invoice(order_id, matched_invoice, changes, actor):
+    """Apply one sales-order/invoice resolution in a single transaction (2026-10-14): `changes` is a list
+    of (record id, {column: value}) for the invoices table; every changed column is logged to edit_log
+    under `actor`. Marks the order matched (matched_invoice) so it isn't resolved twice."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            for rid, cols in changes:
+                cur.execute(f"SELECT {', '.join(cols)} FROM invoices WHERE id = %s FOR UPDATE", (rid,))
+                old = cur.fetchone() or {}
+                sets = ", ".join(f"{c} = %s" for c in cols)
+                cur.execute(f"UPDATE invoices SET {sets}, edited_at = now() WHERE id = %s",
+                            (*cols.values(), rid))
+                for c, v in cols.items():
+                    if str(old.get(c)) != str(v):
+                        cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                    "changed_by) VALUES ('invoices', %s, %s, %s, %s, %s)",
+                                    (rid, c, None if old.get(c) is None else str(old.get(c))[:2000],
+                                     None if v is None else str(v)[:2000], actor))
+            cur.execute("UPDATE pending_sales_orders SET matched_invoice = %s WHERE id = %s",
+                        (matched_invoice, order_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_run_learnings_hash(run_id, learnings_hash):
+    """Record a run's learnings hash right away (not only when the run finishes), so a learnings
+    re-check cut off by the run's time limit isn't started over by every following run (2026-10-14)."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE runs SET learnings_hash = %s WHERE run_id = %s", (learnings_hash, run_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def set_sales_order_status(order_id, status, matched_invoice=None):
     conn = connect()
     try:

@@ -6067,3 +6067,48 @@ and Keep settling it. The suite has 150 tests, all passing. Needs a web-app rest
 
 **Lantev.** 93G4240 is probably the right number: the scan and Lantev's own email both read it, and Lantev numbers
 carry letters (09A3356, 9GH5739). Check the document, then Keep the scan #1503, which ignores #3863.
+
+### Sales orders: 3-day hold, priced packing slips held too, matched to their invoice in the background (2026-10-14)
+
+**Joel's rules.**
+- A priced sales order, order confirmation or packing slip is held (now 3 days), then recorded if no invoice comes.
+- An invoice that arrives is matched automatically, and the invoice wins.
+- Flag only when there's still a question, and when the order was already entered in QB and the amount changed.
+
+**Why Bened Life #126877 went to review** (a priced packing slip, $1,386): learning #4653 (2026-08-17, written
+before the hold existed) said a priced sales order should be "processed as an invoice … and alert".
+- Rewritten to the hold behaviour (logged to `edit_log` as `claude (asked by joel)`).
+- The prompt's `is_sales_order` now covers priced packing slips, and says not to flag a sales order just to watch for
+  its invoice.
+
+**Hold.** `SALES_ORDER_HOLD_DAYS` defaults to 3 (was 2; the environment variable isn't set).
+
+**While held** (`reconcile_sales_orders`).
+- Still matched by the same number (`find_recorded_invoice_ref`).
+- New: a recorded invoice with the same vendor (standard name), store and amount, dated within
+  `SALES_ORDER_MATCH_DAYS` (14) of the order, also supersedes it, even under a different number. Example from BluPax:
+  order #1992625 → invoice #1204976. The 10/14 dry run matched 6 held BluPax orders this way.
+- Several such invoices: no guess. On release the order goes to review, naming them.
+
+**After the hold** (`_match_released_orders`). Runs every run, over orders released in the last 45 days and
+invoices recorded after the order's record:
+- **Order not entered in QB:** the invoice wins. The order's record is set aside as replaced, and the invoice is live,
+  un-ignored if the duplicate check had ignored it as the order's copy.
+- **Entered, same amount:** the invoice is kept out as a duplicate. The entered record now shows the invoice's
+  document (Joel: "swap the attachment"), with a note.
+- **Entered, amount changed:** the invoice is flagged and grouped with the order.
+- **Both already entered:** both are flagged, "check QuickBooks for a double entry". This applies to Rockland
+  Cosmetics order #9636677 / invoice #34910 ($421.20, Maple) on 10/14.
+- **Several candidate invoices:** all are flagged.
+- **An order held twice** (two order rows) is resolved once.
+- Every change is logged to `edit_log` as "auto (sales order matched to its invoice)". The order's `matched_invoice`
+  is set, so each order is handled once.
+
+**Learnings re-check (Phase 1b) made safe.** A re-check cut off by the 90-minute limit used to restart on every
+following run. Now:
+- the run records the new learnings hash as soon as the re-check starts (`set_run_learnings_hash`);
+- the re-check stops after `RECHECK_MAX_MINUTES` (45).
+The rewritten rule triggers one re-check of the open queue (~126 items) on the next run.
+
+**Tests.** [tests/test_sales_order_matching.py](tests/test_sales_order_matching.py), 9 tests. The suite has 159 tests,
+all passing. The pipeline changes take effect from the next classify run, with no restart needed.

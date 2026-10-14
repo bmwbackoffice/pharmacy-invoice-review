@@ -187,12 +187,16 @@ RETRY_OPEN_ALL = "--retry-open-all" in _ARGS
 RETRY_ID = next((a.split("=", 1)[1] for a in _ARGS if a.startswith("--retry-id=")), None)
 # One-off maintenance: remove redundant re-record rows (the churned-filename dup bug).
 DEDUPE_RECORDS = "--dedupe-records" in _ARGS
-# Sales orders / order acknowledgements are HELD this many days before recording, so a
-# formal invoice for the same vendor+order# can supersede them (no double entry).
+# Sales orders / order acknowledgements / priced packing slips are HELD this many days before
+# recording, so a formal invoice for the same order can supersede them (no double entry). 3 days since
+# 2026-10-14 (Joel; was 2).
 try:
-    SALES_ORDER_HOLD_DAYS = float(os.environ.get("SALES_ORDER_HOLD_DAYS", "2"))
+    SALES_ORDER_HOLD_DAYS = float(os.environ.get("SALES_ORDER_HOLD_DAYS", "3"))
 except ValueError:
-    SALES_ORDER_HOLD_DAYS = 2.0
+    SALES_ORDER_HOLD_DAYS = 3.0
+# A learnings re-check (Phase 1b) stops after this long, leaving the run time for new email within
+# scheduled_run.py's 90-minute limit; items it didn't reach keep their flags (2026-10-14).
+RECHECK_MAX_MINUTES = 45
 
 # filename -> gmail deep-link, loaded once per run (see load_gmail_links()).
 GMAIL_LINKS = {}
@@ -469,7 +473,7 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
       "invoice_amount": number or null,
       "total_source": "'stated' if invoice_amount was read directly from a printed Total/Amount Due/Balance figure on the document, or 'derived' if NO such printed total exists anywhere on the document and this number was instead computed by summing the visible line items. Always set this — never leave it null when an amount is present.",
       "shipping_charge": "number or null — shipping/freight charge shown on the invoice, if any",
-      "is_sales_order": "true if this document is a SALES ORDER / order acknowledgement / order confirmation rather than a formal invoice — e.g. titled 'Sales Order' / 'Order Acknowledgement' / 'Order Confirmation', shows an 'Order Total' (not an invoice amount / amount due), or the email says 'we have received your order'. Showing full, itemized pricing does NOT make it an invoice — sales order confirmations routinely show full pricing; that alone is never a reason to set this to false. If the document itself is titled/labeled 'Sales Order' or shows 'Order Number'/'Order Total' rather than an invoice number/amount due, set this true even if every line item and price is shown, even if the document is handwritten or informal, and even if there is no other reason to doubt the amount. Example: a small vendor slip headed 'Sales Order #' with a handwritten quantity/item/amount table is a sales order — is_sales_order: true — NOT an invoice, no matter how complete the pricing looks. Do not invent or assume a 'policy' for processing a sales order as an invoice — no such policy exists; the correct handling of a sales order is to set is_sales_order true and let it be held, not to record it as an invoice yourself. Otherwise false.",
+      "is_sales_order": "true if this document is a SALES ORDER / order acknowledgement / order confirmation rather than a formal invoice — e.g. titled 'Sales Order' / 'Order Acknowledgement' / 'Order Confirmation', shows an 'Order Total' (not an invoice amount / amount due), or the email says 'we have received your order'. Showing full, itemized pricing does NOT make it an invoice — sales order confirmations routinely show full pricing; that alone is never a reason to set this to false. If the document itself is titled/labeled 'Sales Order' or shows 'Order Number'/'Order Total' rather than an invoice number/amount due, set this true even if every line item and price is shown, even if the document is handwritten or informal, and even if there is no other reason to doubt the amount. Example: a small vendor slip headed 'Sales Order #' with a handwritten quantity/item/amount table is a sales order — is_sales_order: true — NOT an invoice, no matter how complete the pricing looks. Do not invent or assume a 'policy' for processing a sales order as an invoice — no such policy exists; the correct handling of a sales order is to set is_sales_order true and let it be held, not to record it as an invoice yourself. A PACKING SLIP / packing list / delivery ticket that shows prices and a total is handled the same way: is_sales_order true (a packing slip with no prices is not a bill at all). Do NOT flag a sales order or priced packing slip for review just to watch for a later invoice or a possible duplicate: the system holds it for a few days, matches it to its invoice automatically when one arrives, and records it as the bill if none does — flag it only for a real problem (store, date, or amount unclear). Otherwise false.",
       "sales_tax": "number or null — sales tax charged on the invoice, if any",
       "not_received_note": "string or null — if this document shows checkmarks, strikeouts, handwritten notes, or other markings indicating specific line items were NOT received / short-shipped / back-ordered, briefly describe what's marked (e.g. 'Item ABC-123 marked not received, qty 2'). Null if no such markup is present.",
       "not_received_amount": "number or null — if not_received_note is set AND the dollar impact of the marked items is determinable from the document (their line total, or an explicit adjustment shown), the amount by which those items reduce the invoice total. Null if not determinable or not_received_note is null.",
@@ -3941,22 +3945,184 @@ def apply_released_order_check(classification):
               f"sales-order hold — treated as an invoice, not held again.")
 
 
+SALES_ORDER_MATCH_DAYS = 14   # an invoice under a different number, dated this close to the order, can be its invoice
+_ORDER_MATCH_ACTOR = "auto (sales order matched to its invoice)"
+
+
+def _date_of(value):
+    """A record's date text ('2026-09-17', '09/17/2026', ...) as a date, or None."""
+    s = str(value or "").strip()[:10]
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return datetime.strptime(s, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _same_order_number(order_number, invoice_number):
+    """The invoice carries the order's number: equal once normalized, or the order number plus a suffix
+    (order '1618282' -> invoice '1618282-IN'), the same rule as database.find_recorded_invoice_ref."""
+    o, i = _norm(order_number or ""), _norm(invoice_number or "")
+    return bool(o and i) and (i == o or i.startswith(o))
+
+
+def _order_record(order, invoices):
+    """The invoices row a RELEASED sales order was recorded as: its own file, vendor and order number."""
+    fn = (order.get("snapshot") or {}).get("filename") or order.get("source_file")
+    vkey = _dedupe_vendor_key(order.get("vendor_matched") or "")
+    return next((i for i in invoices if i["email_filename"] == fn
+                 and _dedupe_vendor_key(i["vendor_matched"] or "") == vkey
+                 and _norm(i["invoice_number"] or "") == _norm(order.get("number") or "")), None)
+
+
+def _order_invoices(order, invoices, skip_ids=(), after_id=None):
+    """The invoices that are this sales order's own invoice (2026-10-14): same vendor (standard name) and
+    store, and either the order's number (any amount: the invoice wins), or, when the number differs, the
+    same amount dated within SALES_ORDER_MATCH_DAYS of the order. Number matches come first."""
+    vkey = _dedupe_vendor_key(order.get("vendor_matched") or "")
+    odate = _date_of(order.get("order_date"))
+    by_number, by_amount = [], []
+    for inv in invoices:
+        if inv["id"] in skip_ids or (after_id is not None and inv["id"] <= after_id):
+            continue
+        if inv["store_matched"] != order.get("store_matched") or _dedupe_vendor_key(inv["vendor_matched"] or "") != vkey:
+            continue
+        if _same_order_number(order.get("number"), inv["invoice_number"]):
+            by_number.append(inv)
+        elif _amounts_equal(order.get("amount"), inv["amount"]):
+            idate = _date_of(inv["invoice_date"])
+            if odate and idate and abs((idate - odate).days) <= SALES_ORDER_MATCH_DAYS:
+                by_amount.append(inv)
+    return by_number or by_amount
+
+
+def _match_released_orders(db, released, invoices, order_record_ids):
+    """An invoice that arrives AFTER its sales order was released and recorded (2026-10-14, Joel's rules):
+      - the order's record is not entered in QuickBooks yet: the invoice wins — the order's record is set
+        aside as replaced, and the invoice is live even if the duplicate check had ignored it as a copy;
+      - it was entered and the amounts match: the invoice is a duplicate (kept out), and the entered
+        record now shows the invoice's document;
+      - it was entered and the amount changed: the invoice is flagged for a person, grouped with the order;
+      - both are already marked entered: flagged for a person — QuickBooks may hold the bill twice.
+    Several candidate invoices: all are flagged for a person. The same order held twice (two order rows,
+    one record) is resolved once. Returns how many orders were resolved."""
+    import secrets
+    done = 0
+    resolved_records = {}                # order record id -> what it was matched to (an order held twice)
+    by_id = {i["id"]: i for i in invoices}
+
+    def apply(order_id, ref, changes):
+        db.resolve_order_with_invoice(order_id, ref, changes, _ORDER_MATCH_ACTOR)
+        for rid, cols in changes:        # keep the in-memory copy current for the orders still to come
+            if rid in by_id:
+                by_id[rid].update(cols)
+
+    for o in released:
+        rec = _order_record(o, invoices)
+        if not rec:
+            continue
+        if rec["id"] in resolved_records:
+            apply(o["id"], resolved_records[rec["id"]], [])
+            continue
+        if rec["duplicate_ignored"]:
+            continue
+        cands = [i for i in _order_invoices(o, invoices, skip_ids=order_record_ids, after_id=rec["id"])
+                 if not i["duplicate_ignored"] or (i["duplicate_of"] or "") == rec["email_filename"]]
+        if not cands:
+            continue
+        gid = rec["duplicate_group_id"] or next((i["duplicate_group_id"] for i in cands if i["duplicate_group_id"]),
+                                                None) or secrets.token_hex(4).upper()
+        onum = o.get("number") or "(no #)"
+        if len(cands) > 1:
+            nums = ", ".join(f"#{i['invoice_number'] or '?'}" for i in cands)
+            reason = (f"Sales order #{onum} (${float(o.get('amount') or 0):,.2f}) matches several invoices ({nums}); "
+                      f"keep the one that is its invoice.")
+            changes = [(i["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
+                                  "duplicate_reason": reason}) for i in cands]
+            changes.append((rec["id"], {"duplicate_suspect": True, "duplicate_group_id": gid, "duplicate_reason": reason}))
+            apply(o["id"], "several: " + nums, changes)
+            resolved_records[rec["id"]] = "several: " + nums
+            done += 1
+            continue
+        inv = cands[0]
+        inum = inv["invoice_number"] or "(no #)"
+        same_amount = _amounts_equal(rec["amount"], inv["amount"])
+        if rec["entered_in_qb"] and inv["entered_in_qb"]:
+            reason = (f"Sales order #{onum} and its invoice #{inum} are BOTH marked entered in QuickBooks — check "
+                      f"QuickBooks for a double entry, then keep one.")
+            changes = [(inv["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
+                                    "duplicate_reason": reason}),
+                       (rec["id"], {"duplicate_suspect": True, "duplicate_group_id": gid, "duplicate_reason": reason})]
+        elif not rec["entered_in_qb"]:
+            changes = [(rec["id"], {"duplicate_ignored": True, "duplicate_suspect": False, "duplicate_of": inv["email_filename"],
+                                    "duplicate_group_id": gid,
+                                    "duplicate_reason": f"Sales order #{onum} replaced by its invoice #{inum} "
+                                                        f"(not entered in QuickBooks yet, so the invoice is kept)."})]
+            # Live again only if the duplicate check had set it aside because of this order's record.
+            if inv["duplicate_ignored"] or (inv["duplicate_suspect"] and inv["duplicate_group_id"]
+                                            and inv["duplicate_group_id"] == rec["duplicate_group_id"]):
+                changes.append((inv["id"], {"duplicate_ignored": False, "duplicate_suspect": False, "duplicate_of": None,
+                                            "duplicate_group_id": gid, "duplicate_reason": None}))
+            else:
+                changes.append((inv["id"], {"duplicate_group_id": gid}))
+        elif same_amount:
+            note = (f"[Invoice #{inum} arrived after this sales order was entered in QuickBooks as #{onum}; "
+                    f"this record now shows the invoice's document.]")
+            rec_cols = {"duplicate_group_id": gid, "notes": ((rec["notes"] or "") + " " + note).strip()}
+            if inv["file_path"]:
+                rec_cols["file_path"] = inv["file_path"]
+            changes = [(rec["id"], rec_cols),
+                       (inv["id"], {"duplicate_ignored": True, "duplicate_suspect": False, "duplicate_of": rec["email_filename"],
+                                    "duplicate_group_id": gid,
+                                    "duplicate_reason": f"Invoice for sales order #{onum}, already entered in QuickBooks "
+                                                        f"with the same amount: kept out."})]
+        else:
+            reason = (f"Sales order #{onum} was entered in QuickBooks for ${float(rec['amount'] or 0):,.2f}; its invoice "
+                      f"#{inum} says ${float(inv['amount'] or 0):,.2f}. Check the QuickBooks entry, then keep one.")
+            changes = [(inv["id"], {"duplicate_suspect": True, "duplicate_ignored": False, "duplicate_group_id": gid,
+                                    "duplicate_reason": reason}),
+                       (rec["id"], {"duplicate_group_id": gid})]
+        apply(o["id"], inum, changes)
+        resolved_records[rec["id"]] = inum
+        done += 1
+    return done
+
+
 def reconcile_sales_orders(run_id):
     """After this run's records are saved: for each HELD sales order, SUPERSEDE it if a
-    real invoice (same vendor + normalized number) is now recorded; else RELEASE it (record
+    real invoice (same vendor + normalized number, or since 2026-10-14 the same vendor, store and
+    amount dated within SALES_ORDER_MATCH_DAYS) is now recorded; else RELEASE it (record
     it via the normal save path + queue it if it needs review) once the hold window elapsed;
-    else keep it held. DB-only; a no-op with no held orders."""
+    else keep it held. Then match RELEASED orders to an invoice that arrived after their release
+    (_match_released_orders). DB-only; a no-op with no held or recently released orders."""
     if not USE_DB:
         return
     db = _database()
     held = db.load_held_sales_orders()
-    if not held:
+    released = db.load_released_sales_orders()
+    if not held and not released:
         return
+    invoices = db.invoices_for_order_matching({o.get("store_matched") for o in held + released if o.get("store_matched")})
+    order_record_ids = {r["id"] for r in (_order_record(o, invoices) for o in released) if r}
     now = datetime.now(timezone.utc)
     superseded_n = 0
     release = []
+    ambiguous = {}           # held order id -> several invoices matching it by amount only
     for o in held:
         inv_ref = db.find_recorded_invoice_ref(o.get("vendor_matched"), o.get("number"))
+        if not inv_ref:
+            # The same order invoiced under a different number: same vendor, store and amount, dated close.
+            # (Also catches the order's own number under another spelling of the vendor: the lookup above
+            # compares printed spellings, _order_invoices standard names.) Several amount-only matches can't
+            # be told apart: the order goes to review when it's released, naming them (below).
+            live = [i for i in invoices if not i["duplicate_ignored"]]
+            match = _order_invoices(o, live, skip_ids=order_record_ids)
+            if len(match) == 1 or (match and all(_same_order_number(o.get("number"), m["invoice_number"])
+                                                 for m in match)):
+                inv_ref = match[0]["invoice_number"] or f"record {match[0]['id']}"
+            elif match:
+                ambiguous[o["id"]] = match
         if inv_ref:
             db.set_sales_order_status(o["id"], "superseded", matched_invoice=inv_ref)
             superseded_n += 1
@@ -3983,6 +4149,16 @@ def reconcile_sales_orders(run_id):
         history = load_history()
         payment_history = load_payment_history()
         _flag_orders_already_recorded(results, history)
+        # Several invoices matched this order by vendor, store and amount only: a person picks.
+        for o, res in zip(release, results):
+            cands = ambiguous.get(o["id"])
+            for inv in (res["classification"].get("invoices") or []) if cands else []:
+                inv["needs_human_review"] = True
+                nums = ", ".join(f"#{c['invoice_number'] or '?'}" for c in cands)
+                _append_text(inv, "review_reason",
+                             f"Sales order #{o.get('number') or '?'} has the same vendor, store and amount as several "
+                             f"invoices ({nums}). If one of them is its invoice, ignore this order; otherwise "
+                             f"answer to record it.")
         apply_duplicate_checks(results, history, payment_history)
         new_rows, review_dropped = build_result_rows(results)
         # A late gate here would otherwise leave a history-only orphan; strip those ledger rows
@@ -4019,6 +4195,9 @@ def reconcile_sales_orders(run_id):
     if superseded_n or release:
         print(f"Sales orders: superseded {superseded_n} (an invoice arrived), "
               f"released {len(release)} (hold elapsed, recorded now).")
+    matched = _match_released_orders(db, released, invoices, order_record_ids)
+    if matched:
+        print(f"Sales orders: matched {matched} released order(s) to the invoice that came after them.")
 
 
 def _group_id_for(prior, record_type):
@@ -5840,8 +6019,17 @@ def main():
         learnings_hash_now = hashlib.sha256((learnings_text or "").encode("utf-8")).hexdigest()
         prev_hash = _database().get_last_learnings_hash(run_id)
         if prev_hash and prev_hash != learnings_hash_now and recheck_candidates:
+            # Record the new hash NOW, not only when the run finishes: a re-check cut off by the run's
+            # 90-minute limit used to start over on every following run. And stop after
+            # RECHECK_MAX_MINUTES so new email still gets its turn; items not reached keep their flags.
+            _database().set_run_learnings_hash(run_id, learnings_hash_now)
+            recheck_until = datetime.now() + timedelta(minutes=RECHECK_MAX_MINUTES)
             resolved_ids = set()
-            for r in recheck_candidates:
+            for i_r, r in enumerate(recheck_candidates):
+                if datetime.now() > recheck_until:
+                    print(f"  Stopped the learnings re-check after {RECHECK_MAX_MINUTES} minutes "
+                          f"({i_r} of {len(recheck_candidates)} item(s) checked); the rest keep their flags.")
+                    break
                 filename = r.get("Filename")
                 src = REVIEW_PENDING_DIR / (filename or "")
                 if not src.exists():
