@@ -6610,3 +6610,58 @@ then.
 
 Tests: SplitPayments in test_rule_decisions (2). The suite has 201. Pipeline only, so it runs from the next classify
 run.
+
+### Dashboard "Ready to export"; what became of held sales orders (2026-10-14, ~15:40)
+
+**Ready to export** (Joel). The dashboard's "Last QuickBooks entry by store" table has a new column, per store, from
+`last_qb_entry_by_store()` (`ready`, `ready_bills`, `ready_payments`).
+- It shows what's waiting to be entered now, using dashboard_counts' own conditions:
+  - bills and credits as on QB entry (not entered / skip-QB / set aside / flagged);
+  - payments as on "Payments to enter".
+- The total is followed by "(N on QB entry · N payments)", each linking to its page for that store.
+- On 10/14: Maple 174 (36 + 138), Madison 69, Refuah 174, Westgate 131, 3M 97, BMW 12, Lakewood Rx 29, Carepax 1.
+- Test +1. Web restart needed.
+
+**Held sales orders, Aug 27 – Oct 14** (read-only analysis, Joel's request).
+- 186 orders held. 151 were from excluded wholesalers (BluPax 82, ParMed 65, McKesson, Amazon Business): never in
+  QB, so the hold changes nothing there.
+- 35 were from vendors entered in QB:
+  - 5 replaced by their invoice during the hold (Freeda ×2, Bluebonnet ×2, Venture Respiratory);
+  - 1 still held (Rockland $869.50, to 10/17);
+  - 29 released after the hold.
+- Of the 29 released:
+  - 23 never got a separate invoice; the order (or priced packing slip) was the bill. Shaklee, Releaf, Fun Salon,
+    Melissa & Doug, Forever Living, Venture, iHerb, B&H, Frida, Rockland "Accept Order", Bened Life (released by Yishai
+    on 10/14 via Release now).
+  - 5 orders (6 rows: Rockland was held twice) got their invoice afterwards: Bluebonnet #1618282 (0.6 days), Donna Bee
+    #3575 (2 days), Masterko #35045 (11), Rockland #9636677 → #34910 (13–18), Wellspring #1730473 (26).
+- Outcomes of those 5:
+  - 4 ended with one copy (the order's set aside; Wellspring's invoice is waiting for entry);
+  - Rockland's order AND invoice are both entered in QB ($421.20). That's the one double entry, from before the
+    post-release matcher; flagged 10/14.
+- Takeaways:
+  - The 3-day hold rarely catches the invoice. Late invoices come 11–26 days on; the post-release matcher (45-day
+    look-back) now covers them.
+  - Possible next steps, not done:
+    - don't hold excluded wholesalers' orders (151 of 186 holds);
+    - a per-vendor "orders are the bill, no hold". Not for Masterko or Rockland, which do send invoices later.
+- Also: B&H Photo #1132327571 ($303.87, Westgate) has been waiting for QB entry since 9/7.
+
+### Excluded wholesalers' sales orders aren't held (2026-10-14, ~16:00)
+
+Joel: "yes" to "stop holding excluded wholesalers' orders" (151 of the 186 holds since 8/27; their bills never go to
+QuickBooks).
+- New `apply_excluded_vendor_order_check(c)` runs right after `apply_released_order_check` in `process_source_email`.
+  For an `is_sales_order` invoice whose vendor `is_excluded_vendor`, it clears `is_sales_order` and adds a note
+  "[Sales order from an excluded vendor: recorded right away, not held …]".
+- The order then records like any excluded-vendor bill: skip_qb_import, no review.
+- The 11 excluded-vendor orders on hold (ParMed ×9, Amazon Business ×2) were released with
+  `release_sales_order_now`, logged `claude (asked by joel)`. The next run records them as excluded bills.
+- Rockland ($869.50) stays held to 10/17.
+- Test: ExcludedVendorOrdersAreNotHeld. The suite has 203. Pipeline only, so it applies from the next run.
+
+**Payments taken off the dashboard table (2026-10-14, Joel: "too messy and unnecessary").**
+- "Last QuickBooks entry by store" counts only QB entry records (invoices and credit memos) in all three columns.
+- "Ready to export" is a single number linking to /qb?store=… (10/14: Maple 36, Madison 18, Refuah 95, Westgate 66,
+  3M 18, BMW 10, Lakewood Rx 19, Carepax 1).
+- `last_qb_entry_by_store` returns `ready` only.

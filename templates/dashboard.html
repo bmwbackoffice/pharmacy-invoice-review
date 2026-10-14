@@ -50,18 +50,24 @@
 
 {% if qb_entry %}
 <h3 class="dashsection">Last QuickBooks entry by store</h3>
-<p class="muted">When each store's records were last marked entered in QuickBooks (someone clicking "mark entered" on
-  QB entry or Payments; automatic marks such as the QuickBooks reconcile import don't count), and how many records
-  that sitting covered (marks with no gap over {{ qb_entry_gap }} minutes).</p>
+<p class="muted">Invoices and credit memos on QB entry (no payments): when each store's were last marked entered in
+  QuickBooks (someone clicking "mark entered"; automatic marks such as the QuickBooks reconcile import don't count),
+  how many that sitting covered (marks with no gap over {{ qb_entry_gap }} minutes), and how many are
+  <strong>ready to export</strong> now.</p>
 <div class="card" style="display:inline-block; padding:6px 12px;">
   <table style="width:auto;">
-    <thead><tr><th>Store</th><th>Entered to QB</th><th style="text-align:right;">Records</th></tr></thead>
+    <thead><tr><th>Store</th><th>Entered to QB</th><th style="text-align:right;">Records</th>
+      <th style="text-align:right;" title="Invoices and credit memos on QB entry, not yet entered">Ready to export</th></tr></thead>
     <tbody>
     {% for s in qb_entry %}
       <tr>
         <td><a href="/qb?store={{ s.store | urlencode }}&entered=yes" title="What was entered for this store">{{ (s.store | store_label) or s.store }}</a></td>
         <td>{{ (s.last_at | us_datetime) if s.last_at else '—' }}</td>
         <td style="text-align:right;">{{ s.count if s.last_at else '—' }}</td>
+        <td style="text-align:right;">
+          {% if s.ready %}<a href="/qb?store={{ s.store | urlencode }}" title="Open QB entry for this store"><strong>{{ s.ready }}</strong></a>
+          {% else %}<span class="muted">0</span>{% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>

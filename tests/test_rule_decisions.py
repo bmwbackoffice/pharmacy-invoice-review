@@ -122,6 +122,18 @@ class BackOfficeGoods(unittest.TestCase):
         self.assertFalse(rec["needs_human_review"], "a reviewer's answer stands")
 
 
+class ExcludedVendorOrdersAreNotHeld(unittest.TestCase):
+    def test_excluded_vendor_order_is_recorded_not_held(self):
+        with mock.patch.object(ce, "load_excluded_vendors", return_value=["Parmed", "BluPax"]):
+            c = {"invoices": [{"vendor_matched": "ParMed", "invoice_number": "1140057240", "is_sales_order": True},
+                              {"vendor_matched": "Bened Life", "invoice_number": "126877", "is_sales_order": True}]}
+            ce.apply_excluded_vendor_order_check(c)
+        parmed, bened = c["invoices"]
+        self.assertFalse(parmed["is_sales_order"])
+        self.assertIn("excluded vendor: recorded right away, not held", parmed["notes"])
+        self.assertTrue(bened["is_sales_order"], "a QuickBooks vendor's order is still held")
+
+
 class CardVersusDocument(unittest.TestCase):
     def setUp(self):
         self._saved = ce.CARD_STORE_MAP
@@ -333,6 +345,16 @@ class LastQbEntryByStore(_DbCase):
         expected = self.cur.fetchone()[0]
         self.assertLess(abs((row["last_at"] - expected).total_seconds()), 5, "the reconcile and auto marks don't count")
         self.assertEqual(row["count"], 3, "10, 20 and 70 minutes ago are one sitting; 5 hours ago is an earlier one")
+
+    def test_ready_to_export_counts_qb_entry_records_only(self):
+        self.cur.execute("INSERT INTO stores (store_name, created_by) VALUES ('ZZTEST Ready Store', 'zz')")
+        self.invoice(store="ZZTEST Ready Store")                                     # ready
+        rid, _ = self.invoice(store="ZZTEST Ready Store")                            # flagged: not ready
+        self.cur.execute("UPDATE invoices SET duplicate_suspect = TRUE WHERE id = %s", (rid,))
+        self.cur.execute("INSERT INTO payments (email_filename, vendor_matched, store_matched, amount, entered_in_qb) "
+                         "VALUES (%s, 'ZZTEST Rule Vendor', 'ZZTEST Ready Store', 5, FALSE)", (self.email(),))
+        row = next(r for r in web_db.last_qb_entry_by_store() if r["store"] == "ZZTEST Ready Store")
+        self.assertEqual(row["ready"], 1, "the flagged invoice and the payment don't count")
 
     def test_a_store_with_no_clicks_shows_none(self):
         self.cur.execute("INSERT INTO stores (store_name, created_by) VALUES ('ZZTEST Quiet Store', 'zz')")

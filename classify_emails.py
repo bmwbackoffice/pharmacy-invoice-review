@@ -4093,6 +4093,22 @@ def _flag_orders_already_recorded(results, history):
     return flagged
 
 
+def apply_excluded_vendor_order_check(classification):
+    """No hold for an excluded vendor's sales order (2026-10-14, Joel: "yes" to "stop holding excluded wholesalers'
+    orders"). Their bills never go to QuickBooks, so the 3-day hold (151 of the first 186 holds: BluPax, ParMed, …)
+    only delayed recording. The order is recorded right away like any excluded-vendor bill (skip_qb_import, no
+    review), with a note. Runs before apply_review_gates, like apply_released_order_check."""
+    if not classification:
+        return
+    for inv in classification.get("invoices") or []:
+        if inv.get("is_sales_order") and is_excluded_vendor(inv.get("vendor_matched")):
+            inv["is_sales_order"] = False
+            _append_text(inv, "notes", "[Sales order from an excluded vendor: recorded right away, not held "
+                                       "(never entered in QuickBooks).]")
+            print(f"  {inv.get('vendor_matched')} #{inv.get('invoice_number')}: excluded vendor's sales order "
+                  f"-> recorded, not held.")
+
+
 def apply_released_order_check(classification):
     """Record an order whose hold already ran out instead of holding it AGAIN. A held order that's
     released goes to review when it needs a person; answering it reprocesses a document that still
@@ -6025,6 +6041,7 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
         apply_reviewer_fixes(c, reviewer_answer)
         # An order already released from its hold is an invoice now (don't hold it again).
         apply_released_order_check(c)
+        apply_excluded_vendor_order_check(c)      # excluded wholesalers' orders aren't held (2026-10-14)
         # Make the review-routing decision FINAL here (before file-saving / newly_flagged /
         # duplicate-checks assume a record's fate) — otherwise a gate-flagged record vanishes.
         apply_review_gates(c)

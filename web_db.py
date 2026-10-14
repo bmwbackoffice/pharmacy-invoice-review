@@ -3197,11 +3197,12 @@ QB_ENTRY_GAP_MINUTES = 60   # marks this close together count as one sitting at 
 def last_qb_entry_by_store(gap_minutes=QB_ENTRY_GAP_MINUTES):
     """For the dashboard (Joel, 2026-10-14: "the last date we made an import for each store … track every time
     someone clicks 'entered to QB'"): per store, when records were last marked entered in QuickBooks by a
-    person, and how many records that sitting covered. A sitting is a run of marks with no gap longer than
-    `gap_minutes`. Invoices, credit memos and payments all count. Automatic marks don't: the QB reconcile
+    person, how many records that sitting covered, and how many are ready to enter now. A sitting is a run of
+    marks with no gap longer than `gap_minutes`. Only QB entry records count, invoices and credit memos; payments
+    were taken off (Joel: "too messy and unnecessary"). Automatic marks don't count either: the QB reconcile
     import / recheck / confirm / unmatched backfill ("… via …") and "auto-…" ones. Uses the records' own
     entered_qb_at / entered_qb_by, so a mark someone later undid isn't counted. Returns
-    [{"store", "last_at", "count"}] in the stores' display order; last_at is None for a store with no
+    [{"store", "last_at", "count", "ready"}] in the stores' display order; last_at is None for a store with no
     entries in the last 180 days."""
     conn = connect()
     try:
@@ -3211,14 +3212,24 @@ def last_qb_entry_by_store(gap_minutes=QB_ENTRY_GAP_MINUTES):
                     SELECT store_matched, entered_qb_at, entered_qb_by FROM invoices WHERE entered_in_qb IS TRUE
                     UNION ALL
                     SELECT store_matched, entered_qb_at, entered_qb_by FROM credit_memos WHERE entered_in_qb IS TRUE
-                    UNION ALL
-                    SELECT store_matched, entered_qb_at, entered_qb_by FROM payments WHERE entered_in_qb IS TRUE
                 ) x
                 WHERE entered_qb_at > now() - interval '180 days'
                   AND coalesce(btrim(entered_qb_by), '') <> ''
                   AND entered_qb_by NOT ILIKE '%% via %%' AND entered_qb_by NOT ILIKE 'auto%%'
                 ORDER BY entered_qb_at DESC""")
             marks = cur.fetchall()
+            # Ready to export now, per store (Joel, 2026-10-14): the dashboard's own QB entry conditions
+            # (dashboard_counts), so the number matches what the QB entry page shows for that store.
+            cur.execute("""
+                SELECT lower(btrim(coalesce(store_matched, ''))), count(*) FROM (
+                    SELECT store_matched FROM invoices
+                     WHERE entered_in_qb IS NOT TRUE AND skip_qb_import IS NOT TRUE
+                       AND duplicate_ignored IS NOT TRUE AND duplicate_suspect IS NOT TRUE
+                    UNION ALL
+                    SELECT store_matched FROM credit_memos
+                     WHERE entered_in_qb IS NOT TRUE AND skip_qb_import IS NOT TRUE
+                ) r GROUP BY 1""")
+            ready = dict(cur.fetchall())
     finally:
         conn.close()
     by_store = {}
@@ -3232,7 +3243,8 @@ def last_qb_entry_by_store(gap_minutes=QB_ENTRY_GAP_MINUTES):
             if i and (times[i - 1] - at).total_seconds() > gap_minutes * 60:
                 break
             count += 1
-        out.append({"store": name, "last_at": times[0] if times else None, "count": count})
+        out.append({"store": name, "last_at": times[0] if times else None, "count": count,
+                    "ready": ready.get(name.strip().lower(), 0)})
     return out
 
 
