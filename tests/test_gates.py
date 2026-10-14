@@ -113,3 +113,95 @@ class Routing(PureTestCase):
 if __name__ == "__main__":
     import unittest
     unittest.main()
+
+
+class RecordlessEmailsAndIgnoredConfirmations(PureTestCase):
+    """2026-10-13: 17 payments sat on Payments with no amount or date. The AI typed each email as a payment
+    but extracted no payment, and the pipeline saved an EMPTY payment row that skipped every check. Those
+    emails now go to review. And utility payment confirmations (NJNG, JCP&L AutoPay) are ignored when the
+    vendor is ticked "Ignore payment confirmations" in Setup."""
+
+    def setUp(self):
+        super().setUp()
+        k = ce._norm_vendor_std_key
+        ce.VENDOR_STD = {"lookup": {k("NJNG"): "NJ Natural Gas", k("NJ Natural Gas"): "NJ Natural Gas",
+                                    k("Herbal Health USA"): "Herbal Health USA"},
+                         "ignored_confirmations": {"NJ Natural Gas"}, "trusted_totals": set(),
+                         "vendor_names": {}, "account_names": {}, "vendor_account": {}}
+
+    @staticmethod
+    def email(etype, vendor, payments=None, **kw):
+        c = {"email_type": etype, "vendor_matched": vendor, "store_matched": "3M Pharmacy",
+             "needs_human_review": False, "review_reason": "", "invoices": [], "credit_memos": [],
+             "payments": payments or []}
+        c.update(kw)
+        return c
+
+    @staticmethod
+    def pay(vendor, amount=55.0, date="2026-09-17"):
+        return {"vendor_matched": vendor, "store_matched": "Lakewood Rx", "reference_number": "1",
+                "payment_date": date, "payment_amount": amount, "needs_human_review": False}
+
+    def test_recordless_payment_email_goes_to_review_not_an_empty_row(self):
+        c = self.email("payment", "Herbal Health USA")         # Paid Invoice #2653: no amount anywhere
+        ce.apply_review_gates(c)
+        self.assertTrue(c["needs_human_review"])
+        self.assertIn("looks like a payment", c["review_reason"])
+        ce.apply_review_gates(c)                               # gates run twice: sentence once
+        self.assertEqual(c["review_reason"].count("looks like a payment"), 1)
+        rows, _ = ce.build_result_rows([{"filename": "x.eml", "classification": c}])
+        self.assertEqual(rows, [], "a flagged whole email has no record row")
+        self.assertTrue(ce.result_has_review({"classification": c}))
+
+    def test_recordless_invoice_email_goes_to_review_too(self):
+        c = self.email("invoice", "Herbal Health USA")
+        ce.apply_review_gates(c)
+        self.assertIn("looks like an invoice", c["review_reason"])
+
+    def test_informational_email_is_left_alone(self):
+        for etype in ("statement", "correspondence", "shipment_notice"):
+            c = self.email(etype, "Herbal Health USA")
+            ce.apply_review_gates(c)
+            self.assertFalse(c["needs_human_review"], etype)
+
+    def test_no_empty_record_even_unflagged(self):
+        """Excel mode or any path where the gate didn't run: still no empty payment row."""
+        c = self.email("payment", "Herbal Health USA")
+        rows, _ = ce.build_result_rows([{"filename": "x.eml", "classification": c}])
+        self.assertEqual([r["Record Type"] for r in rows], ["informational"])
+        self.assertEqual(rows[0]["Email Type"], "payment", "the email keeps its own type")
+
+    def test_reviewer_answer_is_trusted(self):
+        c = self.email("payment", "Herbal Health USA", _reviewer_answered=True)
+        ce.apply_review_gates(c)
+        self.assertFalse(c["needs_human_review"], "the model followed the person; no loop")
+
+    def test_ignored_vendor_payments_are_dropped_not_reviewed(self):
+        c = self.email("payment", "NJNG", payments=[self.pay("NJNG", amount=None, date="")])
+        ce.apply_review_gates(c)
+        self.assertEqual(c["payments"], [])
+        self.assertFalse(c["needs_human_review"], "no amount/date gate, no record-less flag")
+        rows, _ = ce.build_result_rows([{"filename": "x.eml", "classification": c}])
+        self.assertEqual([r["Record Type"] for r in rows], ["informational"])
+
+    def test_recordless_payment_email_from_ignored_vendor_is_informational(self):
+        c = self.email("payment", "NJNG")
+        ce.apply_review_gates(c)
+        self.assertFalse(c["needs_human_review"])
+
+    def test_other_vendors_payments_are_kept(self):
+        c = self.email("payment", "NJNG", payments=[self.pay("NJNG"), self.pay("Herbal Health USA")])
+        ce.apply_review_gates(c)
+        self.assertEqual([p["vendor_matched"] for p in c["payments"]], ["Herbal Health USA"])
+
+    def test_exact_spelling_only(self):
+        """Never a near miss: 'NJNG Services' isn't a listed spelling, so it's kept."""
+        c = self.email("payment", "x", payments=[self.pay("NJNG Services")])
+        ce.apply_review_gates(c)
+        self.assertEqual(len(c["payments"]), 1)
+
+    def test_nothing_ignored_without_the_setting(self):
+        ce.VENDOR_STD["ignored_confirmations"] = set()
+        c = self.email("payment", "NJNG", payments=[self.pay("NJNG")])
+        ce.apply_review_gates(c)
+        self.assertEqual(len(c["payments"]), 1)

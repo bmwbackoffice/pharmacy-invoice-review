@@ -5897,3 +5897,55 @@ The suite now has 125 tests, all passing. Live data was checked unchanged afterw
 The tests that read the run log (`test_run_now_banner`, `test_dashboard_labels`) now point `SCHEDULED_RUNS_DIR` at a
 temp folder too, so a real run going at the time can't affect them. The suite has 135 tests, all passing; one test
 skips itself while a real run holds the lock.
+
+### FIX: no more empty payment / invoice records; "Ignore payment confirmations" vendor setting (2026-10-13)
+
+**Root cause.** Found while re-reading the 17 payments that were missing a store, date or amount.
+- When the AI typed an email as an invoice, credit memo or payment but extracted no record of that kind,
+  `build_result_rows` saved an informational row with `Record Type` = the email type.
+- `save_results` then inserted an EMPTY payment or invoice: vendor, store and reference only, no amount or date.
+- That row skipped every review check. It's how the 17 payments (and the 13 bills of 10/8) got there, and the
+  rerun recreated 4 of them.
+
+**Fix ([classify_emails.py](classify_emails.py)).**
+- `apply_recordless_gate`, run at the end of `apply_review_gates`, flags such an email as a whole:
+  `needs_human_review` plus the reason "This email looks like a payment, but no payment with an amount and date
+  could be read from it — answer with the amount, date and store to enter it, or ignore it…". It becomes a
+  whole-email review item.
+- It doesn't fire on a reprocess with a reviewer's answer (`_reviewer_answered`), so it can't loop, or for ignored
+  payment confirmations (below).
+- `build_result_rows` never writes a record row for a record-less email: `Record Type` is "informational", and the
+  emails row keeps its own email type.
+
+**Setting: Setup › Vendor names › "Ignore payment confirmations".**
+- New column `vendor_name_map.ignore_payment_confirmations` (migration). `load_vendor_standardization()` returns
+  `ignored_confirmations`.
+- `apply_review_gates` drops, before any gate, the payments whose vendor matches a ticked vendor EXACTLY on its
+  spellings (`_ignores_payment_confirmations`). It logs "ignored N payment confirmation(s)".
+- A payment email from such a vendor, or one whose payments were all dropped, is just informational: no payment
+  recorded, nothing sent to review.
+
+**Joel's decision (10/13): utility payment confirmations are ignored.** Applied, logged as `claude (asked by joel)`:
+- ticked NJ Natural Gas (#399, plus the spelling "NJNG"), Jersey Central Power and Light (#687) and Jersey Central
+  Power & Light (#689);
+- NJNG payments #961–#964 ignored by hand;
+- JCP&L review items #3955 and #3956 dismissed (Ignored tab).
+
+Not touched:
+- NJNG review #3669 ("Your New Jersey Natural Gas Bill is Due Today", $55) is a BILL, not a confirmation, so it
+  stays in review. Its "no vendor mapping for NJNG" reason is fixed by the new spelling, but it clears only on a
+  reprocess or an answer.
+- Spellings the rule doesn't match yet: "JCP&L" and "Jersey Central Power & Light (JCP&L)". Add them in Setup if
+  emails use them.
+
+**Card mapping (Joel's question).** Mapping a card on /cards (`web_db.assign_card_store`) affects only documents
+read afterwards:
+- it doesn't update saved invoices or payments;
+- it doesn't update review items, which have no card field; they pick it up only when re-read.
+
+Card 6641 → Maple: its 17 saved payments were already Maple, and no invoice has that card.
+
+**Tests and rollout.**
+- `tests/test_gates.py` › `RecordlessEmailsAndIgnoredConfirmations`, 10 tests. The suite has 145 tests, all
+  passing.
+- The pipeline change applies from the next classify run. The Setup checkbox needs a web-app restart.

@@ -1041,6 +1041,44 @@ def _trusts_line_item_totals(rec):
     return VENDOR_STD["lookup"].get(_norm_vendor_std_key(name)) in trusted
 
 
+def _ignores_payment_confirmations(vendor):
+    """True when `vendor` is ticked "Ignore payment confirmations" in Setup › Vendor names (2026-10-13:
+    utility "payment received" / AutoPay emails, already seen in the bank). Matched EXACTLY on any of
+    that vendor's spellings, never fuzzily, so another vendor's payments are never dropped by a
+    near-miss. False in Excel mode or before the standardization tables load."""
+    ignored = (VENDOR_STD or {}).get("ignored_confirmations")
+    if not ignored or not (vendor or "").strip():
+        return False
+    return VENDOR_STD["lookup"].get(_norm_vendor_std_key(vendor)) in ignored
+
+
+_RECORD_EMAIL_TYPES = ("invoice", "credit_memo", "payment")
+
+
+def apply_recordless_gate(classification):
+    """An email the AI typed as an invoice, credit memo or payment that holds no record of any kind
+    used to be saved as an EMPTY record (vendor and store, no amount or date) that skipped every review
+    check: on 2026-10-13, 17 payments sat on Payments like that. Now the whole email goes to review, so
+    a person enters it (answers with the amount, date and store) or ignores it. Not when its payments
+    were dropped as ignored confirmations, or for a payment email from a vendor whose confirmations are
+    ignored: that email is just informational. Not on a reprocess with a reviewer's answer either: the
+    model followed the person (e.g. "nothing to enter"), so this can't loop. Idempotent."""
+    if not classification or _all_records(classification) or classification.get("_reviewer_answered"):
+        return
+    etype = (classification.get("email_type") or "").strip().lower()
+    if etype not in _RECORD_EMAIL_TYPES:
+        return
+    if etype == "payment" and (classification.get("_ignored_confirmations")
+                               or _ignores_payment_confirmations(classification.get("vendor_matched"))):
+        return
+    label = etype.replace("_", " ")
+    classification["needs_human_review"] = True
+    _append_text(classification, "review_reason",
+                 f"This email looks like a{'n' if label[0] in 'aeiou' else ''} {label}, but no {label} with an "
+                 f"amount and date could be read from it — answer with the amount, date and store to enter "
+                 f"it, or ignore it if there's nothing to enter.")
+
+
 def apply_amount_review_gate(rec, amount_field):
     """Deterministic safety net: a record with no usable amount, or one whose amount was
     COMPUTED from line items rather than read from a printed total, must not reach QB entry
@@ -1107,11 +1145,21 @@ def apply_review_gates(classification):
         apply_amount_review_gate(cm, "credit_amount")
         apply_vendor_standardization_gate(cm)
         apply_unlisted_skip_gate(cm, "credit_memo", classification)
-    for pay in classification.get("payments") or []:
+    # A vendor ticked "Ignore payment confirmations" (Setup): its payments are dropped here, before any
+    # gate, so they're neither recorded nor sent to review (2026-10-13).
+    pays = classification.get("payments") or []
+    kept = [p for p in pays if not _ignores_payment_confirmations(p.get("vendor_matched") or p.get("vendor_name_raw"))]
+    if len(kept) < len(pays):
+        classification["payments"] = kept
+        classification["_ignored_confirmations"] = classification.get("_ignored_confirmations", 0) + len(pays) - len(kept)
+        print(f"  ignored {len(pays) - len(kept)} payment confirmation(s) — vendor set to "
+              f"\"Ignore payment confirmations\" in Setup")
+    for pay in kept:
         apply_card_store_map(pay)
         apply_store_review_gate(pay, is_payment=True)
         apply_date_review_gate(pay, "payment_date")
         apply_amount_review_gate(pay, "payment_amount")
+    apply_recordless_gate(classification)
 
 
 # Vendor-scoped store rules (Setup › Store rules / store_scope_rules), loaded once per run in main().
@@ -4918,8 +4966,13 @@ def build_result_rows(results):
             if c.get("needs_human_review"):
                 continue
             row = dict(base)
+            # Never an invoice / credit memo / payment row: with no record it would be an EMPTY one (no
+            # amount or date) that skipped every review check (2026-10-13). apply_recordless_gate sends
+            # such emails to review; one that isn't flagged (an ignored payment confirmation) is just
+            # informational. The emails row keeps the email's own type (Email Type).
+            etype = c.get("email_type") or ""
             row.update({
-                "Record Type": c.get("email_type") or "",
+                "Record Type": "informational" if etype in _RECORD_EMAIL_TYPES else etype,
                 "Vendor Matched": c.get("vendor_matched") or "",
                 "Store Matched": c.get("store_matched") or "",
                 "Invoice #": c.get("reference_number") or "",

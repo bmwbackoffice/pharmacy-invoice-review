@@ -588,6 +588,10 @@ ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS exclude_from_statement_reco
 -- added up from the line items is accepted instead of sent to review. Off for every vendor until
 -- someone ticks it in Setup › Vendor names (2026-10-08). A missing/zero amount is still flagged.
 ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS trust_line_item_totals BOOLEAN NOT NULL DEFAULT FALSE;
+-- "Ignore payment confirmations" (2026-10-13): this vendor's payment confirmations (a utility's
+-- "payment received" / AutoPay emails, already seen in the bank) are read but not recorded as payments
+-- and not sent to review. Off for every vendor until someone ticks it in Setup › Vendor names.
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS ignore_payment_confirmations BOOLEAN NOT NULL DEFAULT FALSE;
 -- Which invoice a payment settles, when the remittance states it. Disambiguates a shared
 -- payment/batch reference_number applied to several different invoices in one document.
 ALTER TABLE payments        ADD COLUMN IF NOT EXISTS invoice_number TEXT;
@@ -1168,9 +1172,12 @@ def load_vendor_standardization():
     # Vendors ticked "Trust line-item totals" in Setup: their summed-from-line-items amounts
     # aren't sent to review (classify_emails.apply_amount_review_gate).
     trusted_totals = {r["standard_vendor_name"] for r in vn if r.get("trust_line_item_totals")}
+    # Vendors ticked "Ignore payment confirmations": their payments aren't recorded or reviewed
+    # (classify_emails.apply_review_gates).
+    ignored_confirmations = {r["standard_vendor_name"] for r in vn if r.get("ignore_payment_confirmations")}
     return {"lookup": lookup, "vendor_names": vendor_names,
             "account_names": account_names, "vendor_account": vendor_account,
-            "trusted_totals": trusted_totals}
+            "trusted_totals": trusted_totals, "ignored_confirmations": ignored_confirmations}
 
 
 # --------------------------------------------------------------------------- #

@@ -2546,13 +2546,17 @@ REFERENCE_PAGES = {
                  "“Trust line-item totals” is for vendors whose bills only list line "
                  "items (no printed total): an amount added up from the line items is "
                  "accepted instead of sent to review (a missing or zero amount still is). "
-                 "It applies to documents read after you tick it, matched on this "
-                 "vendor's exact spellings."),
+                 "“Ignore payment confirmations” is for vendors (utilities, for example) whose "
+                 "payment-received / AutoPay emails you don't enter because you see them in the "
+                 "bank: those emails are read but no payment is recorded and nothing goes to review. "
+                 "Both apply to documents read after you tick them, matched on this "
+                 "vendor's exact spellings, so add any spelling the emails use."),
         "columns": [
             {"name": "standard_vendor_name", "label": "Standard vendor", "type": "text", "required": True},
             {"name": "exclude_from_qb", "label": "Exclude from QB", "type": "checkbox"},
             {"name": "exclude_from_statement_recon", "label": "Exclude from stmt recon", "type": "checkbox"},
             {"name": "trust_line_item_totals", "label": "Trust line-item totals", "type": "checkbox"},
+            {"name": "ignore_payment_confirmations", "label": "Ignore payment confirmations", "type": "checkbox"},
             {"name": "aliases", "label": "Other spellings / variants", "type": "textarea"},
             {"name": "name_3m", "label": "3M", "type": "text"},
             {"name": "name_madison", "label": "Madison", "type": "text"},
