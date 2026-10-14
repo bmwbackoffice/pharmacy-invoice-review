@@ -2363,6 +2363,15 @@ _EXCLUDED_SKIP_NOTE = ("[review skipped: excluded vendor — not entered in Quic
                        "so no human review needed]")
 
 
+def excluded_vendor_items_to_clear(rows):
+    """Unanswered review rows a run re-reads because their vendor is now excluded, so they record as
+    review-skipped and leave the queue (LC-08). Never a payment item: payments aren't excluded, so it came
+    back flagged on every run and was re-read every run; a one-page receipt with 16 payments (BluPax,
+    2026-10-13) re-flagged all 16 each time and multiplied the queue."""
+    return [r for r in rows if is_excluded_vendor(r.get("Vendor Matched"))
+            and (r.get("Email Type") or "").strip().lower() != "payment"]
+
+
 def _record_needs_file(record, record_type):
     """Records that get a saved source document: non-skip invoices and credit
     memos (they land in qb_ready.xlsx), plus every payment (kept as proof of
@@ -5646,6 +5655,7 @@ def main():
     # for a clean retry — never moved-but-unsaved (no orphans).
     pending_moves = []       # (src Path, dst Path) to move after save
     pending_deletes = []     # split review files superseded on reprocess, deleted after save
+    resolved_review_files = []   # review rows resolved this run, deleted from the queue after save
 
     # ---- Phase 1: resolve answered items from the review queue ----
     review_rows = load_review_queue()
@@ -5656,11 +5666,14 @@ def main():
     # Retroactively clear excluded-vendor invoices/credit memos queued by an OLDER
     # run (before the vendor was excluded). routes_to_review() blocks NEW ones, but
     # carryover never re-checked. Reprocessing records them to Browse (review-skipped)
-    # and drops them from the queue. Payments are never excluded, so an excluded-vendor
-    # payment reprocesses back as still-flagged and correctly stays queued.
-    exclusion_clear = [r for r in queue_carryover if is_excluded_vendor(r.get("Vendor Matched"))]
+    # and drops them from the queue. NOT payment items: payments are never excluded, so one
+    # came back still flagged on EVERY run and was re-read every run — and a one-page receipt
+    # holding 16 payments (BluPax, 10/13) re-flagged all 16 each time: 1 -> 17 -> ~250 items in
+    # three runs. A payment item from an excluded vendor now just stays queued for a person.
+    exclusion_clear = excluded_vendor_items_to_clear(queue_carryover)
     if exclusion_clear:
-        queue_carryover = [r for r in queue_carryover if not is_excluded_vendor(r.get("Vendor Matched"))]
+        clearing = {id(r) for r in exclusion_clear}
+        queue_carryover = [r for r in queue_carryover if id(r) not in clearing]
 
     # Items a reviewer uploaded PDFs/images to (unconsumed) reprocess this run even with
     # NO answer — the uploaded documents are the trigger. Pull them out of carryover so
@@ -5786,12 +5799,12 @@ def main():
                 if is_split and src.parent == REVIEW_PENDING_DIR:
                     pending_deletes.append(src)
             else:
-                # RESOLVED: its invoice/payment record is already committed. Delete its
-                # review_queue row NOW (out-of-band) rather than waiting for the end-of-run
-                # save_review_queue() full-sync — so an interrupt in the meantime can't leave
-                # a stale "ghost" row for an item that's already recorded.
-                if USE_DB:
-                    _database().delete_review_row(filename)
+                # RESOLVED: its record is saved with this run's results (save_results, below), and
+                # its review_queue row is deleted right AFTER that save, out of band (before the
+                # end-of-run save_review_queue full-sync). It used to be deleted here, before the
+                # record was saved, so a run stopped in between (by hand, or at its 90-minute limit)
+                # lost the item entirely: row gone, record never saved (Bened Life #126877, 10/13).
+                resolved_review_files.append(filename)
                 if src.parent == REVIEW_PENDING_DIR:
                     if is_split:
                         pending_deletes.append(src)
@@ -5851,10 +5864,10 @@ def main():
                 # Resolved by the updated learnings → record it, drop it from the queue.
                 to_results.append(result)
                 resolved_ids.add(id(r))
-                # Out-of-band delete of the now-resolved row (same ghost-row safety as the
-                # answered-item loop) — the record is committed; don't rely only on the
-                # end-of-run full-sync, which an interrupt could skip.
-                _database().delete_review_row(filename)
+                # Its review row is deleted right after save_results commits the record, the same
+                # as the answered-item loop (deleting it here, before the save, lost the item if
+                # the run was stopped in between).
+                resolved_review_files.append(filename)
                 is_split = bool(r.get("Source Email")) and r.get("Filename") != r.get("Source Email")
                 if src.parent == REVIEW_PENDING_DIR:
                     if is_split:
@@ -5972,6 +5985,11 @@ def main():
             new_rows, touched_filenames, run_id, replace_records=superseded_records)
         print(f"\nSaved {len(new_rows)} record row(s) to PostgreSQL "
               f"(replaced {len(touched_filenames)} re-run filename(s)).")
+        # Now that their records are saved, drop the resolved review rows (see the resolve loop).
+        # One whose email REPROCESS-PROTECT skipped wasn't saved, so it stays queued.
+        for fn in resolved_review_files:
+            if fn not in (_protected or ()):
+                _database().delete_review_row(fn)
         # Resolve any previously-uploaded QB export rows that had nothing to match at the time but
         # now match a freshly-recorded record (same Tier-1 vendor+number+amount+store logic). Local
         # import: qb_match imports classify_emails, so a top-level import here would be circular.

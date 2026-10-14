@@ -205,3 +205,18 @@ class RecordlessEmailsAndIgnoredConfirmations(PureTestCase):
         c = self.email("payment", "NJNG", payments=[self.pay("NJNG")])
         ce.apply_review_gates(c)
         self.assertEqual(len(c["payments"]), 1)
+
+
+class ExcludedVendorCarryover(PureTestCase):
+    """LC-08, 2026-10-13: every run re-read review items from excluded vendors so excluded invoices clear
+    themselves. A PAYMENT item never clears (payments aren't excluded), so BluPax's one-page receipt of 16
+    card payments was re-read on every run and re-flagged all 16 each time: 1 -> 17 -> ~250 items."""
+
+    def test_payment_items_are_not_re_read(self):
+        rows = [{"Vendor Matched": "McKesson", "Email Type": "invoice"},
+                {"Vendor Matched": "McKesson", "Email Type": "credit_memo"},
+                {"Vendor Matched": "McKesson", "Email Type": "payment"},
+                {"Vendor Matched": "Bagel Nosh", "Email Type": "invoice"}]
+        got = ce.excluded_vendor_items_to_clear(rows)
+        self.assertEqual([(r["Vendor Matched"], r["Email Type"]) for r in got],
+                         [("McKesson", "invoice"), ("McKesson", "credit_memo")])

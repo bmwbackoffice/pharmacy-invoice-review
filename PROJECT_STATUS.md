@@ -5308,11 +5308,30 @@ on the LAN. Colleagues open the printed LAN URL; the launcher also prints the ex
 - [ ] After the next few live runs, run `python verify_model_signals.py` to sanity-check the AI-dependent
       signals (sales orders / reminders / total_source), and consider ticking "Trust line-item totals" for
       vendors that only ever send line items (Zahler, Freeda Health, Maxi Health had repeat flags).
-- [ ] **Save the Oct 8 QB upload's unmatched rows (2026-10-12).** First restart the web app, so the next upload uses
-      the filtered no-match branch. Then run
-      `python backfill_qb_unmatched.py "C:\Users\joel scher\Downloads\All 7 stores.xlsx" --apply`.
-      It saves 584 pending rows, marks 4 records entered, and copies the file to `qb_imports\`.
-      See "FIX + BACKFILL: QB 'no match' rows…".
+- [x] ~~Save the Oct 8 QB upload's unmatched rows~~ — DONE (checked 2026-10-13). Joel ran
+      `backfill_qb_unmatched.py --apply`: batch 6 now has 584 pending + 4 resolved unmatched rows, and the file is
+      kept as `qb_imports\batch_6 - All 7 stores.xlsx`. See "FIX + BACKFILL: QB 'no match' rows…".
+- [x] ~~Re-read the 17 payments missing a store, date or amount~~ — DONE (2026-10-13). Joel requeued them and his
+      4:57 PM "Apply changes now" run re-read them:
+      - 2 recorded complete: NJNG $55 ×2, then ignored as utility confirmations.
+      - 9 to review with a reason: JCP&L ×2 (store; then dismissed as utility confirmations), Stiac (card vs
+        receipt store), A&S ×4 (no mailing date), Herbal Health #2666 and #2750 (no amount). Plus a new A&S $488
+        check with no store.
+      - 2 Twin Rocks gone: the emails only link to a receipt.
+      - 4 empty again, the record-less hole: NJNG ×2 (now ignored) and Herbal Health #965 / #966 (requeued after the
+        fix, see below).
+      - See "Re-read records missing a store, date or amount" and "FIX: no more empty payment / invoice records".
+- [ ] **Herbal Health #2653 / #2740 (payments #965, #966) requeued after the record-less fix.** The next run should
+      send each to review as "looks like a payment, but no payment … could be read".
+- [ ] **BluPax: ~230 review items are copies of the 16 payments already recorded under Maple** (receipt
+      6077NY0059; card 6641, now mapped to Maple).
+      - Each answered copy re-read the whole one-page receipt and re-flagged all 16.
+      - The review-queue dedupe runs before a run writes its new items, so it only collapses them on the following
+        run.
+      - Clearing them needs Joel's OK.
+      - Root issue: several records on one page share a split file, so reprocessing one re-extracts all of them.
+- [x] ~~When a card is mapped, apply it to saved records~~ — DONE 2026-10-13 (Joel: yes). See "Mapping a card fills
+      in the store on records waiting for QuickBooks".
 - [ ] **3 undetected duplicate copies of QB-entered records (found 2026-10-12 by the backfill).** None is entered.
       - Reismans #R204825 $311.85 @ Madison: inv #890 (scan) is a copy of entered #1131.
       - Prime Packaging credit #AR092424 $1,200 @ Maple: cm #112 is a copy of entered #104.
@@ -5988,3 +6007,31 @@ only saved the mapping, so only documents read afterwards used it.
   - the 226 BluPax review copies are dismissed (Joel: yes). They're all from receipt 6077NY0059, and their 16
     amounts are exactly the payments already recorded under Maple (#945–#960);
   - the 2 Herbal Health empty payments are requeued.
+
+### FIX: the BluPax loop, and resolved review items lost when a run is stopped (2026-10-13)
+
+**1. Excluded-vendor PAYMENT items were re-read on every run (the BluPax loop).**
+- Each run re-reads unanswered review items whose vendor is excluded, so excluded invoices clear themselves (LC-08).
+  Payments are never excluded, so a payment item from an excluded vendor came back flagged every time and was
+  re-read again on every run.
+- BluPax (an excluded vendor) sent one credit-card receipt with 16 payments on one page. Every re-read flagged all
+  16 again: 1 → 17 → ~250 items in three runs. The 5:30 PM run took over an hour and had to be stopped, and so did
+  the 6:39 PM "Apply changes now" run, which had loaded 126 copies before they were cleared.
+- The log line "Reprocessing … with your answer" made them look like answered items. They weren't.
+- Fix: `excluded_vendor_items_to_clear()` leaves payment items out. They stay queued for a person.
+- Test: `tests/test_gates.py` › `ExcludedVendorCarryover`.
+
+**2. A resolved review item was deleted before its record was saved.**
+- The answered-item loop and the learnings re-check deleted a resolved item's `review_queue` row at once, the
+  "ghost-row safety" (`delete_review_row`). Its record, though, is saved only at the end of the run
+  (`save_results`).
+- So a run stopped in between, by hand or at its 90-minute limit, lost the item: row gone, record never saved.
+  Bened Life #126877 ($1,386.00, Maple) was lost this way on 10/13. Its dismissed duplicate copy (Ignored #90) is
+  restored for re-answering once the run stops; the original answer wasn't kept anywhere.
+- Fix: both paths collect `resolved_review_files`, and the rows are deleted right after `save_results`, except an
+  email REPROCESS-PROTECT skipped (its record wasn't saved, so it stays queued).
+- A run stopped before the save now leaves its items in the queue to be redone. A stop between the save and the
+  delete leaves a harmless ghost: the next run re-records it in place.
+
+The suite has 148 tests, all passing. Both fixes take effect from the next classify run; no restart is needed for
+them.
