@@ -5348,6 +5348,13 @@ on the LAN. Colleagues open the printed LAN URL; the launcher also prints the ex
       all do. The backfill handles batch 6's rejected rows. Small: 14 rejected vendor+amount+date rows in batch 6,
       mostly dated before 08/07.
 
+- [ ] **Settle the 3 misread-number sets now shown on Possible duplicates (2026-10-14):**
+      - Lantev 93G4240 $237.55: keep scan #1503.
+      - Boiron $604.13: #2212, #2360, #3011, #2396.
+      - Full Life Direct $3,089.22: #1827, #1765, #2304.
+      Before the fix their flagged copies were hidden. See "FIX: Possible duplicates shows every copy in a
+      duplicate group".
+
 ### Incident + recovery (2026-08-12) — invalid API key
 - A classify run executed with the permanent `ANTHROPIC_API_KEY` set to the literal
   placeholder `sk-ant-your-key`, so every Claude call returned **401 invalid x-api-key**.
@@ -6035,3 +6042,28 @@ only saved the mapping, so only documents read afterwards used it.
 
 The suite has 148 tests, all passing. Both fixes take effect from the next classify run; no restart is needed for
 them.
+
+### FIX: Possible duplicates shows every copy in a duplicate group, whatever its number (2026-10-14)
+
+**What Joel saw.** He asked why Lantev #93G4240 ($237.55, Refuah) wasn't resolving. The set showed the store scan
+#1503 flagged "possible duplicate", next to the vendor's copy #1961, which was already auto-ignored in September.
+
+**Where the flag really came from.** A third copy, #3863, from a forwarded email (10/13) read as #9304240.
+- The misread-number check (2026-10-12) flagged #1503 and #3863 together and gave them one group: same vendor,
+  amount, date and store, different number. That check only flags, by design.
+- `/duplicates` built sets by number only, so #3863 sat alone in a one-record set, which is never shown. It was
+  invisible, and #1503's set looked settled.
+- 4 flagged invoices were hidden this way: Lantev #3863, Boiron #2360 and #3011 ($604.13), and Full Life Direct
+  #1765 ($3,089.22).
+
+**Fix ([web_db.py](web_db.py) `list_duplicate_candidates`).**
+- Number-based sets whose copies share a `duplicate_group_id` are merged (same record type).
+- The group's other copies join the set whatever their number: a new query pulls every copy that shares a group
+  with a qualifying live suspect.
+- "Keep this one" then lists the misread copy among the copies it ignores, so one click settles the group.
+
+**Tests and rollout.** [tests/test_duplicate_sets.py](tests/test_duplicate_sets.py) has 2 tests: the group set,
+and Keep settling it. The suite has 150 tests, all passing. Needs a web-app restart.
+
+**Lantev.** 93G4240 is probably the right number: the scan and Lantev's own email both read it, and Lantev numbers
+carry letters (09A3356, 9GH5739). Check the document, then Keep the scan #1503, which ignores #3863.

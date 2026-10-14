@@ -2572,15 +2572,30 @@ def list_duplicate_candidates():
                 "      AND f.duplicate_suspect IS TRUE AND f.duplicate_ignored IS NOT TRUE "
                 "      AND coalesce(f.duplicate_group_id, '') <> '')")
             no_ref_rows = cur.fetchall()
+            # Every copy sharing a duplicate group with a qualifying live suspect, WHATEVER its number:
+            # the misread-number check (2026-10-12) groups copies whose numbers differ ('93G4240' and
+            # its misread '9304240', Lantev 10/13), and grouping by number alone left such a copy alone
+            # in its own one-record set, which isn't shown (2026-10-14).
+            cur.execute(
+                "SELECT m.* FROM all_records m "
+                " WHERE m.record_type IN ('invoice','payment') AND coalesce(m.duplicate_group_id, '') <> '' "
+                "   AND m.duplicate_group_id IN ("
+                "     SELECT f.duplicate_group_id FROM all_records f "
+                "      WHERE f.record_type IN ('invoice','payment') "
+                "        AND f.duplicate_suspect IS TRUE AND f.duplicate_ignored IS NOT TRUE "
+                "        AND (f.record_type = 'payment' OR f.skip_qb_import IS NOT TRUE) "
+                "        AND coalesce(f.duplicate_group_id, '') <> '')")
+            group_rows = cur.fetchall()
             # The invoice each payment settles (payments.invoice_number, when the remittance states
             # it). The payment duplicate check uses it — one shared reference can pay several
             # invoices — so show it beside the reference number.
-            pay_ids = [r["record_id"] for r in rows + ignored_rows + no_ref_rows if r["record_type"] == "payment"]
+            pay_ids = [r["record_id"] for r in rows + ignored_rows + no_ref_rows + group_rows
+                       if r["record_type"] == "payment"]
             applied = {}
             if pay_ids:
                 cur.execute("SELECT id, invoice_number FROM payments WHERE id = ANY(%s)", (pay_ids,))
                 applied = {r["id"]: r["invoice_number"] for r in cur.fetchall()}
-            for r in rows + ignored_rows + no_ref_rows:
+            for r in rows + ignored_rows + no_ref_rows + group_rows:
                 r["applied_invoice"] = applied.get(r["record_id"]) if r["record_type"] == "payment" else None
     finally:
         conn.close()
@@ -2609,9 +2624,43 @@ def list_duplicate_candidates():
         k = _key(r)
         if k in groups:
             groups[k].append(r)
+    # One set per duplicate GROUP as well (2026-10-14): number-based sets whose copies share a group
+    # id are merged (same record type), and a group's other copies join the set, whatever their
+    # number. The misread-number check groups '93G4240' with its misread '9304240'; by number alone the
+    # misread copy sat in a one-record set that's never shown, and the real pair looked settled.
+    parent = {k: k for k in groups}
+
+    def _root(k):
+        while parent[k] != k:
+            parent[k] = parent[parent[k]]
+            k = parent[k]
+        return k
+
+    first_set = {}                       # (record type, group id) -> the first set holding it
+    for k, recs in groups.items():
+        for r in recs:
+            g = (r.get("duplicate_group_id") or "").strip()
+            if g:
+                other = first_set.setdefault((k[0], g), k)
+                if other != k:
+                    parent[_root(k)] = _root(other)
+    merged = {}
+    for k, recs in groups.items():
+        merged.setdefault(_root(k), []).extend(recs)
+    groups = merged
+    shown = {(r["record_type"], r["record_id"]) for recs in groups.values() for r in recs}
+    owner = {}
+    for k, recs in groups.items():
+        for r in recs:
+            if (r.get("duplicate_group_id") or "").strip():
+                owner.setdefault((r["record_type"], r["duplicate_group_id"]), k)
+    for r in group_rows:
+        k = owner.get((r["record_type"], r["duplicate_group_id"]))
+        if k and (r["record_type"], r["record_id"]) not in shown:
+            groups[k].append(r)
+            shown.add((r["record_type"], r["record_id"]))
     # No-reference payment sets, keyed by their shared group id ("~group" can't be a vendor key, which
     # is lowercase vendor text). A record already shown in a number-based set isn't repeated.
-    shown = {(r["record_type"], r["record_id"]) for recs in groups.values() for r in recs}
     for r in no_ref_rows:
         if (r["record_type"], r["record_id"]) not in shown:
             groups.setdefault(("payment", "~group", r["duplicate_group_id"]), []).append(r)

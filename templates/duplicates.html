@@ -87,7 +87,7 @@ always shown.</p>
             {% for r in g.records %}
             <th style="background:{{ '#eef2f7' if r.duplicate_ignored else ('#eef4fb' if r.duplicate_suspect else '#f0f9f4') }};{{ 'color:var(--muted);' if r.duplicate_ignored }}">
               {{ 'Duplicate (kept out)' if r.duplicate_ignored else ('Possible duplicate' if r.duplicate_suspect else 'Likely Correct') }}
-              <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;">{{ r.record_type.replace('_', ' ') | title }}</div>
+              <div class="muted" style="font-weight:400; font-size:11px; margin-top:2px;">{{ r.record_type.replace('_', ' ') | title }} #{{ r.record_id }}</div>
             </th>
             {% endfor %}
           </tr>
