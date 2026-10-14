@@ -5841,3 +5841,59 @@ connection that is rolled back, and temporary folders stand in for the email fol
 - A dry run changes nothing.
 
 The suite now has 125 tests, all passing. Live data was checked unchanged afterwards.
+
+### Scheduled runs page: one collapsed block per run; a run's log can't be overwritten by another (2026-10-13)
+
+**The problem (seen 10/13).**
+- Joel's "Apply changes now" run started at 4:57 PM and was still going when the 5:00 PM scheduled run started.
+- The 5:00 run fetched one email, found the run lock taken and SKIPPED, as designed. The 4:57 run carried on.
+- The log was another matter. Both runs wrote straight into `logs/scheduled_runs.log`: the classifier's output
+  went to a file handle shared with `scheduled_run.py`, with its own write position. So:
+  - the 5:00 block landed in the middle of the 4:57 output;
+  - the 4:57 run's later lines then **overwrote** the 5:00 block in place. It's gone from the file.
+- The dashboard tile also read only the last block in the file, so it would have shown the SKIPPED run as "the last
+  run".
+
+**Writer ([scheduled_run.py](scheduled_run.py))**
+- Each run now writes to its own file while it's going: `logs/runs/<start>-<microseconds>-<pid>.log`.
+- When the run ends, `_publish()` adds the whole block to `scheduled_runs.log` in one write and deletes the run's
+  file.
+- A run file left with no result for 3 hours or more (the PC was turned off, or the run was killed) is added on
+  the next run with `Result: STOPPED (cut off before it finished)` (`_fold_cut_off_runs`).
+- Nothing else changed: same steps, same time limits, same result lines. It applies from the next run; no restart
+  needed.
+
+**Reader ([review_app.py](review_app.py))**
+- `parse_run_log()` splits log text into runs. Old overlapped blocks are untangled: lines go to the newest run
+  without a result, then back to the run it interrupted.
+- `load_runs()` adds the runs still going (`logs/runs/`), keeping the finished copy if a run is in both places.
+- `last_scheduled_run()` (dashboard tile, red banner, "Apply changes now" checks):
+  - uses the latest run that wasn't SKIPPED, since a skipped run only means another one was working;
+  - treats no result after `RUN_MAX_HOURS` (3) as STOPPED, not running.
+- `run_view()` builds each run's one-line summary and colours its printed lines.
+
+**Page ([templates/scheduled_runs.html](templates/scheduled_runs.html))**
+- Newest first, grouped under Today / Yesterday / date headings, latest 40 runs ("Show older runs" for more).
+- One collapsed block per run; click to open. The summary line shows:
+  - a coloured result pill: OK green, Skipped grey, Failed / Timed out red, Running blue, Stopped amber;
+  - the time, and who started it ("Scheduled", or "Apply changes now · joel");
+  - what it did, e.g. "4 new email(s) fetched, 1 answered item(s) redone, 5 email(s) processed, 37 record(s) saved,
+    17 new for review";
+  - how long it took.
+- Inside a block, lines are coloured: steps blue, emails being processed bold, fetched / saved green, sent to review
+  amber, warnings amber, errors red, routine detail grey.
+- "Hide runs with nothing new" is remembered per browser; there are also Open all / Close all links.
+- **Needs a web-app restart.**
+
+**Tests:** [tests/test_run_history.py](tests/test_run_history.py), 10 tests:
+- the overlapped 4:57 / 5:00 blocks are untangled;
+- running runs come from their own files;
+- finished copy wins; a skipped run isn't the last run; no result for hours is STOPPED;
+- summaries and line colours;
+- two overlapping `scheduled_run.main()` calls leave two whole blocks with no run files left over;
+- a cut-off run file is added as STOPPED, and a fresh one is left alone;
+- the page renders collapsed blocks, newest first.
+
+The tests that read the run log (`test_run_now_banner`, `test_dashboard_labels`) now point `SCHEDULED_RUNS_DIR` at a
+temp folder too, so a real run going at the time can't affect them. The suite has 135 tests, all passing; one test
+skips itself while a real run holds the lock.

@@ -1,28 +1,104 @@
 {% extends "base.html" %}
 {% block content %}
+<style>
+  .runs-tools { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin:6px 0 4px; }
+  .runs-day { margin:16px 0 6px; font-size:12px; font-weight:600; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  details.run { background:var(--card); border:1px solid var(--line); border-left:4px solid var(--line); border-radius:6px; margin:0 0 6px; }
+  details.run > summary { list-style:none; cursor:pointer; padding:7px 12px; display:flex; gap:12px; align-items:baseline; flex-wrap:wrap; }
+  details.run > summary::-webkit-details-marker { display:none; }
+  details.run > summary::before { content:"\25B8"; color:var(--muted); width:10px; }
+  details.run[open] > summary::before { content:"\25BE"; }
+  details.run.run-ok { border-left-color:var(--ok); }
+  details.run.run-bad { border-left-color:var(--bad); }
+  details.run.run-running { border-left-color:var(--brand); }
+  details.run.run-stopped { border-left-color:var(--warn); }
+  .run-pill { font-size:11.5px; font-weight:600; padding:1px 8px; border-radius:999px; min-width:62px; text-align:center; }
+  .run-ok .run-pill { background:#dcfce7; color:var(--ok); }
+  .run-skipped .run-pill { background:#e5e7eb; color:var(--muted); }
+  .run-bad .run-pill { background:#fee2e2; color:var(--bad); }
+  .run-running .run-pill { background:#dbeafe; color:var(--brand); }
+  .run-stopped .run-pill { background:#fef3c7; color:var(--warn); }
+  .run-time { font-weight:600; min-width:70px; }
+  .run-who { color:var(--muted); min-width:170px; }
+  .run-sum { flex:1; min-width:200px; }
+  .run-dur { color:var(--muted); font-size:12px; }
+  details.run.quiet > summary { color:var(--muted); }
+  details.run.quiet .run-time { font-weight:400; }
+  pre.run-log { margin:0; padding:10px 14px; border-top:1px solid var(--line); max-height:60vh; overflow:auto;
+                font-size:12px; white-space:pre-wrap; background:#fafbfc; }
+  .l-err { color:var(--bad); font-weight:600; }
+  .l-warn { color:var(--warn); font-weight:600; }
+  .l-step { color:var(--brand); font-weight:600; }
+  .l-email { font-weight:600; }
+  .l-review { color:var(--warn); }
+  .l-good { color:var(--ok); }
+  .l-dim { color:#9ca3af; }
+  body.hide-quiet details.run.quiet { display:none; }
+</style>
 <p><a href="/dashboard">&larr; dashboard</a></p>
 <h2>Scheduled runs</h2>
 <p class="muted">The automatic fetch-and-classify run, while the computer that runs it is on and signed in.
-  {{ schedule }} Each block ends with its result: OK, SKIPPED (another run was going), FAILED or TIMED OUT.
+  {{ schedule }} Newest first, one line per run: click a run to see everything it printed.
+  A run is SKIPPED when another one was still going; that one does the work.
   Full log: <code>logs\scheduled_runs.log</code>. Change the schedule by running <code>setup_scheduled_run.ps1</code> again.</p>
 <form method="post" action="/scheduled-runs/run-now" style="margin:0 0 12px;">
   <button class="btn" type="submit" title="Process answers, Quick fixes and uploads now instead of waiting for the next scheduled run">Apply changes now</button>
-  <span class="muted" style="font-size:12.5px; margin-left:8px;">Runs the classifier only (no new email is fetched) in the background; it shows up below as a new block.</span>
+  <span class="muted" style="font-size:12.5px; margin-left:8px;">Runs the classifier only (no new email is fetched) in the background; it shows up below as a new run.</span>
 </form>
 {% if run %}
 <div class="card" style="{{ 'border-color:#dc2626; background:#fef2f2;' if run.alert else '' }}">
   Last run: <strong>{{ run.result }}</strong> · started {{ run.started.strftime('%m/%d/%Y %I:%M %p') }}
-  {% if run.minutes is not none %} · {{ '%.1f'|format(run.minutes) }} min{% else %} · still going{% endif %}
+  {% if run.minutes is not none %} · {{ '%.1f'|format(run.minutes) }} min{% elif run.running %} · still going{% endif %}
   {% if run.stale %}<br>The {{ run.missed.strftime('%I:%M %p').lstrip('0') }} run didn't happen — check that the computer is on and signed in, and that the task "Pharmacy invoices - fetch and classify" is enabled in Task Scheduler.{% endif %}
 </div>
 {% endif %}
-{% if tail %}
-<div class="card" style="padding:0;">
-  <pre style="margin:0; padding:12px; max-height:70vh; overflow:auto; font-size:12px; white-space:pre-wrap;">{{ tail }}</pre>
+{% if runs %}
+<div class="runs-tools">
+  <label class="muted" style="font-size:13px;"><input type="checkbox" id="hide-quiet" style="width:auto;"> Hide runs with nothing new</label>
+  <a href="#" id="open-all" class="muted" style="font-size:13px;">Open all</a>
+  <a href="#" id="close-all" class="muted" style="font-size:13px;">Close all</a>
+  <span class="muted" style="font-size:13px;">A run that's still going updates when you refresh the page.</span>
 </div>
-<p class="muted"><a href="/scheduled-runs?lines=2000">Show more</a></p>
+{% for r in runs %}
+  {% if loop.first or r.day != runs[loop.index0 - 1].day %}
+  <div class="runs-day">{% if r.day == today %}Today{% elif (today - r.day).days == 1 %}Yesterday{% else %}{{ r.started.strftime('%A %m/%d/%Y') }}{% endif %}</div>
+  {% endif %}
+  <details class="run run-{{ r.status }}{{ ' quiet' if r.quiet else '' }}">
+    <summary title="{{ r.result }}">
+      <span class="run-pill">{{ r.label }}</span>
+      <span class="run-time">{{ r.time }}</span>
+      <span class="run-who">{{ r.who }}</span>
+      <span class="run-sum">{{ r.summary }}</span>
+      <span class="run-dur">{% if r.minutes is not none %}{{ '%.1f'|format(r.minutes) }} min{% elif r.status == 'running' %}still going{% endif %}</span>
+    </summary>
+    <pre class="run-log">{% for cls, text in r.lines %}<span class="l-{{ cls }}">{{ text }}</span>{{ "\n" }}{% endfor %}</pre>
+  </details>
+{% endfor %}
+{% if more %}<p class="muted"><a href="/scheduled-runs?runs={{ more }}">Show older runs</a></p>{% endif %}
 {% else %}
 <div class="card"><p class="muted" style="margin:0;">No scheduled run has happened yet. Set it up with <code>setup_scheduled_run.ps1</code>.</p></div>
 {% endif %}
-<script>var p = document.querySelector('pre'); if (p) p.scrollTop = p.scrollHeight;</script>
+<script>
+(function () {
+  var box = document.getElementById('hide-quiet');
+  if (!box) return;
+  function apply() { document.body.classList.toggle('hide-quiet', box.checked); }
+  try { box.checked = localStorage.getItem('runsHideQuiet') === '1'; } catch (e) {}
+  apply();
+  box.addEventListener('change', function () {
+    try { localStorage.setItem('runsHideQuiet', box.checked ? '1' : '0'); } catch (e) {}
+    apply();
+  });
+  function all(open) {
+    return function (e) {
+      e.preventDefault();
+      document.querySelectorAll('details.run').forEach(function (d) {
+        if (!open || !(box.checked && d.classList.contains('quiet'))) d.open = open;
+      });
+    };
+  }
+  document.getElementById('open-all').addEventListener('click', all(true));
+  document.getElementById('close-all').addEventListener('click', all(false));
+})();
+</script>
 {% endblock %}

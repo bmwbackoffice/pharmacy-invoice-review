@@ -25,12 +25,13 @@ class LastScheduledRun(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved = (review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE)
+        self._saved = (review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE, review_app.SCHEDULED_RUNS_DIR)
         review_app.SCHEDULED_LOG = Path(self.tmp.name) / "scheduled_runs.log"
         review_app.SCHEDULE_FILE = Path(self.tmp.name) / "schedule.json"     # absent -> the defaults
+        review_app.SCHEDULED_RUNS_DIR = Path(self.tmp.name) / "runs"        # never the real runs going now
 
     def tearDown(self):
-        review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE = self._saved
+        review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE, review_app.SCHEDULED_RUNS_DIR = self._saved
         self.tmp.cleanup()
 
     def _run(self, text, now):

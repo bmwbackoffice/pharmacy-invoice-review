@@ -2,18 +2,25 @@
 
 Does what "Fetch New Invoices.bat" does -- gmail_fetcher.py, then classify_emails.py --drive -- but with
 no window and no "press any key", and with time limits so a stuck step can't block later runs (the
-Gmail step opens a browser and waits if its saved sign-in ever expires). Everything is appended to
+Gmail step opens a browser and waits if its saved sign-in ever expires). Everything ends up in
 logs/scheduled_runs.log, one block per run, with a one-line result at the end:
 
     OK                     the run finished
     SKIPPED                another classify run (scheduled or manual) was going; nothing changed
     FAILED (exit N)        classify stopped with an error -- read the lines above it
     TIMED OUT              a step ran past its limit and was stopped
+    STOPPED                cut off before it finished (the computer was turned off, or the run was killed)
+
+While it's going, a run writes to its own file in logs/runs/ (the Scheduled runs page shows it live) and
+the finished block is added to scheduled_runs.log in one piece (2026-10-13). Runs used to write straight
+into the shared log, so an "Apply changes now" run still going when a scheduled one started got the two
+runs' lines mixed together.
 
 Run by hand to try it:   python scheduled_run.py
 A run with no new email makes no Claude API calls, so frequent runs cost nothing extra when it's quiet.
 """
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime
@@ -23,6 +30,8 @@ BASE = Path(__file__).resolve().parent
 LOG_DIR = BASE / "logs"
 LOG = LOG_DIR / "scheduled_runs.log"
 LOG_MAX_BYTES = 5 * 1024 * 1024            # roll to scheduled_runs.log.1 past this
+RUNS_SUBDIR = "runs"                        # logs/runs/<start>-<pid>.log while a run is going
+STALE_RUN_HOURS = 3                         # a run file this old with no result was cut off
 FETCH_TIMEOUT = 10 * 60                     # seconds
 CLASSIFY_TIMEOUT = 90 * 60
 SKIPPED_EXIT = 3                            # classify_emails.py: another run holds the lock
@@ -53,6 +62,33 @@ def _roll_log():
         pass
 
 
+def _publish(run_file):
+    """Add a finished run's whole block to the shared log in one write, then delete the run's own file."""
+    text = run_file.read_text(encoding="utf-8", errors="replace")
+    with open(LOG, "a", encoding="utf-8", errors="replace") as log:
+        log.write(text if text.endswith("\n") else text + "\n")
+    run_file.unlink()
+
+
+def _fold_cut_off_runs(now):
+    """A run file left with no result (the computer was turned off or the run was killed mid-way) goes
+    into the shared log with a STOPPED result, once it's older than any run could take."""
+    for f in sorted((LOG_DIR / RUNS_SUBDIR).glob("*.log")):
+        try:
+            mtime = datetime.fromtimestamp(f.stat().st_mtime)
+            if (now - mtime).total_seconds() < STALE_RUN_HOURS * 3600:
+                continue
+            text = f.read_text(encoding="utf-8", errors="replace")
+            if "===== Result:" not in text:
+                m = re.search(r"===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) =====", text)
+                mins = (mtime - datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S")).total_seconds() / 60 if m else 0
+                with open(f, "a", encoding="utf-8") as fh:
+                    fh.write(f"\n===== Result: STOPPED (cut off before it finished) -- {max(mins, 0):.1f} min =====\n")
+            _publish(f)
+        except (OSError, ValueError):
+            continue
+
+
 def _step(log, script, args, timeout):
     """Run one step with its output going to the log. Returns its exit code, or None on timeout."""
     log.write(f"--- {script} {' '.join(args)}\n")
@@ -73,12 +109,16 @@ def main():
     LOG_DIR.mkdir(exist_ok=True)
     _roll_log()
     started = datetime.now()
+    runs_dir = LOG_DIR / RUNS_SUBDIR
+    runs_dir.mkdir(exist_ok=True)
+    _fold_cut_off_runs(started)
+    run_file = runs_dir / f"{started:%Y%m%d-%H%M%S-%f}-{os.getpid()}.log"
     # "--by NAME": started from the web app's "Apply changes now" button (2026-10-13).
     # "--classify-only": skip the Gmail fetch -- just process answers, Quick fixes, uploads and anything
     # already fetched, so a reviewer's changes take effect without waiting for the next scheduled run.
     by = sys.argv[sys.argv.index("--by") + 1] if "--by" in sys.argv[1:-1] else ""
     classify_only = "--classify-only" in sys.argv[1:]
-    with open(LOG, "a", encoding="utf-8", errors="replace") as log:
+    with open(run_file, "a", encoding="utf-8", errors="replace") as log:
         log.write(f"\n===== Scheduled run {started:%Y-%m-%d %H:%M:%S} =====\n")
         if by or classify_only:
             log.write(f"({'classifier only' if classify_only else 'fetch + classify'}"
@@ -101,6 +141,10 @@ def main():
             result = f"FAILED (exit {rc})"
         mins = (datetime.now() - started).total_seconds() / 60
         log.write(f"===== Result: {result} -- {mins:.1f} min =====\n")
+    try:
+        _publish(run_file)
+    except OSError:
+        pass        # the block stays in logs/runs/, and the Scheduled runs page still shows it
     return 0 if result.startswith(("OK", "SKIPPED")) else 1
 
 

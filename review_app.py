@@ -554,8 +554,60 @@ def my_work_page(request: Request):
 
 
 SCHEDULED_LOG = BASE_DIR / "logs" / "scheduled_runs.log"
-_RUN_START = re.compile(r"^===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) =====", re.M)
-_RUN_RESULT = re.compile(r"^===== Result: (.+?) -- ([\d.]+) min =====", re.M)
+SCHEDULED_RUNS_DIR = BASE_DIR / "logs" / "runs"          # runs still going (scheduled_run.py, 2026-10-13)
+_RUN_HEADER = re.compile(r"^===== Scheduled run (\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}) =====\s*$")
+_RUN_END = re.compile(r"^===== Result: (.+?) -- ([\d.]+) min =====\s*$")
+RUN_MAX_HOURS = 3            # no result after this long: the run was cut off (scheduled_run.py stops at ~100 min)
+
+
+def parse_run_log(text):
+    """Split scheduled-run log text into runs, in log order: [{started, result, minutes, lines}]
+    (result None = no result line yet). Before 2026-10-13 two overlapping runs (an "Apply changes now"
+    run still going when a scheduled one started) wrote into the log at the same time, so one run's
+    block can sit inside another's: lines go to the newest run without a result until its result line,
+    then back to the run it interrupted."""
+    runs, open_runs = [], []
+    for line in text.splitlines():
+        m = _RUN_HEADER.match(line)
+        if m:
+            run = {"started": datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S"), "result": None,
+                   "minutes": None, "lines": []}
+            runs.append(run)
+            open_runs.append(run)
+            continue
+        m = _RUN_END.match(line)
+        if m and open_runs:
+            run = open_runs.pop()
+            run["result"], run["minutes"] = m.group(1), float(m.group(2))
+            continue
+        if open_runs:
+            open_runs[-1]["lines"].append(line)
+    return runs
+
+
+def load_runs(tail_bytes=None):
+    """Every run in logs/scheduled_runs.log (only its last `tail_bytes` when given) plus the runs still
+    going in logs/runs/, oldest first."""
+    try:
+        text = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        text = ""
+    runs = parse_run_log(text[-tail_bytes:] if tail_bytes else text)
+    try:
+        files = sorted(SCHEDULED_RUNS_DIR.glob("*.log"))
+    except OSError:
+        files = []
+    for f in files:
+        try:
+            runs += parse_run_log(f.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    best = {}                     # a run both in the log and still in logs/runs/: keep the finished copy
+    for r in runs:
+        key = (r["started"], next((l for l in r["lines"] if l.strip()), ""))
+        if key not in best or (best[key]["result"] is None and r["result"] is not None):
+            best[key] = r
+    return sorted(best.values(), key=lambda r: r["started"])
 
 
 SCHEDULE_FILE = BASE_DIR / "logs" / "schedule.json"
@@ -613,24 +665,20 @@ def schedule_description(sched=None):
 
 
 def last_scheduled_run(now=None):
-    """The last scheduled_run.py block in logs/scheduled_runs.log: {started, result, minutes, running,
-    stale, missed, alert} or None when there's no log. stale = the most recent scheduled run time (at
-    least 20 minutes ago, from logs/schedule.json) was missed: no run started at or after it, and the
-    previous run wasn't still going then (that slot is skipped on purpose). So quiet mornings, evenings
-    and weekends with fewer runs aren't reported as overdue. alert = stale, or FAILED / TIMED OUT."""
-    try:
-        text = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace")[-200_000:]
-    except OSError:
+    """The latest run that wasn't SKIPPED (a SKIPPED run only means another one was going), from
+    logs/scheduled_runs.log and logs/runs/: {started, result, minutes, running, stale, missed, alert} or
+    None when there's no run. stale = the most recent scheduled run time (at least 20 minutes ago, from
+    logs/schedule.json) was missed: no run started at or after it, and the previous run wasn't still
+    going then (that slot is skipped on purpose). So quiet mornings, evenings and weekends with fewer runs
+    aren't reported as overdue. alert = stale, or FAILED / TIMED OUT."""
+    runs = load_runs(tail_bytes=200_000)
+    if not runs:
         return None
-    starts = list(_RUN_START.finditer(text))
-    if not starts:
-        return None
-    last = starts[-1]
-    started = datetime.strptime(last.group(1), "%Y-%m-%d %H:%M:%S")
-    res = _RUN_RESULT.search(text, last.end())
+    last = ([r for r in runs if not (r["result"] or "").startswith("SKIPPED")] or runs)[-1]
+    started, minutes = last["started"], last["minutes"]
     now = now or datetime.now()
-    minutes = float(res.group(2)) if res else None
-    ended = started + timedelta(minutes=minutes) if minutes is not None else now
+    running = last["result"] is None and now - started < timedelta(hours=RUN_MAX_HOURS)
+    ended = started + timedelta(minutes=minutes) if minutes is not None else (now if running else started)
     sched = load_schedule()
     due = None                                            # the latest slot that should have run by now
     for back in range(0, 4):
@@ -640,10 +688,74 @@ def last_scheduled_run(now=None):
             due = past[-1]
             break
     stale = bool(due) and started < due - timedelta(minutes=2) and ended < due
-    result = res.group(1) if res else "Running"
-    return {"started": started, "result": result, "minutes": minutes, "running": res is None,
+    result = last["result"] or ("Running" if running else "STOPPED (cut off before it finished)")
+    return {"started": started, "result": result, "minutes": minutes, "running": running,
             "stale": stale, "missed": due if stale else None,
             "alert": stale or result.startswith(("FAILED", "TIMED OUT"))}
+
+
+# How each printed line is coloured on the Scheduled runs page: (css class, pattern), first match wins.
+_RUN_LINE_STYLES = (
+    ("err", re.compile(r"Traceback|^\s+File \"|\w*Error\b|ERROR|^!!!|did not finish cleanly")),
+    ("warn", re.compile(r"WARNING|REPROCESS-PROTECT")),
+    ("step", re.compile(r"^--- ")),
+    ("email", re.compile(r"^(Processing|Reprocessing) ")),
+    ("review", re.compile(r"flagged record\(s\) to review|^Routed \d+ record|^Emails needing human review: [1-9]")),
+    ("good", re.compile(r"^\s+saved \d+ (invoice|payment|credit)|^Saved [1-9]\d* record row|^Fetched [1-9]")),
+    ("dim", re.compile(r"^\s+(cache:|found \d+ attachment)|^(Storage|Run|Mailbox|Gmail search):|^=+$|^\(")),
+)
+
+
+def _run_count(pattern, text):
+    m = re.search(pattern, text, re.M)
+    return int(m.group(1)) if m else 0
+
+
+def run_view(run, now=None):
+    """One run as the Scheduled runs page shows it: a one-line summary plus its coloured lines."""
+    now = now or datetime.now()
+    lines = run["lines"]
+    while lines and not lines[0].strip():
+        lines = lines[1:]
+    text = "\n".join(lines)
+    note = lines[0] if lines and lines[0].startswith("(") else ""
+    m = re.search(r"started by hand by (.+?) from the web app", note)
+    if m:
+        who = ("Apply changes now" if "classifier only" in note else "Check for new email") + f" · {m.group(1)}"
+    else:
+        who = "Scheduled"
+    result = run["result"]
+    if result is None:
+        result = "Running" if now - run["started"] < timedelta(hours=RUN_MAX_HOURS) else "STOPPED"
+    status = {"OK": "ok", "SKIPPED": "skipped", "Running": "running"}.get(result.split(" ")[0], "bad")
+    if result.startswith("STOPPED"):
+        status = "stopped"
+    fetched = _run_count(r"^Fetched (\d+) message", text)
+    reprocessed = sum(1 for l in lines if l.startswith("Reprocessing "))
+    processed = _run_count(r"^Total emails processed: (\d+)", text) or sum(
+        1 for l in lines if l.startswith("Processing "))
+    saved = _run_count(r"^Saved (\d+) record row", text)
+    new_review = _run_count(r"^Review queue: \d+ open item\(s\) \((\d+) new this run", text)
+    errors = sum(1 for l in lines if _RUN_LINE_STYLES[0][1].search(l))
+    parts = [s for n, s in ((fetched, f"{fetched} new email(s) fetched"),
+                            (reprocessed, f"{reprocessed} answered item(s) redone"),
+                            (processed, f"{processed} email(s) processed"),
+                            (saved, f"{saved} record(s) saved"),
+                            (new_review, f"{new_review} new for review"),
+                            (errors, f"{errors} error line(s)")) if n]
+    if not parts:
+        parts = ["another run was going, so it did nothing" if status == "skipped"
+                 else "still starting" if status == "running" else "nothing new"]
+
+    def style(line):
+        return next((cls for cls, pat in _RUN_LINE_STYLES if pat.search(line)), "")
+    s = run["started"]
+    return {"started": s, "day": s.date(), "time": s.strftime("%I:%M %p").lstrip("0"),
+            "label": result.split(" (")[0].title() if status != "ok" else "OK", "result": result,
+            "status": status, "who": who, "summary": ", ".join(parts),
+            "minutes": run["minutes"], "quiet": status in ("ok", "skipped") and not (
+                fetched or reprocessed or processed or saved or new_review or errors),
+            "lines": [(style(l), l) for l in lines]}
 
 
 def last_scheduled_run_tile():
@@ -728,18 +840,20 @@ def scheduled_run_now(request: Request):
 
 
 @app.get("/scheduled-runs", response_class=HTMLResponse)
-def scheduled_runs(request: Request, lines: int = 300):
-    """Everyone signed in (2026-10-13; was admins-only): the end of logs/scheduled_runs.log, newest at
-    the bottom. Read-only, linked from the Last scheduled run tile."""
+def scheduled_runs(request: Request, runs: int = 40):
+    """Everyone signed in (2026-10-13; was admins-only): the latest runs, newest first, one collapsed
+    block each with a one-line summary; click to see what it printed, coloured. Read-only, linked from
+    the Last scheduled run tile."""
     user = current_user(request)
     if not user:
         return _login_redirect()
-    try:
-        tail = SCHEDULED_LOG.read_text(encoding="utf-8", errors="replace").splitlines()[-max(20, min(lines, 5000)):]
-    except OSError:
-        tail = []
-    return render(request, "scheduled_runs.html", user, tail="\n".join(tail), run=last_scheduled_run(),
-                  schedule=schedule_description())
+    shown = max(10, min(runs, 1000))
+    every = load_runs()
+    now = datetime.now()
+    views = [run_view(r, now) for r in reversed(every[-shown:])]
+    return render(request, "scheduled_runs.html", user, runs=views, run=last_scheduled_run(),
+                  schedule=schedule_description(), today=now.date(),
+                  more=shown * 3 if len(every) > shown else None)
 
 
 @app.get("/reconcile", response_class=HTMLResponse)

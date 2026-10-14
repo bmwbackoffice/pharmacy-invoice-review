@@ -22,13 +22,14 @@ def _log(start, result="OK -- 1.0 min"):
 class _LogCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self._saved_paths = (review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE)
+        self._saved_paths = (review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE, review_app.SCHEDULED_RUNS_DIR)
         review_app.SCHEDULED_LOG = Path(self.tmp.name) / "scheduled_runs.log"
         review_app.SCHEDULE_FILE = Path(self.tmp.name) / "schedule.json"
+        review_app.SCHEDULED_RUNS_DIR = Path(self.tmp.name) / "runs"     # never the real runs going now
         review_app._RUN_ALERT_CACHE["at"] = 0.0
 
     def tearDown(self):
-        review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE = self._saved_paths
+        review_app.SCHEDULED_LOG, review_app.SCHEDULE_FILE, review_app.SCHEDULED_RUNS_DIR = self._saved_paths
         review_app._RUN_ALERT_CACHE["at"] = 0.0
         self.tmp.cleanup()
 
