@@ -7156,3 +7156,41 @@ timed-out calls, two 6-page 3M scans retried 44 runs each)
   screen; login lands on /review, not My work; dashboard Work = 14 equal tiles (money-critical ones not first;
   Statement exceptions shows no $); Records page renders up to 2,000 rows (3.6 MB HTML); Correspondence uses
   "Ignore" where the rest of the app says "Dismiss" (IgnoreLabels test fails on correspondence.html).
+
+### Review follow-ups Joel picked (2026-10-26, ~13:30) — committed in fa822cd
+- #1 Nightly backup: `backup_db.py` (pg_dump custom format from DATABASE_URL, password via PGPASSWORD; checked with
+  pg_restore --list; uploaded PRIVATE to Drive "Pharmacy Invoices/db_backups" — no sharing permission, unlike the
+  documents; 14 days kept here and on Drive; logs/backups.log). First run 10/26 13:03: 2.3 MB, 56 tables, Drive copy
+  owner-only. `setup_backup_task.ps1` registers "Pharmacy invoices - nightly database backup" (daily 1:30 AM, as the
+  user, while signed in, catches up when the PC is back) — Claude's attempt to register it was refused by the
+  permission check; Joel runs it once. Restore steps in the backup_db.py docstring. backups/ and *.dump git-ignored.
+  Dashboard System health: "Database backup" tile (review_app.last_backup_tile; red when none, > 36 h, or the last
+  attempt failed).
+- #5 Committed everything (fa822cd, 65 files) after the suite passed (235).
+- #8 database.reconcile_statement_lines third pass: a 'missing' line whose number and amount (credits compared without
+  the sign) are in qb_register, with a related vendor (classify_emails._vendors_related) or the same date, is
+  dismissed "auto: found in QuickBooks" (edit_log; run log line "found in the uploaded QuickBooks exports"). A
+  different amount stays (Lifeseed #808 $906 vs QB $585.36).
+- #9 database.apply_schema(name, *statements): a sha1 fingerprint per statement set in schema_stamp; unchanged ->
+  no schema statement runs; changed -> SET LOCAL lock_timeout '2s', 3 tries 5 s apart, then carry on (returns False).
+  init_db = apply_schema("base", DDL, MIGRATIONS, _NORM_VENDOR_FN_DDL, _EXCLUSION_VIEW_DDL) + seeding/standing rules
+  (lock_timeout 10s, skipped on a busy table); the function and view moved out of _apply_standing_rules (replacing
+  the view every start needed an exclusive lock). web_db.init_web_schema: apply_schema("web", WEB_DDL).
+- Duplicate settling: dup_settle.SETTLE_MAX_DAYS = 10 — every copy's date readable and within 10 days, else left for a
+  person ("dates more than 10 days apart"). No current set was affected (dry run).
+- Menu (base.html): Learnings = a Setup > Rules tab (SETUP_GROUPS; learnings.html includes _setup_tabs); Chat has no
+  dropdown; Flags + Change requests moved from Review queue to the user menu at the right (name ▾: Flags, Change
+  requests, Log out); under 1100px the nav folds behind "☰ Menu" (one panel, every page listed; the panel and the
+  user menu close each other; outside click closes). Sign-in still lands on the Review queue (Joel).
+- Dashboard: Work order = run status, then the four money tiles (In QuickBooks twice?, QB corrections, Possible
+  duplicates, Statement exceptions — amber edge while non-zero; statements note "$N on vendor statements but not in
+  the app", dashboard_counts.statement_missing_amt), then Review queue, QB entry, Correspondence, Sales tax, QB match
+  review, Sales orders, Payments, then Flags / Change requests. "Last QuickBooks entry by store" marks a store with
+  bills ready and no person's entry in > 7 days (QB_ENTRY_STALE_DAYS): on 10/26 Maple and 3M (last 10/12), Refuah
+  (10/15), BMW / Lakewood Rx / Carepax (never by a person).
+- Records (/browse): paged in the database (list_all_records page/page_size -> (rows, total), ties broken by
+  record_type, record_id); 150 / 500 / all (2,000) per page, remembered per person (records_page_size). 319 KB
+  instead of 3.6 MB.
+- "Dismiss" app-wide: Correspondence button / status / tab / rule option / flash say Dismiss (stored value stays
+  'ignored', rule action stays 'ignore'); Emails page disposition "Dismissed". IgnoreLabels test passes again.
+- Tests: tests/test_fixes_1026.py (9). Suite 235, all pass.
