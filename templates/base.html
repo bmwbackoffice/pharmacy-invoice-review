@@ -40,6 +40,29 @@
     .navmenu a:hover { color:var(--brand); background:#eef4fb; }
     .navmenu a.active { color:var(--brand); background:#eaf1fb; box-shadow: inset 0 -3px 0 var(--brand); }
     header .right { margin-left:auto; color:var(--muted); }
+    /* The signed-in user's menu, at the right (Flags, Change requests, Log out). */
+    .usermenu .navtop { font-weight:600; border-radius:6px; }
+    .usermenu .navmenu { left:auto; right:0; }
+    /* Narrow windows (2026-10-26): instead of wrapping into two or three rows under a sticky header (a third of a
+       small screen), the menu folds behind a Menu button and opens as one list with every page in it. */
+    .navtoggle { display:none; background:none; border:1px solid var(--line); border-radius:6px; padding:5px 10px;
+                 font:inherit; font-weight:700; color:var(--ink); cursor:pointer; }
+    .navtoggle:hover { color:var(--brand); background:#eef4fb; }
+    @media (max-width: 1100px) {
+      .navtoggle { display:inline-block; }
+      header nav#topnav { display:none; position:absolute; top:100%; left:0; right:0; background:var(--card);
+                          border-bottom:1px solid var(--line); box-shadow:0 8px 24px rgba(0,0,0,.12);
+                          flex-direction:column; align-items:stretch; gap:0; padding:8px 14px 12px;
+                          max-height:calc(100vh - 56px); overflow-y:auto; }
+      header.nav-open nav#topnav { display:flex; }
+      #topnav .navgroup { display:block; border-bottom:1px solid var(--line); padding:4px 0; }
+      #topnav .navgroup:last-child { border-bottom:0; }
+      #topnav .navgroup-head { display:flex; box-shadow:none; }
+      #topnav .navcaret { display:none; }
+      #topnav .navmenu, #topnav .navgroup:hover > .navmenu { display:block; position:static; box-shadow:none; border:0;
+                                                              padding:0 0 2px 16px; min-width:0; }
+      #topnav .navmenu a { padding:5px 10px; }
+    }
     /* Wide layout: use most of the viewport (capped) so data tables get room, keeping side padding. */
     main { max-width:min(96vw, 1800px); margin:20px auto; padding:0 18px; }
     .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:16px; margin-bottom:16px; }
@@ -75,9 +98,20 @@
     .error { background:#fee2e2; color:var(--bad); padding:8px 12px; border-radius:6px; margin-bottom:12px; }
     .ok-msg { background:#dcfce7; color:var(--ok); padding:8px 12px; border-radius:6px; margin-bottom:12px; }
     .num { text-align:right; font-variant-numeric:tabular-nums; }
+    /* Drag-to-resize table columns (added to every table by the script in base.html). The grip is a
+       thin strip on each header cell's right edge; a table becomes 'resizable' only once dragged. */
+    th.col-rsz { position:sticky; }   /* NOT relative: with th's top:52px that pushed every header 52px down over the rows; sticky still anchors the grip */
+    .col-grip { position:absolute; top:0; right:0; width:7px; height:100%; cursor:col-resize;
+                user-select:none; z-index:6; }
+    .col-grip:hover, .col-grip.dragging { background:rgba(37,99,235,.30); }
+    table.resizable-table { table-layout:fixed; width:100%; }
+    table.resizable-table th, table.resizable-table td { overflow-wrap:anywhere; word-break:break-word; }
+    /* Inside a user-resized table, drop the compact truncation so widening a column reveals the full
+       value (it wraps to the column width instead of showing an ellipsis). */
+    table.resizable-table .trunc { max-width:none; overflow:visible; text-overflow:clip; white-space:normal; }
   </style>
 </head>
-<body{% if user and user.role == 'viewer' %} class="read-only"{% endif %}>
+<body{% if user and user.role == 'viewer' and not page_writable %} class="read-only"{% endif %}>
 {% if user and user.role == 'viewer' %}
 {# Read-only users: hide everything that would change data. The server refuses those requests anyway
    (review_app._read_only_guard); this just keeps buttons from showing that can't work. #}
@@ -92,16 +126,20 @@
   {% if user %}
   <header>
     <span class="brand">Invoice Review</span>
+    {# Narrow windows (2026-10-26): the menu folds behind this button instead of wrapping into rows. #}
+    <button type="button" class="navtoggle" aria-controls="topnav" aria-expanded="false"
+            onclick="toggleNavPanel(this)">&#9776; Menu</button>
     {% set path = request.url.path %}
     {# Grouped nav: each group = {href (primary link, or none for Setup), label, admin_only,
        children:[(href,label)...]}. Routes are unchanged — this only regroups the links. #}
     {% set nav_groups = [
         {'href':'/my-work',     'label':'My work',      'children':[]},
-        {'href':'/dashboard',   'label':'Dashboard',    'children':[]},
-        {'href':'/review',      'label':'Review queue', 'children':[('/statements','Statements'),('/flags','Flags'),('/requests','Requests'),('/tracked','Tracked'),('/ignored','Dismissed'),('/sales-orders','Sales orders')]},
-        {'href':'/qb',          'label':'QB entry',     'children':[('/payments','Payments'),('/qb-reconcile','QB reconcile')]},
-        {'href':'/chat',        'label':'Chat',         'children':[('/learnings','Learnings')]},
-        {'href':'/browse',      'label':'Records',      'children':[('/emails','Emails'),('/duplicates','Duplicates')]},
+        {'href':'/dashboard',   'label':'Dashboard',    'children':[('/reports/daily','Daily report'),('/scheduled-runs','Scheduled runs')]},
+        {'href':'/correspondence', 'label':'Correspondence', 'children':[('/reference/correspondence_rules','Rules'),('/reference/forward_contacts','Forward contacts')]},
+        {'href':'/review',      'label':'Review queue', 'children':[('/statements','Statements'),('/tracked','Tracked'),('/ignored','Dismissed'),('/sales-orders','Sales orders')]},
+        {'href':'/qb',          'label':'QB entry',     'children':[('/payments','Payments'),('/qb-reconcile','QB reconcile'),('/qb-reconcile/doubles','In QB twice?'),('/qb-corrections','QB corrections')]},
+        {'href':'/chat',        'label':'Chat',         'children':[]},
+        {'href':'/browse',      'label':'Records',      'children':[('/emails','Emails'),('/duplicates','Duplicates'),('/sales-tax','Sales tax')]},
         {'href':none,           'label':'Setup',        'children':[('/reference/vendor_name_map','Vendors'),('/reference/stores','Stores'),('/reference/class_rules','Rules')]},
         {'href':'/admin/users', 'label':'Users',        'admin_only':true, 'children':[]},
     ] %}
@@ -141,7 +179,19 @@
         {% endif %}
       {% endfor %}
     </nav>
-    <span class="right">{{ user.display_name }} ({{ 'read-only' if user.role == 'viewer' else user.role }}) · <a href="/logout">log out</a></span>
+    {# The signed-in user's menu (2026-10-26): Flags and Change requests moved here from Review queue. #}
+    {% set _um_here = path.startswith('/flags') or path.startswith('/requests') %}
+    <div class="right navgroup usermenu">
+      <div class="navgroup-head{{ ' active' if _um_here }}">
+        <button type="button" class="navtop" onclick="toggleNav(this)" aria-haspopup="true">{{ user.display_name }}
+          <span class="muted">({{ 'read-only' if user.role == 'viewer' else user.role }})</span> &#9662;</button>
+      </div>
+      <div class="navmenu">
+        <a href="/flags" class="{{ 'active' if path.startswith('/flags') }}">Flags</a>
+        <a href="/requests" class="{{ 'active' if path.startswith('/requests') }}">Change requests</a>
+        <a href="/logout">Log out</a>
+      </div>
+    </div>
   </header>
   {% endif %}
   <main>
@@ -177,13 +227,26 @@
     // keyboard focus (:focus-within) open it too, in CSS. Outside click/tap closes any pinned menu.
     function toggleNav(btn) {
       var g = btn.closest('.navgroup'), open = g.classList.contains('open');
-      document.querySelectorAll('#topnav .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
+      document.querySelectorAll('header .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
       if (!open) g.classList.add('open');
+      // The user menu and the narrow-window menu panel don't stay open together.
+      if (!open && g.classList.contains('usermenu')) closeNavPanel();
+    }
+    function closeNavPanel() {
+      var h = document.querySelector('header.nav-open');
+      if (h) { h.classList.remove('nav-open'); h.querySelector('.navtoggle').setAttribute('aria-expanded', 'false'); }
+    }
+    function toggleNavPanel(btn) {
+      var h = btn.closest('header'), o = h.classList.toggle('nav-open');
+      btn.setAttribute('aria-expanded', o);
+      if (o) { var u = h.querySelector('.usermenu.open'); if (u) u.classList.remove('open'); }
     }
     document.addEventListener('click', function (e) {
-      if (!e.target.closest('#topnav')) {
-        document.querySelectorAll('#topnav .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
+      if (!e.target.closest('#topnav') && !e.target.closest('.usermenu')) {
+        document.querySelectorAll('header .navgroup.open').forEach(function (x) { x.classList.remove('open'); });
       }
+      // The narrow-window menu closes on a click outside the header.
+      if (!e.target.closest('header')) closeNavPanel();
     });
     // Amount filter (see _macros.html amount_filter): flip between a single EXACT field and a
     // Min/Max range. The hidden group's inputs are disabled so only the active one submits.
@@ -219,6 +282,67 @@
         }
       } catch (e) { /* ignore a transient fetch failure */ }
     }, 20000);
+
+    // Make every data table's columns drag-resizable. Resizing steals width from the neighbor column
+    // so the table never overflows; widths persist per page in localStorage; a resized table switches
+    // to fixed layout + wrapping so widening a column reveals the full (previously truncated) value.
+    (function () {
+      try {
+        function freeze(table) {
+          if (table.classList.contains('resizable-table')) return;
+          Array.prototype.forEach.call(table.tHead.rows[0].cells, function (th) {
+            if (!th.style.width) th.style.width = th.offsetWidth + 'px';
+          });
+          table.classList.add('resizable-table');
+        }
+        document.querySelectorAll('main table').forEach(function (table, ti) {
+          if (!table.tHead || !table.tHead.rows.length) return;
+          if (table.classList.contains('no-colresize')) return;   // sizes its own columns (Setup lists)
+          var headRow = table.tHead.rows[0];
+          var key = 'colw:' + location.pathname + ':' + ti;
+          var saved = {};
+          try { saved = JSON.parse(localStorage.getItem(key) || '{}'); } catch (e) {}
+          var hasSaved = Object.keys(saved).length > 0;
+          if (hasSaved) freeze(table);
+          Array.prototype.forEach.call(headRow.cells, function (th, ci) {
+            th.classList.add('col-rsz');
+            if (hasSaved && saved[ci]) th.style.width = saved[ci] + 'px';
+            var grip = document.createElement('span');
+            grip.className = 'col-grip';
+            grip.title = 'Drag to resize column';
+            grip.addEventListener('click', function (e) { e.preventDefault(); e.stopPropagation(); });
+            grip.addEventListener('mousedown', function (e) {
+              e.preventDefault(); e.stopPropagation();
+              freeze(table);
+              grip.classList.add('dragging');
+              var next = th.nextElementSibling;
+              var startX = e.pageX, startW = th.offsetWidth, startNext = next ? next.offsetWidth : 0;
+              function move(ev) {
+                var delta = ev.pageX - startX;
+                var w = Math.max(40, startW + delta), applied = w - startW;
+                if (next) {
+                  var nw = startNext - applied;
+                  if (nw < 40) { nw = 40; w = startW + (startNext - 40); }
+                  next.style.width = nw + 'px';
+                }
+                th.style.width = w + 'px';
+              }
+              function up() {
+                document.removeEventListener('mousemove', move);
+                document.removeEventListener('mouseup', up);
+                grip.classList.remove('dragging');
+                saved[ci] = th.offsetWidth;
+                if (next) saved[ci + 1] = next.offsetWidth;
+                try { localStorage.setItem(key, JSON.stringify(saved)); } catch (e) {}
+              }
+              document.addEventListener('mousemove', move);
+              document.addEventListener('mouseup', up);
+            });
+            th.appendChild(grip);
+          });
+        });
+      } catch (e) { /* never break the page over column resize */ }
+    })();
   </script>
   {% endif %}
 </body>

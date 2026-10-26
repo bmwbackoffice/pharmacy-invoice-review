@@ -16,9 +16,10 @@ just: run this same app pointing at the same DB, add HTTPS + real logins.
 
 import csv
 import io
+import math
 import os
 import re
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -33,6 +34,9 @@ from starlette.middleware.sessions import SessionMiddleware
 import chat_qa
 import qb_match
 import web_db
+import database  # CORR_TOPICS (correspondence request types)
+import review_reasons  # short reason chips for the Review queue (2026-10-20)
+import dup_reasons  # short "why flagged" lines on Possible duplicates (2026-10-20)
 
 BASE_DIR = Path(__file__).parent
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-insecure-change-me")
@@ -52,7 +56,8 @@ async def _read_only_guard(request: Request, call_next):
     if request.method not in ("GET", "HEAD", "OPTIONS") and request.url.path not in _READ_ONLY_ALLOWED:
         uid = request.session.get("user_id")
         user = await run_in_threadpool(web_db.get_user_by_id, uid) if uid else None
-        if user and user.get("role") == "viewer":
+        # A read-only user may still be allowed to change things on a few pages (Users > Edit, 2026-10-21).
+        if user and user.get("role") == "viewer" and not web_db.user_can_write_path(user, request.url.path):
             wants_json = ("application/json" in request.headers.get("accept", "")
                           or request.headers.get("content-type", "").startswith("application/json"))
             if wants_json:
@@ -123,6 +128,7 @@ def us_datetime(value):
 
 
 templates.env.filters["us_date"] = us_date
+templates.env.filters["short_dup_reason"] = dup_reasons.short
 templates.env.filters["us_datetime"] = us_datetime
 templates.env.filters["store_label"] = web_db.store_label
 
@@ -152,7 +158,11 @@ SETUP_GROUPS = [
                 ("/reference/contact_store_map", "Contacts", ()),
                 ("/cards", "Cards", ("/reference/card_store_map",))]),
     ("Rules", [("/reference/class_rules", "Class rules", ()),
-               ("/reference/store_scope_rules", "Store rules", ())]),
+               ("/reference/store_scope_rules", "Store rules", ()),
+               ("/reference/correspondence_rules", "Correspondence rules", ()),
+               ("/reference/forward_contacts", "Forward contacts", ()),
+               # The AI's learned rules (2026-10-26, Joel: moved here from the Chat menu).
+               ("/learnings", "Learnings", ())]),
 ]
 
 
@@ -243,6 +253,8 @@ def render(request, template, user, **ctx):
             ctx["run_alert"] = run_alert()
         except Exception:
             ctx["run_alert"] = None
+    # Read-only users see this page's buttons when they're allowed to change things on it.
+    ctx.setdefault("page_writable", web_db.user_can_write_path(user, request.url.path) if user else False)
     return templates.TemplateResponse(request, template, {"user": user, **ctx})
 
 
@@ -385,6 +397,17 @@ def root(request: Request):
 #    an assignee field — everything else is a shared pool).
 # --------------------------------------------------------------------------- #
 
+def _safe_count(fn):
+    try:
+        return fn()
+    except Exception as e:
+        print(f"(dashboard count failed: {e})")
+        return 0
+
+
+QB_ENTRY_STALE_DAYS = 7   # dashboard: a store's last QuickBooks entry older than this, with bills waiting, stands out
+
+
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard(request: Request):
     user = current_user(request)
@@ -392,22 +415,45 @@ def dashboard(request: Request):
         return _login_redirect()
     d = web_db.dashboard_counts()
     setup = d["qb_invoices_setup"]
+    try:
+        n_qb_doubles = len(web_db.qb_double_entries("open"))
+    except Exception as e:
+        print(f"(dashboard: QB double entries failed: {e})")
+        n_qb_doubles = 0
+    n_twice_sets = len({n for n in web_db.qb_twice_notes().values()})
     # Tiles merged so each page is represented ONCE (counts/notes combine the sub-queues). Since
     # 2026-10-12 split in two: "work" = queues people work through (everyone sees them); "health" =
     # checks that something went wrong in the system (admins only -- noise for reviewers).
+    # The four that can cost money if they're missed come first, marked "money" (2026-10-26, Joel).
+    stmt_amt = d.get("statement_missing_amt") or 0
     work = [
+        {"label": "In QuickBooks twice?", "count": n_qb_doubles, "href": "/qb-reconcile/doubles", "money": True,
+         "note": "bill pairs in the uploaded QuickBooks exports that look like the same bill twice"},
+        {"label": "QB corrections", "count": _safe_count(web_db.qb_corrections_open_count), "href": "/qb-corrections",
+         "money": True, "note": "bills changed in the app after they were entered in QuickBooks"},
+        {"label": "Possible duplicates", "count": d["duplicates"], "href": "/duplicates", "money": True,
+         "note": "sets to resolve" + (f" ({n_twice_sets} entered twice in QuickBooks)" if n_twice_sets else "")},
+        {"label": "Statement exceptions", "count": d["statement"], "href": "/statements", "money": True,
+         "note": (f"${stmt_amt:,.0f} on vendor statements but not in the app" if stmt_amt
+                  else "missing/mismatched invoices from a statement")},
+        # The daily queues.
         {"label": "Review queue", "count": d["review"], "href": "/review",
          "note": f"{d['review']} awaiting an answer", "breakdown": d["review_by"]},
-        {"label": "Statement exceptions", "count": d["statement"], "href": "/statements",
-         "note": "missing/mismatched invoices from a statement"},
-        {"label": "Possible duplicates", "count": d["duplicates"], "href": "/duplicates",
-         "note": "sets to resolve"},
         {"label": "QB entry", "count": d["qb_invoices"] + d["qb_credits"], "href": "/qb",
          "note": (f"{d['qb_invoices']} invoices"
                   + (f" ({setup} need vendor/account setup)" if setup else "")
                   + f", {d['qb_credits']} credit memos")},
+        {"label": "Correspondence", "count": d["corr_open"] + d["corr_follow_up"], "href": "/correspondence",
+         "note": f"{d['corr_open']} not yet looked at, {d['corr_follow_up']} to follow up"},
+        {"label": "Sales tax charged", "count": web_db.sales_tax_open_count(), "href": "/sales-tax",
+         "note": "bills with sales tax from vendors not marked OK to charge"},
+        {"label": "QB match review", "count": d.get("qb_pending", 0), "href": "/qb-reconcile/review",
+         "note": "doubtful QuickBooks-reconcile matches to confirm"},
+        {"label": "Sales orders (held)", "count": d["sales_orders"], "href": "/sales-orders",
+         "note": "held, awaiting an invoice"},
         {"label": "Payments to enter", "count": d["payments"], "href": "/payments",
          "note": "not yet entered"},
+        # About the app itself (also in the menu under your name).
         {"label": "Flags", "count": d["flags_pending"] + d["flags_approved"] + d["investigations"],
          "href": "/flags",
          "note": (f"{d['flags_pending']} pending, {d['flags_approved']} approved for fix"
@@ -415,10 +461,6 @@ def dashboard(request: Request):
         {"label": "Change requests", "count": d["requests_pending"] + d["requests_approved"],
          "href": "/requests",
          "note": f"{d['requests_pending']} pending, {d['requests_approved']} approved for build"},
-        {"label": "Sales orders (held)", "count": d["sales_orders"], "href": "/sales-orders",
-         "note": "held, awaiting an invoice"},
-        {"label": "QB match review", "count": d.get("qb_pending", 0), "href": "/qb-reconcile/review",
-         "note": "doubtful QuickBooks-reconcile matches to confirm"},
     ]
     # The scheduled run's status is shown to EVERYONE, first in Work (2026-10-13): if runs stop or fail,
     # whoever opens the dashboard first should notice. The rest of System health stays admins-only.
@@ -435,6 +477,7 @@ def dashboard(request: Request):
          "note": "extracted but never recorded"},
         {"label": "Cards → store", "count": d["cards"], "href": "/cards",
          "note": "card last-4 with no store mapping"},
+        last_backup_tile(),
     ] if user["role"] == "admin" else []
     # When each store's records were last entered in QuickBooks, and how many that sitting (2026-10-14).
     try:
@@ -442,8 +485,191 @@ def dashboard(request: Request):
     except Exception as e:
         print(f"(dashboard: last QB entry by store failed: {e})")
         qb_entry = []
+    # A store with bills ready to export and no QuickBooks entry for over a week stands out (2026-10-26, Joel).
+    now_utc = datetime.now(timezone.utc)
+    for s in qb_entry:
+        at = s.get("last_at")
+        s["days_ago"] = (now_utc - at).days if at else None
+        s["stale"] = bool(s.get("ready")) and (at is None or s["days_ago"] > QB_ENTRY_STALE_DAYS)
     return render(request, "dashboard.html", user, work=work, health=health, qb_entry=qb_entry,
-                  qb_entry_gap=web_db.QB_ENTRY_GAP_MINUTES)
+                  qb_entry_gap=web_db.QB_ENTRY_GAP_MINUTES, qb_entry_stale_days=QB_ENTRY_STALE_DAYS,
+                  notifications=web_db.list_notifications(user["username"]))
+
+
+# --------------------------------------------------------------------------- #
+# Daily report (2026-10-26, Joel): how many emails came in each day and what they were, what was recorded,
+# sent to review, entered in QuickBooks and set aside as duplicates. Numbers: web_db.daily_report.
+# --------------------------------------------------------------------------- #
+
+# Email types on the chart, bottom to top: (key, label, colour). The first five are slots 1-5 of the categorical
+# palette in their fixed order (checked: colour-blind and normal-vision separation pass on white; three are under
+# 3:1 contrast, so the legend, the hover readout and the table below carry the values). "Other" is a neutral gray.
+REPORT_SERIES = [("invoice", "Invoices", "#2a78d6"), ("payment", "Payments", "#eb6834"),
+                 ("statement", "Statements", "#1baf7a"), ("shipment_notice", "Shipping notices", "#eda100"),
+                 ("correspondence", "Correspondence", "#e87ba4"), ("other", "Other", "#a3a19a")]
+_WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _nice_step(peak, ticks=4):
+    """A clean axis step (1, 2 or 5 x 10^k) giving about `ticks` gridlines up to `peak`."""
+    raw = max(peak, 1) / ticks
+    mag = 10 ** math.floor(math.log10(raw))
+    return next(m * mag for m in (1, 2, 5, 10) if m * mag >= raw)
+
+
+def _daily_chart(rows):
+    """Geometry for the stacked column chart of emails per day by type (oldest day on the left), drawn as plain
+    SVG on the server. Thin columns (at most 24px), a 2px gap between stacked segments, a 4px rounded end on the
+    top segment only, hairline gridlines at clean steps. The page's script only shows the per-day readout."""
+    days = list(reversed(rows))
+    W, left, right, top, plot_h, axis_h = 960, 40, 8, 12, 200, 24
+    n = max(len(days), 1)
+    slot = (W - left - right) / n
+    bar = max(3.0, min(24.0, slot * 0.62))
+    peak = max((d["emails"] for d in days), default=0)
+    step = int(max(1, _nice_step(peak)))
+    ymax = max(step, math.ceil(peak / step) * step)
+    scale = plot_h / ymax
+    base = top + plot_h
+    every = max(1, math.ceil(n / 12))              # about a dozen day labels, the newest day always labeled
+    cols = []
+    for i, d in enumerate(days):
+        x0 = left + slot * (i + 0.5) - bar / 2
+        present = [(k, color) for k, _label, color in REPORT_SERIES if d[k]]
+        y, segs = base, []
+        for j, (k, color) in enumerate(present):
+            y_top = y - d[k] * scale
+            y_bot = y - (2 if j else 0)            # the surface gap sits under every segment but the first
+            if y_bot - y_top >= 0.5:
+                r = min(4.0, (y_bot - y_top), bar / 2) if j == len(present) - 1 else 0
+                x1 = x0 + bar
+                segs.append({"color": color, "d": (
+                    f"M{x0:.1f},{y_bot:.1f} L{x0:.1f},{y_top + r:.1f} Q{x0:.1f},{y_top:.1f} {x0 + r:.1f},{y_top:.1f} "
+                    f"L{x1 - r:.1f},{y_top:.1f} Q{x1:.1f},{y_top:.1f} {x1:.1f},{y_top + r:.1f} L{x1:.1f},{y_bot:.1f} Z")})
+            y = y_top
+        cols.append({"x": left + slot * i, "w": slot, "cx": left + slot * (i + 0.5), "segs": segs,
+                     "label": f"{d['day'].month}/{d['day'].day}" if (n - 1 - i) % every == 0 else ""})
+    ticks = [{"v": v, "y": base - v * scale} for v in range(0, int(ymax) + 1, step)]
+    readout = [{"day": f"{_WEEKDAYS[d['day'].weekday()]} {d['day'].month}/{d['day'].day}", "total": d["emails"],
+                "parts": [[label, color, d[k]] for k, label, color in REPORT_SERIES]} for d in days]
+    return {"W": W, "H": top + plot_h + axis_h, "left": left, "right": W - right, "top": top, "base": base,
+            "plot_h": plot_h, "cols": cols, "ticks": ticks, "readout": readout}
+
+
+def _report_days(days):
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return 14
+    return days if days in web_db.REPORT_DAY_CHOICES else 14
+
+
+@app.get("/reports/daily", response_class=HTMLResponse)
+def daily_report_page(request: Request, days: str = "14"):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    rep = web_db.daily_report(_report_days(days))
+    return render(request, "daily_report.html", user, rep=rep, chart=_daily_chart(rep["rows"]),
+                  series=REPORT_SERIES, choices=web_db.REPORT_DAY_CHOICES, weekdays=_WEEKDAYS)
+
+
+@app.get("/reports/daily.csv")
+def daily_report_csv(request: Request, days: str = "14"):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    rep = web_db.daily_report(_report_days(days))
+    cols = [("day", "Day"), ("emails", "Emails received"), ("invoice", "Invoice emails"), ("payment", "Payment emails"),
+            ("statement", "Statement emails"), ("shipment_notice", "Shipping notices"),
+            ("correspondence", "Correspondence"), ("other", "Other emails"), ("bills", "Bills recorded"),
+            ("for_qb", "Bills for QuickBooks"), ("bills_amt", "Bills total"), ("credits", "Credit memos recorded"),
+            ("payments", "Payments recorded"), ("review", "Sent to review"), ("entered", "Entered in QuickBooks"),
+            ("entered_amt", "Entered total"), ("dups", "Duplicates set aside")]
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow([label for _k, label in cols])
+    for r in rep["rows"]:
+        w.writerow([r["day"].isoformat() if k == "day" else (f"{r[k]:.2f}" if k.endswith("_amt") else r[k])
+                    for k, _label in cols])
+    fname = f"daily_report_{rep['start'].isoformat()}_to_{date.today().isoformat()}.csv"
+    return Response(content="﻿" + buf.getvalue(), media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@app.get("/sales-tax", response_class=HTMLResponse)
+def sales_tax_page(request: Request, show: str = "open", store: str = "", msg: str = ""):
+    """Bills with a sales-tax charge, grouped by vendor; a vendor marked OK to charge drops off (2026-10-21)."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    show = show if show in ("open", "ok", "all") else "open"
+    return render(request, "sales_tax.html", user, groups=web_db.list_sales_tax_bills(show, store or None),
+                  file_url=file_preview_url,
+                  show=show, store=store, msg=msg,
+                  stores=[r["store_name"] for r in web_db.list_reference("stores") if r.get("store_name")])
+
+
+@app.post("/sales-tax/store-ok")
+async def sales_tax_store_ok(request: Request):
+    """OK a vendor's sales tax at one store (2026-10-23), or undo it."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    try:
+        web_db.set_store_sales_tax_ok((form.get("vendor") or "").strip(), (form.get("store") or "").strip(),
+                                      form.get("ok") != "0", user["username"])
+    except ValueError as e:
+        return _redirect_with_flash(request.headers.get("referer") or "/sales-tax", str(e))
+    return RedirectResponse(request.headers.get("referer") or "/sales-tax", status_code=302)
+
+
+@app.post("/sales-tax/bill-ok")
+async def sales_tax_bill_ok(request: Request):
+    """OK just this one bill's sales tax (2026-10-23), or undo it."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    bid = form.get("invoice_id") or ""
+    if bid.isdigit():
+        web_db.set_bill_sales_tax_ok(int(bid), form.get("ok") != "0", user["username"])
+    return RedirectResponse(request.headers.get("referer") or "/sales-tax", status_code=302)
+
+
+@app.post("/sales-tax/vendor-ok")
+async def sales_tax_vendor_ok(request: Request):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    vendor = (form.get("vendor") or "").strip()
+    ok = form.get("ok") != "0"
+    msg = ""
+    try:
+        web_db.set_vendor_sales_tax_ok(vendor, ok, user["username"])
+        msg = (f"{vendor} is marked OK to charge sales tax -- its bills are off this list." if ok
+               else f"{vendor} is back on the list.")
+    except ValueError as e:
+        msg = str(e)
+    back = request.headers.get("referer") or "/sales-tax"
+    back = re.sub(r"([?&])msg=[^&]*&?", r"\1", back).rstrip("?&")
+    return RedirectResponse(back + ("&" if "?" in back else "?") + "msg=" + quote(msg), status_code=302)
+
+
+@app.post("/notifications/dismiss")
+async def notifications_dismiss(request: Request):
+    """Dismiss one notification (id) or all of the user's (no id), then back to where they were."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    nid = form.get("id")
+    web_db.dismiss_notifications(user["username"], int(nid) if nid and str(nid).isdigit() else None)
+    go = form.get("go") or ""
+    return RedirectResponse(go if go.startswith("/") else (request.headers.get("referer") or "/dashboard"),
+                            status_code=302)
 
 
 # --------------------------------------------------------------------------- #
@@ -512,6 +738,17 @@ def my_work(user):
                "detail": s.get("status_label") or "", "when": s.get("flagged_at"),
                "href": "/statements", "quick_fix": False, "assigned_to": s.get("assigned_to")},
               s.get("assigned_to"))
+    try:                                                      # correspondence follow-ups (2026-10-19)
+        for e in web_db.list_correspondence_follow_ups():
+            what = (e.get("what") or e.get("corr_note") or "").strip()
+            place({"kind": "Correspondence", "title": (e.get("subject") or e.get("filename") or "")[:90],
+                   "detail": (f"{e.get('from_address') or ''} — " if e.get("from_address") else "")
+                             + what[:140] + ("…" if len(what) > 140 else ""),
+                   "when": e.get("corr_at"),
+                   "href": "/correspondence?status=follow_up&search=" + quote((e.get("subject") or "")[:60]),
+                   "quick_fix": False, "assigned_to": e.get("corr_assigned_to")}, e.get("corr_assigned_to"))
+    except Exception as ex:
+        print(f"(my work: correspondence follow-ups failed: {ex})")
     try:
         dup_sets = web_db.list_duplicate_candidates()
     except Exception:
@@ -522,6 +759,15 @@ def my_work(user):
                                                     f"{' #' + str(first.get('number')) if first.get('number') else ''}",
                        "detail": f"{len(g.get('records') or [])} copies — keep the right one",
                        "when": None, "href": "/duplicates", "quick_fix": False, "assigned_to": None})
+    try:                                                      # QB corrections (2026-10-21)
+        for c in web_db.list_qb_corrections("open"):
+            anyone.append({"kind": "QB fix", "title": f"{c.get('vendor') or '?'}{' #' + c['number'] if c.get('number') else ''}"
+                                                       f" — {c['field_label']}: {c.get('old_value') or '—'} → {c.get('new_value') or '—'}",
+                           "detail": f"changed in the app by {c.get('changed_by') or '?'}; update the bill in QuickBooks",
+                           "when": c.get("changed_at"), "href": "/qb-corrections", "quick_fix": False,
+                           "assigned_to": None})
+    except Exception as ex:
+        print(f"(my work: QB corrections failed: {ex})")
     for c in web_db.qb_list_candidates(status="pending"):
         anyone.append({"kind": "QB match", "title": f"{c.get('qb_name') or '?'} #{c.get('qb_num') or '?'}",
                        "detail": c.get("confidence_reason") or "doubtful QuickBooks match to confirm",
@@ -779,6 +1025,37 @@ def last_scheduled_run_tile():
             "note": note, "alert": run["alert"]}
 
 
+BACKUP_ALERT_HOURS = 36   # the nightly database backup (backup_db.py) is overdue after this
+
+
+def last_backup_tile():
+    """System health tile for the nightly database backup (2026-10-26): the newest dump in backups/ and the last
+    line backup_db.py wrote to logs/backups.log. Red when there's none, it's over BACKUP_ALERT_HOURS old, or the
+    last attempt failed (a Drive upload failure leaves a dump on this PC only)."""
+    dumps = sorted((BASE_DIR / "backups").glob("pharmacy_invoices_*.dump"), key=lambda p: p.stat().st_mtime)
+    last_line = ""
+    try:
+        lines = (BASE_DIR / "logs" / "backups.log").read_text(encoding="utf-8").strip().splitlines()
+        last_line = next((ln for ln in reversed(lines) if "FAILED" in ln or "backup OK" in ln), "")
+    except OSError:
+        pass
+    failed = "FAILED" in last_line
+    if not dumps:
+        return {"label": "Database backup", "count": "None", "href": "/dashboard", "alert": True,
+                "note": "no backup yet: run backup_db.py, and setup_backup_task.ps1 for the nightly one"}
+    at = datetime.fromtimestamp(dumps[-1].stat().st_mtime)
+    hours = (datetime.now() - at).total_seconds() / 3600
+    age = f"{hours:.0f}h ago" if hours < 48 else f"{hours / 24:.0f} days ago"
+    note = (f"last {at.month}/{at.day} {at.strftime('%I:%M %p').lstrip('0')}, nightly to Drive (private), "
+            f"{len(dumps)} kept here")
+    if failed:
+        note = "the last attempt failed: " + last_line.split("  ", 1)[-1][:120]
+    elif hours > BACKUP_ALERT_HOURS:
+        note += f" -- overdue (more than {BACKUP_ALERT_HOURS} hours); is the nightly task set up and the PC on?"
+    return {"label": "Database backup", "count": age, "href": "/dashboard",
+            "alert": failed or hours > BACKUP_ALERT_HOURS, "note": note}
+
+
 _RUN_ALERT_CACHE = {"at": 0.0, "value": None}
 _RUN_ALERT_TTL = 30          # seconds; the banner reads the run log at most this often
 
@@ -905,11 +1182,12 @@ def no_live_copy_confirm(request: Request, record_type: str = Form(...), vendor_
 @app.get("/review", response_class=HTMLResponse)
 def review_list(request: Request, run: str = "", sort: str = "", direction: str = "desc",
                 store: str = "", vendor: str = "", search: str = "", show_answered: str = "",
-                assigned: str = ""):
+                assigned: str = "", reason: str = ""):
     user = current_user(request)
     if not user:
         return _login_redirect()
     include_answered = show_answered in ("1", "true", "on", "yes")
+    reason = (reason or "").strip()
     search = (search or "").strip()
     items = web_db.list_open_reviews(run_id=run or None, sort=sort, direction=direction,
                                      store=store or None, vendor=vendor or None,
@@ -925,6 +1203,29 @@ def review_list(request: Request, run: str = "", sort: str = "", direction: str 
         rkey = it.get("review_key") or it.get("filename")
         it["note_count"] = counts.get(rkey, 0)
         it["has_pending_upload"] = rkey in pending_upload
+        # Short reason chips + one leftover line instead of the run-on "why flagged" text (2026-10-20).
+        it["why"] = review_reasons.summarize(it.get("question"), it.get("duplicate_group_id"))
+        when = it.get("flagged_at") or it.get("date_flagged")
+        try:
+            if when is not None and not isinstance(when, datetime):
+                when = datetime.combine(when, datetime.min.time())
+            if when is not None and when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            it["age_days"] = max(0, (datetime.now(timezone.utc) - when).days) if when else None
+        except Exception:
+            it["age_days"] = None
+    # Reason counts for the filter chips (over everything the other filters show), plus how many
+    # distinct vendor spellings would clear the "Vendor not in list" items.
+    reason_counts = {}
+    vendor_fix_names = set()
+    for it in items:
+        for k in it["why"]["reasons"]:
+            reason_counts[k] = reason_counts.get(k, 0) + 1
+        if "vendor" in it["why"]["reasons"]:
+            vendor_fix_names.add((it["why"].get("vendor_name") or it.get("vendor_matched") or "").strip().lower())
+    reason_chips = [(k, lbl, css, reason_counts[k]) for k, lbl, css in review_reasons.REASONS if reason_counts.get(k)]
+    if reason:
+        items = [it for it in items if reason in it["why"]["reasons"]]
     # Sink items that carry internal notes to the bottom. Python's sort is STABLE, so
     # the DB order (default or column-sorted) is preserved WITHIN the noted/not-noted groups.
     items.sort(key=lambda it: 1 if it.get("note_count") else 0)
@@ -945,12 +1246,13 @@ def review_list(request: Request, run: str = "", sort: str = "", direction: str 
                   stores=opts["stores"], vendors=opts["vendors"],
                   store=store, vendor=vendor, search=search, show_answered=include_answered,
                   assigned=assigned, users=active_users,
+                  reason=reason, reason_chips=reason_chips, vendor_fix_n=len(vendor_fix_names - {""}),
                   answered_n=web_db.answered_count(run_id=run or None, store=store or None,
                                                    vendor=vendor or None, search=search or None,
                                                    assigned=assigned or None),
                   ignored_n=web_db.ignored_count(),
                   params=dict(run=run, sort=sort, direction=direction, store=store,
-                              vendor=vendor, search=search, assigned=assigned,
+                              vendor=vendor, search=search, assigned=assigned, reason=reason,
                               show_answered=("1" if include_answered else "")))
 
 
@@ -998,14 +1300,40 @@ def review_detail(request: Request, review_id: int, flagged: str = "", fix_error
     for m in manual:
         m["preview_url"] = _manual_preview_url(m.get("file_path"))
     has_pending_upload = any(not m.get("consumed_at") for m in manual)
-    return render(request, "review_detail.html", user, item=item,
+    # 2026-10-20 redesign: reason chips + fix links, age, and which "Resolve it" tab opens first.
+    why = review_reasons.summarize(item.get("question"), item.get("duplicate_group_id"))
+    fix_kinds = quick_fix_kinds(item.get("question"))
+    # No vendor, or one that isn't in Vendor names: offer the vendor list first (2026-10-21).
+    if not (item.get("vendor_matched") or "").strip() or "vendor" in why["reasons"]:
+        fix_kinds = ["vendor"] + [k for k in fix_kinds if k != "vendor"]
+    if (item.get("answer") or "").strip():
+        default_tab = "answer"
+    elif fix_kinds:
+        default_tab = "fix"
+    elif set(why["reasons"]) & {"page", "attach"}:
+        default_tab = "upload"
+    else:
+        default_tab = "answer"
+    age_days = None
+    when = item.get("flagged_at") or item.get("date_flagged")
+    try:
+        if when is not None and not isinstance(when, datetime):
+            when = datetime.combine(when, datetime.min.time())
+        if when is not None and when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        age_days = max(0, (datetime.now(timezone.utc) - when).days) if when else None
+    except Exception:
+        pass
+    return render(request, "review_detail.html", user, item=item, why=why, default_tab=default_tab,
+                  vendor_names=web_db.standard_vendor_names(),
+                  age_days=age_days,
                   preview=file_preview_url(item.get("file_path")),
                   siblings=web_db.list_email_siblings(item.get("source_email")),
                   notes=web_db.list_review_notes(rkey),
                   users=[u for u in web_db.list_users() if u.get("active")],
                   manual_attachments=manual, has_pending_upload=has_pending_upload,
                   flagged=flagged, stores=web_db.store_names(),
-                  fix_kinds=quick_fix_kinds(item.get("question")), fix_error=fix_error)
+                  fix_kinds=fix_kinds, fix_error=fix_error)
 
 
 @app.post("/review/{review_id}/attach")
@@ -1125,7 +1453,7 @@ _QUICK_FIX_SIGNS = {
     "amount": ("no usable amount", "calculated from line items"),
     "enter": ("marked this bill not for quickbooks",),
 }
-_QUICK_FIX_LINE = re.compile(r"^\s*(Store|Date|Amount|Enter in QuickBooks):.*$\n?", re.I | re.M)
+_QUICK_FIX_LINE = re.compile(r"^\s*(Vendor|Store|Date|Amount|Enter in QuickBooks):.*$\n?", re.I | re.M)
 
 
 def quick_fix_kinds(question):
@@ -1134,10 +1462,17 @@ def quick_fix_kinds(question):
     return [k for k, signs in _QUICK_FIX_SIGNS.items() if any(s in q for s in signs)]
 
 
-def compose_quick_fix_answer(existing, store="", date="", amount="", enter=False, note="", stores=()):
+def compose_quick_fix_answer(existing, store="", date="", amount="", enter=False, note="", stores=(),
+                             vendor="", vendors=()):
     """The Answer text for a Quick fix: one line per fix, then the reviewer's note (if any), then any
     earlier free-text answer with its old fix lines removed. Returns (answer, errors)."""
     lines, errors = [], []
+    if vendor:
+        canon = {v.strip().lower(): v for v in vendors if v}
+        if vendor.strip().lower() in canon:
+            lines.append(f"Vendor: {canon[vendor.strip().lower()]}")
+        else:
+            errors.append("Pick a vendor from the list (or add it in Setup › Vendor names first).")
     if store:
         if store in stores:
             lines.append(f"Store: {store}")
@@ -1168,7 +1503,8 @@ def compose_quick_fix_answer(existing, store="", date="", amount="", enter=False
 
 @app.post("/review/{review_id}/quick-fix")
 def review_quick_fix(request: Request, review_id: int, store: str = Form(""), fix_date: str = Form(""),
-                     amount: str = Form(""), enter: str = Form(""), note: str = Form("")):
+                     amount: str = Form(""), enter: str = Form(""), note: str = Form(""),
+                     vendor: str = Form("")):
     """Save a Quick fix as this item's Answer (keeping its Notes to Learn). Nothing is reprocessed here;
     the next classify run applies the values in code."""
     user = current_user(request)
@@ -1178,7 +1514,9 @@ def review_quick_fix(request: Request, review_id: int, store: str = Form(""), fi
     if not item:
         return RedirectResponse("/review", status_code=302)
     answer, errors = compose_quick_fix_answer(item.get("answer"), store.strip(), fix_date.strip(),
-                                              amount.strip(), bool(enter), note, web_db.store_names())
+                                              amount.strip(), bool(enter), note, web_db.store_names(),
+                                              vendor=vendor.strip(),
+                                              vendors=web_db.standard_vendor_names() if vendor.strip() else ())
     if errors:
         return RedirectResponse(f"/review/{review_id}?fix_error={quote(' '.join(errors))}", status_code=302)
     web_db.submit_review_answer(review_id, answer, item.get("notes_to_learn"), user["username"])
@@ -1443,9 +1781,13 @@ QB_DATA_COLUMNS = ["Vendor", "Account", "Store", "Invoice #", "Date", "Amount", 
 # the QuickBooks import (store maps to class/location separately), so it's kept visible for context
 # but stripped from the copied/exported column set.
 QB_COPY_EXPORT_HIDE = {"Store"}
-# "Reference" columns: always rendered on-screen at the end of each row for quick access,
-# excluded from CSV export / copy unless the user opts a column in (qb_export_include_refs).
+# "Reference" columns: always rendered on-screen at the end of each row for quick access.
 QB_REFERENCE_COLUMNS = ["Possible Duplicate", "File Link", "Gmail Link"]
+# UNIFIED QuickBooks-entry output layout — the SAME for every user (Joel's design). Used by BOTH the
+# Excel/CSV export and "Copy Selected", regardless of who's logged in or how they've arranged their
+# on-screen view. There are deliberately no per-user export layouts/options. (Store is omitted — it's
+# not a QB-import column; it maps to class/location separately. To change the house layout, edit here.)
+QB_EXPORT_LAYOUT = ["Date", "Invoice #", "Vendor", "Account", "Amount", "Memo", "Class"]
 # Column -> sortable ORDER-BY key (only these have clickable sort headers).
 QB_SORT_KEY = {"Vendor": "vendor", "Store": "store", "Invoice #": "number", "Date": "date",
                "Amount": "amount", "Sales Tax": "sales_tax", "Shipping": "ship"}
@@ -1616,13 +1958,9 @@ def qb_list(request: Request, entered: str = "no", run: str = "", email: str = "
         # Combined one-cell memo from the SAME batched short links (no extra queries).
         r["memo"] = _qb_memo(r["short_file"], r["short_gmail"])
     view_columns = _sanitize_qb_columns(prefs.get("qb_view_columns"))
-    export_follow = prefs.get("qb_export_follow_view", True)
-    export_columns = _sanitize_qb_columns(prefs.get("qb_export_columns"))
-    export_include_refs = _sanitize_qb_refs(prefs.get("qb_export_include_refs"))
-    # Copy Selected must match what Export CSV actually produces: follow-view uses the on-screen
-    # columns, otherwise the user's separate custom export-column layout (same resolution as qb_export).
-    copy_columns = [c for c in ((view_columns if export_follow else export_columns) + export_include_refs)
-                    if c not in QB_COPY_EXPORT_HIDE]
+    # Copy Selected and Export both use the ONE unified QB-entry layout, same for every user (the
+    # on-screen view is display-only and no longer changes what's copied/exported).
+    copy_columns = list(QB_EXPORT_LAYOUT)
     return render(request, "qb.html", user, rows=rows, entered=entered,
                   file_url=file_preview_url, runs=web_db.list_runs(), run=run, email=email,
                   store=store, stores=web_db.store_names(), dup=dup,
@@ -1633,11 +1971,10 @@ def qb_list(request: Request, entered: str = "no", run: str = "", email: str = "
                   missing=missing, missing_count=missing_count,
                   record_types=["invoice", "credit_memo"],
                   view_columns=view_columns, all_columns=QB_DATA_COLUMNS,
-                  reference_columns=QB_REFERENCE_COLUMNS, export_include_refs=export_include_refs,
+                  reference_columns=QB_REFERENCE_COLUMNS,
                   copy_columns=copy_columns,
                   qb_sort_key=QB_SORT_KEY, qb_numeric=list(QB_NUMERIC_COLS),
                   qb_data_attr=QB_DATA_ATTR,
-                  export_follow=export_follow, export_columns=export_columns,
                   pg=pg, page_size_options=PAGE_SIZE_OPTIONS,
                   params=dict(entered=entered, run=run, store=store,
                               email=email, dup=dup, ignored=ignored, group=group,
@@ -1650,26 +1987,18 @@ def qb_list(request: Request, entered: str = "no", run: str = "", email: str = "
 
 @app.post("/qb/columns")
 async def qb_columns(request: Request):
-    """Persist this user's QB-entry column view (visibility + order) and CSV-export
-    preference. 'reset' restores the full canonical order + follow-view. Web-only."""
+    """Persist this user's ON-SCREEN QB-entry column view (visibility + order). The Copy/Export
+    layout is NOT user-configurable — it's the single unified QB_EXPORT_LAYOUT. 'reset' restores the
+    canonical on-screen order. Web-only."""
     user = current_user(request)
     if not user:
         return _login_redirect()
     form = await request.form()
     if form.get("reset"):
         web_db.set_user_pref(user["id"], "qb_view_columns", list(QB_DATA_COLUMNS))
-        web_db.set_user_pref(user["id"], "qb_export_follow_view", True)
-        web_db.set_user_pref(user["id"], "qb_export_include_refs", [])
         return RedirectResponse(request.headers.get("referer", "/qb"), status_code=302)
     web_db.set_user_pref(user["id"], "qb_view_columns",
                          _sanitize_qb_columns(list(form.getlist("view_col"))))
-    web_db.set_user_pref(user["id"], "qb_export_include_refs",
-                         _sanitize_qb_refs(list(form.getlist("include_ref"))))
-    follow = form.get("export_follow") == "1"
-    web_db.set_user_pref(user["id"], "qb_export_follow_view", follow)
-    if not follow:
-        web_db.set_user_pref(user["id"], "qb_export_columns",
-                             _sanitize_qb_columns(list(form.getlist("export_col"))))
     return RedirectResponse(request.headers.get("referer", "/qb"), status_code=302)
 
 
@@ -1754,22 +2083,9 @@ def qb_export(request: Request, entered: str = "no", run: str = "", email: str =
     def _abs(link):  # local preview paths -> absolute so the CSV link is clickable
         return (base + link) if link and link.startswith("/") else (link or "")
 
-    # Column set: 'standard' ignores prefs (always the canonical QB-import order — the
-    # safe fallback). Otherwise follow the user's export pref: match the on-screen view,
-    # or a separately-configured export layout. A user with no prefs gets the canonical
-    # order either way, so today's CSV is unchanged.
-    if layout == "standard":
-        cols = list(QB_DATA_COLUMNS)
-    else:
-        prefs = web_db.get_user_prefs(user["id"])
-        if prefs.get("qb_export_follow_view", True):
-            cols = _sanitize_qb_columns(prefs.get("qb_view_columns"))
-        else:
-            cols = _sanitize_qb_columns(prefs.get("qb_export_columns"))
-        cols = cols + _sanitize_qb_refs(prefs.get("qb_export_include_refs"))   # opted-in refs
-
-    # The store isn't part of the QuickBooks import — drop it from the CSV (same as Copy Selected).
-    cols = [c for c in cols if c not in QB_COPY_EXPORT_HIDE]
+    # ONE unified layout for every user — no per-user export layouts/options (the `layout` param is
+    # accepted for backward compatibility but ignored). Same columns as "Copy Selected".
+    cols = list(QB_EXPORT_LAYOUT)
 
     # Compact the File/Gmail links to internal short links so they fit in QB memos —
     # resolve them ALL in one db round-trip, then look them up per cell.
@@ -1863,7 +2179,20 @@ async def record_duplicate_keep(request: Request, record_type: str, record_id: i
         rtype, _, rid = str(token).partition(":")
         if rtype in ("invoice", "payment") and rid.isdigit():
             others.append((rtype, int(rid)))
+    # Keep this copy but with another copy's (or a typed) bill number -- only for a copy not yet in QB.
+    use_number = (form.get("use_number") or "").strip()
+    if use_number == "__typed__":
+        use_number = (form.get("typed_number") or "").strip()
+    if use_number:
+        rec = web_db.get_record(record_type, record_id)
+        if rec and rec.get("entered_in_qb"):
+            return _redirect_with_flash(back, "That copy is already entered in QuickBooks, so its number wasn't changed. Nothing was resolved.")
     res = web_db.keep_and_ignore_others(record_type, record_id, others, user["username"]) or {}
+    if use_number:
+        try:
+            web_db.set_kept_number(record_type, record_id, use_number, user["username"])
+        except ValueError as e:
+            return _redirect_with_flash(back, f"Kept, but the number wasn't changed: {e}")
     if res.get("carried"):
         return _redirect_with_flash(back, "Kept. A copy you set aside was already entered in QuickBooks with the "
                                           "same amount and store, so the kept copy is now marked entered too.")
@@ -1881,15 +2210,25 @@ async def record_duplicate_keep(request: Request, record_type: str, record_id: i
 
 
 @app.get("/duplicates", response_class=HTMLResponse)
-def duplicates_page(request: Request, flagged: str = ""):
+def duplicates_page(request: Request, flagged: str = "", twice: str = ""):
     """The working queue for duplicate decisions: every still-flagged (duplicate_suspect,
-    not-ignored) invoice/payment, paired with its best-guess counterpart."""
+    not-ignored) invoice/payment, paired with its best-guess counterpart. Sets whose bill is in
+    QuickBooks twice (dup_settle -> invoices.qb_twice) come first, marked; ?twice=1 shows only those."""
     user = current_user(request)
     if not user:
         return _login_redirect()
+    groups = web_db.list_duplicate_candidates()
+    notes = web_db.qb_twice_notes()
+    for g in groups:
+        g["qb_twice"] = next((notes[r["record_id"]] for r in g["records"]
+                              if r.get("record_type") == "invoice" and r.get("record_id") in notes), None)
+    n_twice = sum(1 for g in groups if g["qb_twice"])
+    groups.sort(key=lambda g: 0 if g["qb_twice"] else 1)     # stable: keeps the usual order within each
+    if twice:
+        groups = [g for g in groups if g["qb_twice"]]
     return render(request, "duplicates.html", user,
-                  dup_groups=web_db.list_duplicate_candidates(), file_url=file_preview_url,
-                  flagged=bool(flagged))
+                  dup_groups=groups, file_url=file_preview_url,
+                  flagged=bool(flagged), n_twice=n_twice, only_twice=bool(twice))
 
 
 @app.post("/duplicates/flag_set")
@@ -1963,6 +2302,10 @@ async def qb_reconcile_upload(request: Request, file: UploadFile = File(...)):
         return RedirectResponse("/qb-reconcile?flash=Empty%20file", status_code=302)
     # Blocking (parse + DB matching) → run off the event loop.
     batch_id = await run_in_threadpool(qb_match.process_qb_export, data, name, user["username"])
+    try:                                    # a new export can confirm pending QB corrections (2026-10-21)
+        await run_in_threadpool(web_db.resolve_qb_corrections_from_register)
+    except Exception as e:
+        print(f"(QB corrections export check failed: {e})")
     return RedirectResponse(f"/qb-reconcile/review?batch_id={batch_id}", status_code=302)
 
 
@@ -1989,12 +2332,20 @@ async def qb_reconcile_recheck(request: Request):
 
 
 @app.post("/qb-reconcile/review/{candidate_id}/confirm")
-def qb_reconcile_confirm(request: Request, candidate_id: int):
+def qb_reconcile_confirm(request: Request, candidate_id: int, right: str = Form("bill")):
     user = current_user(request)
     if not user:
         return _login_redirect()
-    web_db.qb_confirm_candidate(candidate_id, user["username"])
-    return RedirectResponse(request.headers.get("referer") or "/qb-reconcile/review", status_code=302)
+    before = web_db.qb_corrections_open_count()
+    web_db.qb_confirm_candidate(candidate_id, user["username"], right="qb" if right == "qb" else "bill")
+    if right == "qb":
+        return _redirect_with_flash(request.headers.get("referer") or "/qb-reconcile/review",
+                                    "Confirmed. The app's record now has QuickBooks' amount.")
+    back = request.headers.get("referer") or "/qb-reconcile/review"
+    if web_db.qb_corrections_open_count() > before:
+        return _redirect_with_flash(back, "Confirmed. QuickBooks has a different amount than the bill, so it's on "
+                                          "QB corrections to update in QuickBooks.")
+    return RedirectResponse(back, status_code=302)
 
 
 @app.post("/qb-reconcile/review/{candidate_id}/reject")
@@ -2030,6 +2381,38 @@ def qb_reconcile_unmatched(request: Request, status: str = "pending"):
     return render(request, "qb_reconcile_unmatched.html", user,
                   rows=web_db.qb_list_unmatched(status=status), status=status,
                   pending_count=web_db.qb_unmatched_pending_count())
+
+
+@app.get("/qb-reconcile/doubles", response_class=HTMLResponse)
+def qb_reconcile_doubles(request: Request, show: str = "open", kind: str = ""):
+    """Bills that may be in QuickBooks twice, found in the uploaded QuickBooks exports (2026-10-20)."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    show = show if show in ("open", "dismissed", "all") else "open"
+    pairs = web_db.qb_double_entries(show)
+    kinds = {}
+    for p in pairs:
+        kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
+    if kind:
+        pairs = [p for p in pairs if p["kind"] == kind]
+    return render(request, "qb_reconcile_doubles.html", user, pairs=pairs, show=show, kind=kind,
+                  kinds=kinds, total=sum(kinds.values()))
+
+
+@app.post("/qb-reconcile/doubles/dismiss")
+async def qb_reconcile_doubles_dismiss(request: Request):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    key = form.get("pair_key") or ""
+    if key:
+        # A reason from the list (2026-10-21) plus the optional note, stored together.
+        reason, note = (form.get("reason") or "").strip(), (form.get("note") or "").strip()
+        full = f"{reason}: {note}" if reason and note else (reason or note)
+        web_db.qb_double_dismiss(key, user["username"], full, restore=form.get("restore") == "1")
+    return RedirectResponse(request.headers.get("referer") or "/qb-reconcile/doubles", status_code=302)
 
 
 @app.post("/qb-reconcile/unmatched/{unmatched_id}/dismiss")
@@ -2210,6 +2593,7 @@ async def edit_submit(request: Request, record_type: str, record_id: int):
     form = await request.form()
     record = web_db.get_record(record_type, record_id)
     # Update only fields that actually changed, so the edit_log stays meaningful.
+    pending = 0
     for ui_field, col in web_db.EDITABLE[record_type].items():
         if ui_field not in form:
             continue
@@ -2217,9 +2601,38 @@ async def edit_submit(request: Request, record_type: str, record_id: int):
         old_val = record.get(col)
         old_str = "" if old_val is None else str(old_val)
         if new_val != old_str:
-            web_db.update_record_field(record_type, record_id, ui_field, new_val, user["username"])
+            if web_db.update_record_field(record_type, record_id, ui_field, new_val, user["username"]) == "pending":
+                pending += 1
     _sync_account_class_rules("record edit")
+    if pending:
+        return _redirect_with_flash(f"/edit/{record_type}/{record_id}?saved=1",
+                                    "This bill is already in QuickBooks, so the record keeps what QuickBooks has. "
+                                    "Your change is on QB corrections: make it in QuickBooks, then click Done in QB "
+                                    "(or upload a new QuickBooks export and it confirms itself).")
     return RedirectResponse(f"/edit/{record_type}/{record_id}?saved=1", status_code=302)
+
+
+@app.get("/qb-corrections", response_class=HTMLResponse)
+def qb_corrections_page(request: Request, show: str = "open"):
+    """Changes made in the app to bills already in QuickBooks, to make in QuickBooks too (2026-10-21)."""
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    show = show if show in ("open", "done", "all") else "open"
+    try:
+        web_db.resolve_qb_corrections_from_register()
+    except Exception as e:
+        print(f"(QB corrections export check failed: {e})")
+    return render(request, "qb_corrections.html", user, rows=web_db.list_qb_corrections(show), show=show)
+
+
+@app.post("/qb-corrections/{correction_id}/done")
+def qb_correction_done(request: Request, correction_id: int, note: str = Form("")):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    web_db.qb_correction_done(correction_id, user["username"], note)
+    return RedirectResponse(request.headers.get("referer") or "/qb-corrections", status_code=302)
 
 
 # --------------------------------------------------------------------------- #
@@ -2472,6 +2885,286 @@ def request_investigate(request: Request, request_id: int):
 # 3c) Emails ledger — every ingested email + what the system did with it.
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Correspondence triage (2026-10-15). Emails classified 'correspondence' make no record, so no
+# queue ever showed them. One page to go through them: read it (preview of the stored email),
+# then Handled / Follow up / Ignore / Always ignore (sender or subject rule).
+# --------------------------------------------------------------------------- #
+
+_EMAIL_DIRS = ("processed_emails", "review_pending", "test_emails")
+_EML_CACHE = {}
+
+
+def _html_to_text(h):
+    import html as _html
+    h = re.sub(r"(?is)<(script|style).*?</\1>", " ", h or "")
+    h = re.sub(r"(?i)<br\s*/?>|</p>|</div>|</tr>|</li>", "\n", h)
+    h = re.sub(r"<[^>]+>", " ", h)
+    return _html.unescape(h)
+
+
+def _email_preview(filename, max_chars=6000):
+    """{found, from, to, date, body, attachments} read from the stored source email (.eml/.msg/.txt).
+    Cached per file + mtime. Never raises."""
+    path = next((BASE_DIR / d / filename for d in _EMAIL_DIRS if (BASE_DIR / d / filename).is_file()), None)
+    if not path:
+        return {"found": False, "body": "", "attachments": []}
+    key = (str(path), path.stat().st_mtime)
+    if key in _EML_CACHE:
+        return _EML_CACHE[key]
+    out = {"found": True, "body": "", "attachments": [], "from": "", "to": "", "date": ""}
+    try:
+        suffix = path.suffix.lower()
+        if suffix == ".eml":
+            import email as _email
+            import email.policy as _policy
+            m = _email.message_from_bytes(path.read_bytes(), policy=_policy.default)
+            out.update({"from": str(m.get("From") or ""), "to": str(m.get("To") or ""),
+                        "date": str(m.get("Date") or "")})
+            plain, html_part = None, None
+            for part in m.walk():
+                if part.is_multipart():
+                    continue
+                fn = part.get_filename()
+                if fn or part.get_content_disposition() == "attachment":
+                    out["attachments"].append(fn or "(unnamed)")
+                    continue
+                ct = part.get_content_type()
+                try:
+                    content = part.get_content()
+                except Exception:
+                    continue
+                if ct == "text/plain" and plain is None:
+                    plain = content
+                elif ct == "text/html" and html_part is None:
+                    html_part = content
+            body = plain if (plain and plain.strip()) else _html_to_text(html_part or "")
+        elif suffix == ".msg":
+            import extract_msg
+            msg = extract_msg.Message(str(path))
+            out.update({"from": msg.sender or "", "to": msg.to or "", "date": str(msg.date or "")})
+            hb = msg.htmlBody or ""
+            if isinstance(hb, bytes):
+                hb = hb.decode("utf-8", "ignore")
+            body = msg.body or _html_to_text(hb)
+            out["attachments"] = [a.longFilename or a.shortFilename or "(unnamed)" for a in msg.attachments]
+            msg.close()
+        elif suffix == ".txt":
+            body = path.read_text(encoding="utf-8", errors="replace")
+        else:   # a scanned/uploaded document (PDF, image): no email text -- never dump its bytes
+            out["attachments"] = [filename]
+            body = "(This is a scanned or uploaded document, not an email, so there's no email text to show.)"
+        body = re.sub(r"[ \t\r\f\v]+\n", "\n", body or "")
+        body = re.sub(r"\n{3,}", "\n\n", body).strip()
+        if len(body) > max_chars:
+            body = body[:max_chars] + "\n…(truncated — open in Gmail for the rest)"
+        out["body"] = body
+    except Exception as e:
+        out["body"] = f"(could not read this email: {e})"
+    if len(_EML_CACHE) > 500:
+        _EML_CACHE.clear()
+    _EML_CACHE[key] = out
+    return out
+
+
+_PUBLIC_MAIL_DOMAINS = {"@gmail.com", "@googlemail.com", "@yahoo.com", "@outlook.com", "@hotmail.com",
+                        "@live.com", "@msn.com", "@aol.com", "@icloud.com", "@me.com", "@protonmail.com",
+                        "@verizon.net", "@optonline.net", "@comcast.net"}
+
+
+def _sender_suggestion(from_address):
+    """(bare address, @domain) from a From header — the two 'Always ignore sender' choices."""
+    m = re.search(r"[\w.+-]+@([\w-]+(?:\.[\w-]+)+)", from_address or "")
+    if not m:
+        return None, None
+    return m.group(0).lower(), "@" + m.group(1).lower()
+
+
+def _search_key(text):
+    """Lowercase, letters/digits only -- so spacing, punctuation and case never block a match."""
+    return re.sub(r"[^a-z0-9]", "", (text or "").lower())
+
+
+@app.get("/correspondence", response_class=HTMLResponse)
+def correspondence_page(request: Request, status: str = "open", search: str = "", page: int = 1, kind: str = "",
+                        mine: str = "", sender: str = "", topic: str = "", assignee: str = ""):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    page_size = 50
+    # Assigned-to filter (2026-10-20): a username, or '-' for unassigned. "my follow-ups" = mine=1.
+    assignee = (assignee or "").strip()
+    who = user["username"] if mine else (assignee or None)
+    page = max(1, page)
+    search = (search or "").strip()
+    if search:
+        # Search everything a person sees on the card -- including the email's own text, which isn't in
+        # the database -- and ignore spaces/punctuation/case so "marinepark" finds "Marine Park" and
+        # "sophie@marineparkdistribution.com" (2026-10-16). Done in Python over the status/kind set.
+        rows, _n, counts = web_db.list_correspondence(status=status or "open", search=None,
+                                                      limit=100000, offset=0, kind=kind or None,
+                                                      assigned=who,
+                                                      sender=sender or None, topic=topic or None)
+        needle = _search_key(search)
+        def _hit(r):
+            pv = _email_preview(r["filename"])
+            hay = " ".join(str(x or "") for x in (
+                r.get("subject"), r.get("from_address"), r.get("info_vendor"), r.get("info_store"),
+                r.get("info_note"), r.get("response_request"), r.get("response_requested_by"),
+                r.get("corr_note"), r.get("corr_forwarded_to"), r.get("recipients"), r.get("filename"),
+                pv.get("from"), pv.get("body"), " ".join(pv.get("attachments") or [])))
+            return needle in _search_key(hay)
+        rows = [r for r in rows if _hit(r)] if needle else rows
+        total = len(rows)
+        rows = rows[(page - 1) * page_size: page * page_size]
+    else:
+        rows, total, counts = web_db.list_correspondence(status=status or "open", search=None,
+                                                         limit=page_size, offset=(page - 1) * page_size,
+                                                         kind=kind or None,
+                                                         assigned=who,
+                                                         sender=sender or None, topic=topic or None)
+    # "Similar" counts per card (2026-10-19): same sender address / same domain / same request type,
+    # [open, total] across every status. Shared mail services (gmail.com...) get no domain count.
+    sim = {"addr": {}, "dom": {}, "topic": {}}
+    try:
+        for fa, tp, st in web_db.correspondence_similarity():
+            a, d = _sender_suggestion(fa or "")
+            if d in _PUBLIC_MAIL_DOMAINS:
+                d = None
+            for key, val in (("addr", a), ("dom", d), ("topic", tp)):
+                if val:
+                    c = sim[key].setdefault(val, [0, 0])
+                    c[1] += 1
+                    if st == "open":
+                        c[0] += 1
+    except Exception as e:
+        print(f"(correspondence similarity counts failed: {e})")
+    for r in rows:
+        r["gmail_link"] = fix_gmail_link(r.get("gmail_link"))
+        r["preview"] = _email_preview(r["filename"])
+        from_hdr = r.get("from_address") or r["preview"].get("from") or ""   # NOT `sender` (= the filter param)
+        r["sender_display"] = from_hdr
+        r["sender_addr"], r["sender_domain"] = _sender_suggestion(from_hdr)
+        dom = None if r["sender_domain"] in _PUBLIC_MAIL_DOMAINS else r["sender_domain"]
+        r["similar"] = [(k, val, sim[k].get(val, [0, 0])) for k, val in
+                        (("addr", r["sender_addr"]), ("dom", dom), ("topic", r.get("topic")))
+                        if val and sim[k].get(val, [0, 0])[1] > 1]
+        rc = r.get("recipients")
+        if rc is None:
+            import corr_forward
+            rc = corr_forward.read_recipients(r["filename"])
+        r["recipient_list"] = [a for a in (rc or "").split(", ") if a]
+    pages = max(1, (total + page_size - 1) // page_size)
+    return render(request, "correspondence.html", user, rows=rows, total=total, counts=counts,
+                  contacts=web_db.forward_contact_list(), topics=database.CORR_TOPICS, mine=mine,
+                  f_sender=sender, f_topic=topic, f_assignee=assignee,
+                  assignee_counts=web_db.correspondence_assignee_counts(),
+                  users=[u for u in web_db.list_users() if u.get("active")],
+                  statuses=web_db.CORR_STATUSES, status=status or "open", search=search, kind=kind,
+                  page=page, pages=pages, flash=request.query_params.get("flash", ""))
+
+
+@app.post("/correspondence/act")
+async def correspondence_act(request: Request):
+    user = current_user(request)
+    if not user:
+        return _login_redirect()
+    form = await request.form()
+    filename = form.get("filename") or ""
+    action = form.get("action") or ""
+    note = form.get("note") or ""
+    back = f"/correspondence?status={quote(form.get('back_status') or 'open')}"
+    if form.get("back_search"):
+        back += f"&search={quote(form.get('back_search'))}"
+    if form.get("back_kind"):
+        back += f"&kind={quote(form.get('back_kind'))}"
+    if form.get("back_mine"):
+        back += "&mine=1"
+    if form.get("back_sender"):
+        back += f"&sender={quote(form.get('back_sender'))}"
+    if form.get("back_assignee"):
+        back += f"&assignee={quote(form.get('back_assignee'))}"
+    if form.get("back_topic"):
+        back += f"&topic={quote(form.get('back_topic'))}"
+    flash = ""
+    try:
+        if action == "follow_up":
+            assignee = (form.get("assign_to") or "").strip()
+            web_db.set_correspondence_status(filename, "follow_up", note, user["username"], assigned_to=assignee)
+            if assignee:
+                flash = f"Marked Follow up and assigned to {assignee}."
+        elif action in ("handled", "ignored", "open"):
+            web_db.set_correspondence_status(filename, action, note, user["username"])
+        elif action == "reprocess":
+            web_db.requeue_correspondence_as_documents(filename, form.get("learning") or "", user["username"])
+            flash = ("Sent back for processing — the next fetch run will read its attachments as documents"
+                     + (" (the new learning applies to that run and every later one)." if (form.get("learning") or "").strip()
+                        else ".") + " It's off this page until then.")
+        elif action == "forward":
+            import corr_forward
+            to_text = ", ".join(v for v in (form.get("forward_pick"), form.get("forward_to")) if v)
+            sent_to = corr_forward.forward_email(filename, to_text, note, user["username"])
+            flash = f"Forwarded to {', '.join(sent_to)}."
+        elif action == "rule":
+            sender = (form.get("rule_sender") or "").strip()
+            subject = (form.get("rule_subject") or "").strip()
+            rcpt = (form.get("rule_recipients") or "").strip()
+            outside = bool(form.get("rule_outside"))
+            topic = (form.get("rule_topic") or "").strip()
+            rule_action = form.get("rule_action") or "ignore"
+            fwd = ", ".join(v for v in (form.get("rule_forward_pick"), form.get("rule_forward_to")) if v)
+            what = " and ".join(x for x in (f"of type '{dict(database.CORR_TOPICS).get(topic, topic)}'" if topic else "",
+                                            f"from '{sender}'" if sender else "",
+                                            f"subject containing '{subject}'" if subject else "",
+                                            f"To/CC containing '{rcpt}'" if rcpt else "",
+                                            "sent to someone outside (a vendor)" if outside else "") if x)
+            if rule_action == "forward":
+                import corr_forward
+                to_addrs = corr_forward.parse_recipients(fwd)
+                if not to_addrs:
+                    raise ValueError("pick or type who to forward to")
+                web_db.add_correspondence_rule(sender, subject, note, user["username"],
+                                               action="forward", forward_to=", ".join(to_addrs),
+                                               recipients_contains=rcpt, outside_recipient_only=outside,
+                                               topic=topic)
+                # Forwarded by the new rule -> close it like the rule does for later emails (handled).
+                corr_forward.forward_email(filename, ", ".join(to_addrs), note, user["username"],
+                                           mark_handled=True)
+                # New rules act on emails already in Open too (Joel 2026-10-16), not only future ones.
+                sent, failed = corr_forward.run_forward_rules(f"{user['username']} (new rule)")
+                flash = (f"Rule added: forward emails {what} to {', '.join(to_addrs)}. This one was forwarded "
+                         f"and marked Handled" + (f", plus {sent} other open email(s) that match" if sent else "")
+                         + (f" ({failed} failed — see the server window)" if failed else "") + ".")
+            elif rule_action == "follow_up":
+                if not sender and not subject and not rcpt and not topic:
+                    raise ValueError("a rule needs a request type, sender, subject and/or To/CC text")
+                assignee = (form.get("rule_assign_to") or "").strip()
+                web_db.set_correspondence_status(filename, "follow_up", note or "follow-up rule", user["username"],
+                                                 assigned_to=assignee)
+                n = web_db.add_correspondence_rule(sender, subject, note, user["username"], action="follow_up",
+                                                   recipients_contains=rcpt, outside_recipient_only=outside,
+                                                   topic=topic, assign_to=assignee)
+                flash = (f"Rule added: mark emails {what} Follow up"
+                         + (f", assigned to {assignee}" if assignee else "") + "."
+                         + (f" It also moved {n} other open email(s) to Follow up." if n else ""))
+            else:
+                if not sender and not subject and not rcpt and not topic:
+                    raise ValueError("a rule needs a request type, sender, subject and/or To/CC text")
+                web_db.set_correspondence_status(filename, "ignored", note or "ignore rule", user["username"])
+                n = web_db.add_correspondence_rule(sender, subject, note, user["username"],
+                                                   recipients_contains=rcpt, outside_recipient_only=outside,
+                                                   topic=topic)
+                flash = (f"Rule added: always dismiss emails {what}."
+                         + (f" It also cleared {n} other open email(s)." if n else ""))
+    except ValueError as e:
+        flash = str(e)
+    except Exception as e:                       # Gmail send failure etc. -- show it, don't 500
+        flash = f"Couldn't complete that: {e}"
+    if flash:
+        back += f"&flash={quote(flash)}"
+    return RedirectResponse(back, status_code=302)
+
+
 @app.get("/emails", response_class=HTMLResponse)
 def emails_page(request: Request, disposition: str = "", email_type: str = "", run: str = "",
                 date_from: str = "", date_to: str = "", search: str = "", page: int = 1):
@@ -2506,7 +3199,7 @@ def browse(request: Request, source: str = "records", excluded: str = "exclude",
            entered: str = "", date_from: str = "", date_to: str = "", search: str = "",
            run: str = "", email: str = "", dup: str = "", ignored: str = "", group: str = "",
            invoice_number: str = "", amount_min: str = "", amount_max: str = "", amount: str = "",
-           page: int = 1, sort: str = "", direction: str = "desc"):
+           page: int = 1, sort: str = "", direction: str = "desc", page_size: str = ""):
     user = current_user(request)
     if not user:
         return _login_redirect()
@@ -2532,13 +3225,25 @@ def browse(request: Request, source: str = "records", excluded: str = "exclude",
                       stores=stores, params=params)
 
     srt = sort or "date_added"
-    rows = web_db.list_all_records(
+    # One page at a time, fetched from the database (2026-10-26, Joel: "Records page faster"): it rendered up to
+    # 2,000 rows at once. Page sizes as on QB entry; an explicit choice is remembered per person, "all" = 2,000.
+    if page_size:
+        web_db.set_user_pref(user["id"], "records_page_size", page_size)
+    else:
+        page_size = str(web_db.get_user_prefs(user["id"]).get("records_page_size") or PAGE_SIZE_DEFAULT)
+    size = 2000 if page_size == "all" else (int(page_size) if page_size.isdigit() and int(page_size) > 0
+                                            else PAGE_SIZE_DEFAULT)
+    rows, total = web_db.list_all_records(
         store=store or None, vendor=vendor or None, record_type=record_type or None,
         status=status or None, entered=entered or None, date_from=date_from or None,
         date_to=date_to or None, search=search or None, sort=srt, direction=direction,
         run_id=run or None, email_filename=email or None, excluded=excluded,
         dup=dup or None, ignored=ignored or None, group=group or None,
-        amount_min=amount_min or None, amount_max=amount_max or None, amount=amount or None)
+        amount_min=amount_min or None, amount_max=amount_max or None, amount=amount or None,
+        page=page, page_size=size)
+    pages = max(1, -(-total // size))
+    pg = {"total": total, "page": max(1, min(page, pages)), "pages": pages, "size": size,
+          "page_size": "all" if page_size == "all" else str(size)}
     params = dict(source="records", excluded=excluded, store=store, vendor=vendor,
                   record_type=record_type, status=status, entered=entered, date_from=date_from,
                   date_to=date_to, search=search, run=run, email=email, dup=dup, ignored=ignored,
@@ -2547,7 +3252,7 @@ def browse(request: Request, source: str = "records", excluded: str = "exclude",
     return render(request, "browse.html", user, source="records", rows=rows, excluded=excluded,
                   file_url=file_preview_url, stores=stores,
                   statuses=web_db.distinct_values("email_status"), runs=web_db.list_runs(),
-                  params=params)
+                  params=params, pg=pg, page_size_options=PAGE_SIZE_OPTIONS)
 
 
 @app.get("/history")
@@ -2647,6 +3352,7 @@ REFERENCE_PAGES = {
             {"name": "exclude_from_statement_recon", "label": "Exclude from stmt recon", "type": "checkbox"},
             {"name": "trust_line_item_totals", "label": "Trust line-item totals", "type": "checkbox"},
             {"name": "ignore_payment_confirmations", "label": "Ignore payment confirmations", "type": "checkbox"},
+            {"name": "sales_tax_ok", "label": "OK to charge sales tax", "type": "checkbox"},
             {"name": "aliases", "label": "Other spellings / variants", "type": "textarea"},
             {"name": "name_3m", "label": "3M", "type": "text"},
             {"name": "name_madison", "label": "Madison", "type": "text"},
@@ -2748,6 +3454,48 @@ REFERENCE_PAGES = {
             {"name": "note", "label": "Note", "type": "text"},
         ],
     },
+    "correspondence_rules": {
+        "title": "Correspondence rules",
+        "help": ("Rules for correspondence emails (the Correspondence page's 'Create rule' makes these). "
+                 "Sender matches any part of the From address — '@ups.com' catches a whole domain; "
+                 "Subject contains matches any part of the subject; To/CC contains matches any To or CC "
+                 "address (e.g. a staff member already copied on it); 'Only if sent to someone outside' matches only "
+                 "when at least one To/CC address is outside our own addresses (maplerx.com, lakewoodrx.com, "
+                 "carepax.com, 3mvitamins.com, thevitamindesk.com, rxstore15@gmail.com) -- i.e. it went to a vendor. Fill several and ALL must match. "
+                 "Action 'ignore': applied on every run and to anything still open when you save. "
+                 "Action 'follow_up': marks matching emails Follow up (optionally assigned to 'Assign to') -- "
+                 "same timing as ignore. "
+                 "Action 'forward': sends matching emails to 'Forward to' (one or more addresses, "
+                 "comma-separated) from the AP mailbox and marks them handled — "
+                 "including matching emails already in Open when you save (a rule forwards each email "
+                 "only once). Rules never "
+                 "override a decision someone already made."),
+        "columns": [
+            {"name": "topic", "label": "Request type is (blank = any)", "type": "select",
+             "options_from": "corr_topics"},
+            {"name": "sender", "label": "Sender contains (e.g. @ups.com)", "type": "text"},
+            {"name": "subject_contains", "label": "Subject contains", "type": "text"},
+            {"name": "recipients_contains", "label": "To/CC contains (e.g. a staff address)", "type": "text"},
+            {"name": "outside_recipient_only", "label": "Only if sent to someone outside (a vendor)",
+             "type": "checkbox"},
+            {"name": "action", "label": "Action", "type": "select", "options_from": "corr_actions",
+             "required": True},
+            {"name": "assign_to", "label": "Assign to (follow_up rules)", "type": "select",
+             "options_from": "active_usernames"},
+            {"name": "forward_to", "label": "Forward to (forward rules)", "type": "text"},
+            {"name": "note", "label": "Note (why) — also the note on forwarded emails", "type": "text"},
+        ],
+    },
+    "forward_contacts": {
+        "title": "Forward contacts",
+        "help": ("People correspondence can be forwarded to — they show up in the Forward pick-lists "
+                 "on the Correspondence page. Forwards are sent from the AP mailbox the app reads."),
+        "columns": [
+            {"name": "name", "label": "Name", "type": "text"},
+            {"name": "email", "label": "Email", "type": "text", "required": True},
+            {"name": "note", "label": "Handles (e.g. PBM notices, recalls)", "type": "text"},
+        ],
+    },
     "class_rules": {
         "title": "Class rules",
         "help": ("Default QuickBooks class by store and/or vendor. Filled in when the document "
@@ -2829,7 +3577,16 @@ def _reference_saved_redirect(table, username=""):
     tables, first re-resolve existing unentered records against the now-updated mappings and pass
     the resolved count through for a one-line flash. For Card → store, give the mapped store to
     records waiting for QuickBooks that carry the card and have no store yet (2026-10-13)."""
-    _sync_account_class_rules(table)
+    if table not in _VENDOR_STD_TABLES:          # vendor tables: done by the background recheck
+        _sync_account_class_rules(table)
+    if table == "correspondence_rules":
+        try:
+            import database
+            database.apply_correspondence_rules("web (rules saved)")
+            import corr_forward
+            corr_forward.run_forward_rules("web (rules saved)")
+        except Exception as e:
+            print(f"(correspondence rules after save failed: {e})")
     if table == "card_store_map":
         try:
             n = len(web_db.apply_card_map_to_records(username or "someone"))
@@ -2837,33 +3594,72 @@ def _reference_saved_redirect(table, username=""):
         except Exception as e:
             print(f"(card → store update after save failed: {e})")
     if table in _VENDOR_STD_TABLES:
-        try:
-            import classify_emails as ce
-            import database
-            _checked, resolved = ce.reapply_vendor_standardization_backfill()
-            # A new alias can also clear open statement exceptions (recon matches vendor by
-            # standardized name in its second pass) — re-run it right away, same as the QB backfill.
-            # Report how many exceptions THIS save newly cleared: flagged-before minus flagged-after
-            # (reconcile recomputes from scratch, so its own alias_resolved counts every rescue each
-            # run; the delta is what actually changed for the user).
-            # Toggling a vendor_name_map "Exclude from QB" checkbox is now the exclusion action, so
-            # also backfill skip_qb_import on already-recorded records (only ever flips toward
-            # exclusion — unchecking never un-skips, per Joel's 2026-09-24 decision).
-            excluded_n = _backfill_excluded_skips() if table == "vendor_name_map" else 0
-            stmt_resolved = 0
-            try:
-                flagged_before = database.count_flagged_statement_lines()
-                recon = database.reconcile_statement_lines()
-                stmt_resolved = max(0, flagged_before - recon.get("flagged", 0))
-            except Exception as e:
-                print(f"(statement reconcile after {table} save failed: {e})")
-            return RedirectResponse(
-                f"/reference/{table}?resolved={resolved}&stmt_resolved={stmt_resolved}"
-                + (f"&excluded={excluded_n}" if excluded_n else ""),
-                status_code=302)
-        except Exception as e:
-            print(f"(vendor/account backfill after {table} save failed: {e})")
+        # 2026-10-20 (Joel: saving on Vendor names took forever): the recheck of existing records runs
+        # in the background now; the page comes back right away and shows the result when it's done.
+        _start_vendor_recheck(table)
+        return RedirectResponse(f"/reference/{table}?updating=1", status_code=302)
     return RedirectResponse(f"/reference/{table}", status_code=302)
+
+
+def _vendor_recheck_counts(table):
+    """Re-resolve existing unentered records against the updated vendor mappings (slow: it runs the
+    standardization backfill + statement reconcile). Returns (resolved, stmt_resolved, excluded)."""
+    import classify_emails as ce
+    import database
+    _sync_account_class_rules(table)
+    _checked, resolved = ce.reapply_vendor_standardization_backfill()
+    # Review-queue items flagged only for this vendor get answered "record it normally" (2026-10-20).
+    try:
+        resolved += len(ce.resolve_vendor_review_items()["answered"])
+    except Exception as e:
+        print(f"(vendor review-item recheck after {table} save failed: {e})")
+    excluded_n = _backfill_excluded_skips() if table == "vendor_name_map" else 0
+    stmt_resolved = 0
+    try:
+        flagged_before = database.count_flagged_statement_lines()
+        recon = database.reconcile_statement_lines()
+        stmt_resolved = max(0, flagged_before - recon.get("flagged", 0))
+    except Exception as e:
+        print(f"(statement reconcile after {table} save failed: {e})")
+    return resolved, stmt_resolved, excluded_n
+
+
+import threading as _threading
+_VENDOR_RECHECK = {"running": False, "pending": set(), "msg": "", "at": None, "seq": 0}
+_VENDOR_RECHECK_LOCK = _threading.Lock()
+
+
+def _start_vendor_recheck(table):
+    """Queue a background recheck. Saves made while one runs are folded into ONE more pass."""
+    with _VENDOR_RECHECK_LOCK:
+        _VENDOR_RECHECK["pending"].add(table)
+        _VENDOR_RECHECK["seq"] += 1
+        if _VENDOR_RECHECK["running"]:
+            return
+        _VENDOR_RECHECK["running"] = True
+    _threading.Thread(target=_vendor_recheck_worker, daemon=True).start()
+
+
+def _vendor_recheck_worker():
+    tot = [0, 0, 0]
+    while True:
+        with _VENDOR_RECHECK_LOCK:
+            tables = set(_VENDOR_RECHECK["pending"])
+            _VENDOR_RECHECK["pending"].clear()
+            if not tables:
+                parts = [f"{tot[0]} record{'' if tot[0] == 1 else 's'} / review item{'' if tot[0] == 1 else 's'} resolved",
+                         f"{tot[1]} statement exception{'' if tot[1] == 1 else 's'} resolved"]
+                if tot[2]:
+                    parts.append(f"{tot[2]} record{'' if tot[2] == 1 else 's'} newly skipped from QuickBooks")
+                _VENDOR_RECHECK.update(running=False, at=datetime.now(),
+                                       msg="Existing records rechecked: " + ", ".join(parts) + ".")
+                return
+        try:
+            # vendor_name_map's pass also covers the account table's (same backfill); run once.
+            r = _vendor_recheck_counts("vendor_name_map" if "vendor_name_map" in tables else next(iter(tables)))
+            tot = [a + b for a, b in zip(tot, r)]
+        except Exception as e:
+            print(f"(vendor/account recheck after save failed: {e})")
 
 
 @app.post("/reference/{table}/add")
@@ -2960,11 +3756,39 @@ async def reference_edit(request: Request, table: str, record_id: int):
         return RedirectResponse("/review", status_code=302)
     form = await request.form()
     values = {c["name"]: form.get(c["name"], "") for c in page["columns"] if c["name"] in form}
+    in_place = request.headers.get("x-inplace") == "1"     # the row's Save button (no page reload)
+    if in_place:
+        # An unticked checkbox isn't sent at all; the in-place save always sends the row, so a
+        # missing checkbox means "off".
+        for c in page["columns"]:
+            if c.get("type") == "checkbox" and c["name"] not in form:
+                values[c["name"]] = ""
     try:
         web_db.edit_reference(table, record_id, values, user["username"])
     except ValueError as e:
+        if in_place:
+            return JSONResponse({"ok": False, "error": str(e)})
         return RedirectResponse(f"/reference/{table}?error={quote(str(e))}", status_code=302)
+    if in_place:
+        if table in _VENDOR_STD_TABLES:
+            _start_vendor_recheck(table)       # class rules + recheck run in the background
+            return JSONResponse({"ok": True, "recheck": True})
+        resp = _reference_saved_redirect(table, user["username"])   # same side effects as before
+        loc = resp.headers.get("location", "") if hasattr(resp, "headers") else ""
+        return JSONResponse({"ok": True, "reload": "card_updated=" in loc, "location": loc})
     return _reference_saved_redirect(table, user["username"])
+
+
+@app.get("/reference-recheck-status")
+def reference_recheck_status(request: Request):
+    """Progress of the background recheck after a Vendor names / Vendor → account save."""
+    if not current_user(request):
+        return JSONResponse({"running": False, "msg": ""})
+    with _VENDOR_RECHECK_LOCK:
+        return JSONResponse({"running": _VENDOR_RECHECK["running"] or bool(_VENDOR_RECHECK["pending"]),
+                             "msg": _VENDOR_RECHECK["msg"],
+                             "at": (_VENDOR_RECHECK["at"].strftime("%I:%M %p").lstrip("0")
+                                    if _VENDOR_RECHECK["at"] else "")})
 
 
 @app.post("/reference/{table}/{record_id}/delete")
@@ -3034,6 +3858,7 @@ def users_page(request: Request, error: str = "", sort: str = "", direction: str
     if user["role"] != "admin":
         return render(request, "message.html", user, message="Admins only.")
     return render(request, "users.html", user, users=web_db.list_users(sort=sort, direction=direction),
+                  writable_pages=web_db.WRITABLE_PAGES,
                   error=error, edit_id=edit,
                   params=dict(sort=sort, direction=direction))
 
@@ -3061,11 +3886,13 @@ def users_toggle(request: Request, user_id: int, active: str = Form("")):
 
 
 @app.post("/admin/users/{user_id}/edit")
-def users_edit(request: Request, user_id: int, display_name: str = Form(""),
+async def users_edit(request: Request, user_id: int, display_name: str = Form(""),
                role: str = Form(""), active: str = Form(""), new_password: str = Form("")):
     user = current_user(request)
     if not user or user["role"] != "admin":
         return _login_redirect()
+    form = await request.form()
+    web_db.set_user_edit_pages(user_id, form.getlist("edit_pages"), user["username"])
     try:
         web_db.update_user(
             user_id, user["username"],

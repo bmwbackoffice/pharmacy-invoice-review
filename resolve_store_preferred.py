@@ -45,6 +45,18 @@ def main():
         print(f"  {f['vendor']} ${f['amount']} @ {f['store']}: numbers {f['numbers']} "
               f"(ids {f['ids']}, group {f['group']})")
 
+    nn = ce.flag_numberless_duplicates(tag, dry_run=not commit)
+    print(f"\n[no invoice #] flagged as possible duplicates (same vendor/store/amount, dates within a week): "
+          f"{len(nn['flagged'])}")
+    for f in nn["flagged"]:
+        print(f"  {f['vendor']} ${f['amount']} @ {f['store']}: ids {f['ids']}")
+
+    et = ce.resolve_entered_twin_duplicates(tag, dry_run=not commit)
+    print(f"\n[already-entered twin] waiting copies set aside (bill already in QB, # differs by a tag): "
+          f"{len(et['resolved'])}")
+    for r in et["resolved"]:
+        print(f"  {r['vendor']} #{r['number']} @ {r['store']}: in QB as id {r['keep_id']}, set aside {r['ignored_ids']}")
+
     rq = ce.dedupe_review_queue(tag, dry_run=not commit)
     print(f"\n[review-queue dedupe] collapsed duplicate review items (kept store scan): "
           f"{len(rq['dismissed'])}")

@@ -217,6 +217,26 @@ class UnmatchedKeeper:
 QB_IMPORTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "qb_imports")
 
 
+def write_register(cur, batch_id, register, uploaded_at=None):
+    """QuickBooks register: per store, replace the saved bills in the date span this export covers with
+    its rows. register = [(store, type, date, num, name, std_vendor, amount)]. uploaded_at defaults to now()."""
+    spans = {}
+    for st, _t, d, *_rest in register:
+        if d:
+            lo, hi = spans.get(st, (d, d))
+            spans[st] = (min(lo, d), max(hi, d))
+    for st, (lo, hi) in spans.items():
+        cur.execute("DELETE FROM qb_register WHERE qb_store = %s AND qb_date BETWEEN %s AND %s", (st, lo, hi))
+        cur.execute("INSERT INTO qb_register_coverage (batch_id, qb_store, date_from, date_to, uploaded_at) "
+                    "VALUES (%s,%s,%s,%s, coalesce(%s, now()))", (batch_id, st, lo, hi, uploaded_at))
+    for st, t, d, num, name, sv, amt in register:
+        if d and st in spans:
+            cur.execute("INSERT INTO qb_register (batch_id, qb_store, qb_type, qb_date, qb_num, qb_name, "
+                        "qb_std_vendor, qb_amount) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (batch_id, st, t, d, num, name, sv, amt))
+    return spans
+
+
 def keep_upload_copy(batch_id, filename, file_bytes):
     """Save an uploaded export as qb_imports\\batch_<id> - <name>, so the upload can be re-read later
     (the Oct 8, 2026 upload wasn't kept and had to be backfilled from a Downloads copy). Best effort:
@@ -412,6 +432,7 @@ def process_qb_export(file_bytes, filename, uploaded_by):
 
             n_rows = n_auto = n_doubt = n_nomatch = n_kept = 0
             bill_rows = []   # for the statement pass: {std, num, amount}
+            register = []    # every Bill/Credit row -> qb_register (how many times a bill is in QB)
 
             for row in rows:
                 qtype = (str(row["type"]).strip().lower() if row["type"] is not None else "")
@@ -430,6 +451,7 @@ def process_qb_export(file_bytes, filename, uploaded_by):
                 qb_std = ce.resolve_standard_vendor(qb_name, std_tables=std)
                 if qtype == "bill":
                     bill_rows.append({"std": qb_std, "num": qb_num, "amount": qb_amount})
+                register.append((store, row["type"], qb_date, _num_str(qb_num) or None, qb_name, qb_std, qb_amount))
 
                 # credit_memos has no duplicate_ignored column (only invoices/payments have the
                 # duplicate-suspect workflow) — so that clause is invoices-only, else every row throws
@@ -501,6 +523,8 @@ def process_qb_export(file_bytes, filename, uploaded_by):
                              qb_amount, store))
                         n_kept += 1
 
+            write_register(cur, batch_id, register)
+
             # Statement-reconciliation pass: resolve 'missing' lines QB actually has (Tier-1-quality
             # match against Bill rows anywhere in the workbook — statement_lines carry no store, so
             # not store-scoped). standard_vendor + number + amount.
@@ -531,6 +555,14 @@ def process_qb_export(file_bytes, filename, uploaded_by):
         keep_upload_copy(batch_id, filename, file_bytes)
         # Learn per-store vendor spellings from this batch's (now-committed) candidates + all prior
         # history. Fresh connection inside the helper, so it sees the just-committed rows.
+        # Duplicate sets QuickBooks now settles (in it once -> keep the entered copy; twice -> flag).
+        try:
+            import dup_settle
+            res = dup_settle.settle_duplicate_sets(f"{actor} (QB export: same bill, in QuickBooks once)")
+            print(f"Duplicates settled by this export: {len(res['resolved'])} resolved, "
+                  f"{len(res['twice'])} entered twice in QuickBooks.")
+        except Exception as e:
+            print(f"(duplicate settle after QB upload failed: {e})")
         corr = apply_vendor_name_corrections_from_qb_history(actor)
         if corr["applied"]:
             print(f"Vendor names: corrected {len(corr['applied'])} per-store spelling(s) "

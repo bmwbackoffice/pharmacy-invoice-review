@@ -178,6 +178,30 @@ class CreditMemoDuplicates(PureTestCase):
         self.assertEqual(c["credit_memos"][0]["review_reason"].count("Credit memo #"), 1)
 
 
+class MisreadNumbers(PureTestCase):
+    """DU-16, 2026-10-15: numbers 'one character apart' for the misread-number check, from the waiting copies
+    whose twins were already entered in QB."""
+
+    def test_one_character_apart(self):
+        for a, b in (("797203", "797208"),            # Maxi Health: one digit changed
+                     ("3551", "35551"),               # Masterko: one digit dropped
+                     ("9304241", "93G4241"),          # Lantev: G read as 0
+                     ("8610704", "86I0704"),          # Lantev: I read as 1
+                     ("R204977-IN", "R204977"),       # Reisman's: a lettered suffix
+                     ("INV12345", "12345")):          # a lettered prefix
+            self.assertTrue(ce._numbers_one_apart(a, b), (a, b))
+            self.assertTrue(ce._numbers_one_apart(b, a), (b, a))
+
+    def test_different_numbers(self):
+        for a, b in (("7984", "7898"),                # Talent Bridging: weekly bills, same amount
+                     ("FI24150750", "FI2614901"),     # Boiron: two bills
+                     ("12345", "12345678"),           # extra digits, no letter
+                     ("123", "124"),                  # too short to judge
+                     ("A-1001", "a1001"),             # the same number (the normal check's job)
+                     ("", "1234")):
+            self.assertFalse(ce._numbers_one_apart(a, b), (a, b))
+
+
 if __name__ == "__main__":
     import unittest
     unittest.main()

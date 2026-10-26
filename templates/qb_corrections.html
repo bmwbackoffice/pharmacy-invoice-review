@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>QB corrections <span class="muted">({{ rows|length }})</span></h2>
+<p class="muted" style="max-width:1000px;">Changes asked for on bills that are <strong>already in QuickBooks</strong>. The app's record keeps
+what QuickBooks has, so the two still match. Make the change in QuickBooks, then click <strong>Done in QB</strong>: the record
+takes the new value. Or just upload a new QuickBooks export: when it shows the new amount / # / date, the item
+confirms itself.</p>
+<div class="card" style="display:flex; gap:8px;">
+  {% for key, label in [('open','To do'),('done','Done'),('all','All')] %}
+    <a class="btn {{ '' if show==key else 'secondary' }}" href="/qb-corrections?show={{ key }}">{{ label }}</a>
+  {% endfor %}
+</div>
+<div class="card" style="padding:0;">
+<table>
+  <thead><tr><th>Store</th><th>Vendor</th><th>Bill #</th><th>Change</th><th>Changed by</th><th></th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ (r.store | store_label) or '—' }}</td>
+      <td>{{ r.vendor or '—' }}</td>
+      <td><a href="/edit/{{ r.record_type }}/{{ r.record_id }}">{{ r.number or ('record ' ~ r.record_id) }}</a></td>
+      <td><strong>{{ r.field_label }}</strong>: <span style="text-decoration:line-through; color:#991b1b;">{{ r.old_value or '—' }}</span>
+          → <span style="color:#137547; font-weight:700;">{{ r.new_value or '—' }}</span></td>
+      <td class="muted" style="font-size:12.5px;">{{ r.changed_by or '?' }} · {{ r.changed_at | us_datetime }}</td>
+      <td style="white-space:nowrap;">
+        {% if r.done_at %}
+          <span class="muted" style="font-size:12.5px;">done — {{ r.done_by }} · {{ r.done_at | us_date }}{% if r.note %} · {{ r.note }}{% endif %}</span>
+        {% else %}
+          <form method="post" action="/qb-corrections/{{ r.id }}/done" style="margin:0; display:inline-flex; gap:4px;">
+            <input name="note" placeholder="note (optional)" style="width:130px; padding:3px 6px; font-size:12px;">
+            <button class="btn" type="submit" style="padding:3px 10px; font-size:12px;">Done in QB</button>
+          </form>
+        {% endif %}
+      </td>
+    </tr>
+  {% else %}
+    <tr><td colspan="6" class="muted" style="padding:16px;">{{ 'Nothing to correct in QuickBooks.' if show == 'open' else 'None.' }}</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endblock %}

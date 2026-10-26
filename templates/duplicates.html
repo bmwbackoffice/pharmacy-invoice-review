@@ -29,6 +29,15 @@ keeps the others) or <strong>dismiss the flag</strong> if it isn't actually a du
 off this page. Excluded-vendor <em>invoices</em> are left out (they never enter QB anyway); payments are
 always shown.</p>
 
+{% if n_twice %}
+<div class="card" style="border-color:var(--bad); background:#fef2f2;">
+  <strong style="color:var(--bad);">{{ n_twice }} bill{{ '' if n_twice == 1 else 's' }} entered twice in QuickBooks</strong>
+  — shown first below. Delete the extra bill in QuickBooks, then keep one copy here (or upload a fresh
+  QuickBooks export: the set clears itself). Sets where the bill is in QuickBooks only once resolve on their own.
+  {% if only_twice %}<a href="/duplicates">Show all sets</a>{% else %}<a href="/duplicates?twice=1">Show only these</a>{% endif %}
+</div>
+{% endif %}
+
 {% if flagged %}
 <div class="card" style="border-color:var(--ok); background:#f0f9f4;">
   Flagged this set for review — it's now on <a href="/flags">Flags</a> as one entry (every copy's data embedded
@@ -58,6 +67,27 @@ always shown.</p>
       <button class="btn ok" type="submit" style="padding:3px 9px; font-size:12px;">Keep this one</button>
     </form>
     {% endif %}
+    {# Keep this copy but fix its bill number (2026-10-20): only on a copy not entered in QuickBooks. #}
+    {% if live_others|length > 1 and not r.entered_in_qb %}
+    {% set other_nums = [] %}{% for o in records %}{% if o.number and o.number != r.number and o.number not in other_nums %}{% set _ = other_nums.append(o.number) %}{% endif %}{% endfor %}
+    <details class="keepnum" style="flex-basis:100%;">
+      <summary style="cursor:pointer; font-size:12px; color:var(--brand);">Keep, but fix the #…</summary>
+      <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate/keep" style="margin:5px 0 0;"
+            onsubmit="var s=this.use_number.value, t=this.typed_number.value.trim(); if(s==='__typed__' && !t){alert('Type the correct number.');return false;} return confirm('Keep this copy with # ' + (s==='__typed__'?t:s) + ' and mark the other live cop{{ 'y' if live_others|length - 1 == 1 else 'ies' }} as duplicates?');">
+        {% for other in records %}{% if (other.record_id != r.record_id or other.record_type != r.record_type) and not other.duplicate_ignored %}
+        <input type="hidden" name="others" value="{{ other.record_type }}:{{ other.record_id }}">
+        {% endif %}{% endfor %}
+        <select name="use_number" style="font-size:12px; padding:2px 4px; max-width:210px;"
+                onchange="this.form.typed_number.style.display = this.value === '__typed__' ? '' : 'none';">
+          {% for n in other_nums %}<option value="{{ n }}">use # {{ n }}</option>{% endfor %}
+          <option value="__typed__" {{ 'selected' if not other_nums }}>type the correct #</option>
+        </select>
+        <input name="typed_number" placeholder="correct #" autocomplete="off"
+               style="font-size:12px; padding:2px 6px; width:120px;{{ '' if not other_nums else ' display:none;' }}">
+        <button class="btn ok" type="submit" style="padding:2px 8px; font-size:12px;">Keep with this #</button>
+      </form>
+    </details>
+    {% endif %}
     <form method="post" action="/records/{{ r.record_type }}/{{ r.record_id }}/duplicate" style="margin:0;"
           onsubmit="return confirm('Mark this {{ r.record_type }} ({{ (r.store_matched | store_label) or '?' }}, {{ money(r.amount) }}) as a duplicate and exclude it from QuickBooks?');">
       <input type="hidden" name="action" value="ignore">
@@ -83,7 +113,8 @@ always shown.</p>
   {% set ns = namespace(keys=[]) %}
   {% for r in g.records %}{% set _ = ns.keys.append(('%.2f'|format(r.amount)) if r.amount is not none else '∅') %}{% endfor %}
   {% set amt_multi = (ns.keys | unique | list | length) > 1 %}
-  <div class="card">
+  <div class="card"{% if g.qb_twice %} style="border-color:var(--bad);"{% endif %}>
+    {% if g.qb_twice %}<div style="color:var(--bad); font-weight:600; margin-bottom:8px;">&#9888; {{ g.qb_twice }}</div>{% endif %}
     <div style="overflow-x:auto;">
       <table class="duptable">
         <thead>
@@ -127,7 +158,8 @@ always shown.</p>
           {% for r in g.records %}{% if r.duplicate_reason and (r.duplicate_suspect or r.duplicate_ignored) %}{% set why.any = true %}{% endif %}{% endfor %}
           {% if why.any %}
           <tr><td class="rowlabel">Why flagged</td>
-            {% for r in g.records %}<td style="white-space:normal; min-width:180px; max-width:320px; font-size:12px;">{{ r.duplicate_reason if (r.duplicate_reason and (r.duplicate_suspect or r.duplicate_ignored)) else '—' }}</td>{% endfor %}</tr>
+            {# One short line; the full text is in the tooltip (2026-10-20). #}
+            {% for r in g.records %}{% set _show = r.duplicate_reason and (r.duplicate_suspect or r.duplicate_ignored) %}<td style="white-space:normal; min-width:160px; max-width:260px; font-size:12px;"{% if _show %} title="{{ r.duplicate_reason }}"{% endif %}>{{ (r.duplicate_reason | short_dup_reason) if _show else '—' }}</td>{% endfor %}</tr>
           {% endif %}
           <tr><td class="rowlabel">Links</td>
             {% for r in g.records %}

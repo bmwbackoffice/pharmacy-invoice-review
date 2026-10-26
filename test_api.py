@@ -29,7 +29,7 @@ t = time.time()
 try:
     resp = ce._create_message(
         client, model=ce.MODEL, max_tokens=16,
-        system=[{"type": "text", "text": "You reply tersely.", "cache_control": {"type": "ephemeral"}}],
+        system=[{"type": "text", "text": "You reply tersely.", "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
         messages=[{"role": "user", "content": "Reply with the single word OK."}],
         timeout=30.0,
     )

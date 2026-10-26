@@ -28,3 +28,7 @@ __pycache__/
 *.pyc
 _tmp_view/
 _to_delete/
+
+# Database backups (backup_db.py) -- every record and the users table; never commit
+backups/
+*.dump

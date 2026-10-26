@@ -288,5 +288,118 @@ class StoreConflictDB(RollbackTestCase):
         self.assertIn("already entered in QuickBooks", new["duplicate_reason"])
 
 
+class MisreadNumberSweepVsEntered(RollbackTestCase):
+    """DU-16, 2026-10-15 (Joel: yes): the misread-number check only compared copies NOT entered in QB, so a
+    waiting copy whose twin was already entered sat on QB entry unflagged: 11 such bills, e.g. Maxi Health
+    $5,230.84 #797203 waiting beside #797208 entered, and Masterko $1,459.40 #3551 beside #35551."""
+
+    def setUp(self):
+        super().setUp()
+        self._saved_std, ce.VENDOR_STD = ce.VENDOR_STD, {}
+        ce._DEDUPE_VENDOR_CACHE.clear()
+        self.n = 0
+
+    def tearDown(self):
+        ce.VENDOR_STD = self._saved_std
+        ce._DEDUPE_VENDOR_CACHE.clear()
+        super().tearDown()
+
+    def _inv(self, number, date, entered=False, gid=None, amount=5230.84, vendor="Zz Misread Vendor"):
+        self.n += 1
+        fn = f"ZZTEST misread {self.n}.eml"
+        self.cur.execute("INSERT INTO emails (filename, status) VALUES (%s,'processed')", (fn,))
+        self.cur.execute(
+            "INSERT INTO invoices (email_filename, vendor_matched, store_matched, invoice_number, amount, invoice_date, "
+            "entered_in_qb, duplicate_suspect, duplicate_ignored, skip_qb_import, duplicate_group_id) "
+            "VALUES (%s,%s,'Refuah Pharmacy',%s,%s,%s,%s,FALSE,FALSE,FALSE,%s) RETURNING id",
+            (fn, vendor, number, amount, date, entered, gid))
+        return self.cur.fetchone()[0]
+
+    def _state(self, rid):
+        self.cur.execute("SELECT duplicate_suspect, entered_in_qb, duplicate_group_id, duplicate_reason "
+                         "FROM invoices WHERE id = %s", (rid,))
+        return self.cur.fetchone()
+
+    def _sweep(self):
+        return [f for f in ce.flag_number_misread_duplicates("test")["flagged"]
+                if f["vendor"] and f["vendor"].startswith("Zz Misread")]
+
+    def test_waiting_copy_of_an_entered_bill_is_flagged(self):
+        entered = self._inv("ZZ797208", "2026-08-10", entered=True)
+        waiting = self._inv("ZZ797203", "2026-08-10")
+        sets = self._sweep()
+        self.assertEqual([sorted(f["ids"]) for f in sets], [sorted([entered, waiting])])
+        self.assertEqual(sets[0]["entered_ids"], [entered])
+        suspect, _, gid, reason = self._state(waiting)
+        self.assertTrue(suspect)
+        self.assertIn("already entered in QuickBooks", reason)
+        self.assertIn("#ZZ797208", reason)
+        e_suspect, e_entered, e_gid, _ = self._state(entered)
+        self.assertEqual((e_suspect, e_entered, e_gid), (False, True, gid),
+                         "the entered copy stays entered and unflagged; it only joins the set")
+        self.assertEqual(self._sweep(), [], "a second run changes nothing")
+
+    def test_misread_number_and_date(self):
+        """Masterko #3730 dated 8/12 beside #33730 dated 8/13: one character apart, a day apart."""
+        entered = self._inv("ZZ35551", "2026-10-07", entered=True, amount=1459.40)
+        waiting = self._inv("ZZ3551", "2026-10-08", amount=1459.40)
+        suffix_e = self._inv("ZZR204977", "2026-09-29", entered=True, amount=226.80)
+        suffix_w = self._inv("ZZR204977-IN", "2026-09-30", amount=226.80)
+        self.assertEqual(sorted(sorted(f["ids"]) for f in self._sweep()),
+                         sorted([sorted([entered, waiting]), sorted([suffix_e, suffix_w])]))
+
+    def test_separate_bills_are_left_alone(self):
+        self._inv("ZZ7898", "2026-08-17", entered=True, amount=1760.00)       # weekly, same amount
+        self._inv("ZZ7984", "2026-08-24", amount=1760.00)
+        self._inv("ZZFI2614901", "2026-10-07", entered=True, amount=44.59)    # two days apart, other numbers
+        self._inv("ZZFI24150750", "2026-10-09", amount=44.59)
+        self._inv("ZZ1001", "2026-08-01", amount=99.00)                       # one character apart, a month apart
+        self._inv("ZZ1002", "2026-09-01", amount=99.00)
+        self.assertEqual(self._sweep(), [])
+
+    def test_two_entered_copies_are_not_a_set(self):
+        """Both already in QuickBooks: nothing for this check to stop (a person fixes QuickBooks)."""
+        self._inv("ZZ3730", "2026-08-12", entered=True, amount=632.35)
+        self._inv("ZZ33730", "2026-08-13", entered=True, amount=632.35)
+        self.assertEqual(self._sweep(), [])
+
+    def test_not_a_duplicate_decision_sticks(self):
+        import web_db
+        self._inv("ZZ797208", "2026-08-10", entered=True)
+        waiting = self._inv("ZZ797203", "2026-08-10")
+        self.assertEqual(len(self._sweep()), 1)
+        saved = web_db.connect
+        web_db.connect = db.connect
+        try:
+            web_db.clear_duplicate_flag("invoice", waiting, "test")      # the page's "not a duplicate"
+        finally:
+            web_db.connect = saved
+        self.assertEqual(self._sweep(), [])
+        self.assertFalse(self._state(waiting)[0])
+
+    def test_blank_group_ids_count_as_none(self):
+        """Copies whose group ids were all '' looked already reviewed and were never flagged."""
+        a = self._inv("ZZ599722", "2026-09-10", gid="", amount=624.54)
+        b = self._inv("ZZ9AG5445", "2026-09-10", gid="", amount=624.54)
+        self.assertEqual([sorted(f["ids"]) for f in self._sweep()], [sorted([a, b])])
+        self.assertTrue(self._state(a)[0] and self._state(b)[0], "two waiting copies are both flagged")
+
+    def test_possible_duplicates_shows_the_entered_copy(self):
+        import web_db
+        entered = self._inv("ZZ797208", "2026-08-10", entered=True)
+        waiting = self._inv("ZZ797203", "2026-08-10")
+        self._sweep()
+        saved = web_db.connect
+        web_db.connect = db.connect
+        try:
+            sets = web_db.list_duplicate_candidates()
+        finally:
+            web_db.connect = saved
+        mine = [s for s in sets if {r["record_id"] for r in s["records"]} & {entered, waiting}]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual({r["record_id"] for r in mine[0]["records"]}, {entered, waiting})
+        self.assertTrue(next(r for r in mine[0]["records"] if r["record_id"] == entered)["entered_in_qb"])
+
+
 if __name__ == "__main__":
     unittest.main()

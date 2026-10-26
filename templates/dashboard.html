@@ -14,6 +14,10 @@
                display:flex; gap:4px 10px; flex-wrap:wrap; }
   .dashtile.alert { border-color:#dc2626; background:#fef2f2; }
   .dashtile.alert .dashcount { color:#b91c1c; }
+  /* The four that can cost money if missed (first in Work): an amber edge while they hold anything. */
+  .dashtile.money:not(.zero) { border-left:4px solid var(--warn); }
+  .dashtile.money:not(.zero) .dashcount { color:var(--warn); }
+  .qb-stale { color:var(--warn); font-weight:700; }
   .dashtile .dashcount.word { font-size:22px; }
   .dashsection { margin:22px 0 2px; }
   .dashsection + p { margin:0 0 4px; }
@@ -22,7 +26,7 @@
 {% macro tile_grid(tiles) %}
 <div class="dashgrid">
   {% for t in tiles %}
-  <a class="dashtile{{ ' zero' if t.count == 0 }}{{ ' alert' if t.alert }}" href="{{ t.href }}">
+  <a class="dashtile{{ ' zero' if t.count == 0 }}{{ ' alert' if t.alert }}{{ ' money' if t.money }}" href="{{ t.href }}">
     <div class="dashcount{{ ' word' if t.count is string }}">{{ t.count }}</div>
     <div class="dashlabel">{{ t.label }}</div>
     <div class="dashnote muted">{{ t.note }}</div>
@@ -37,6 +41,28 @@
 {% endmacro %}
 
 <h2>To-do dashboard</h2>
+{% if notifications %}
+<div class="card" style="border-color:var(--brand); background:#eff6ff; padding:10px 14px;">
+  <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+    <strong>&#128276; {{ notifications|length }} new notification{{ '' if notifications|length == 1 else 's' }}</strong>
+    {% if notifications|length > 1 %}
+    <form method="post" action="/notifications/dismiss" style="margin:0 0 0 auto;">
+      <button class="linklike" type="submit">dismiss all</button></form>
+    {% endif %}
+  </div>
+  {% for n in notifications %}
+  <div style="display:flex; align-items:center; gap:10px; padding:4px 0; border-top:1px solid #dbeafe;">
+    <span>{{ n.message }}</span>
+    <span class="muted" style="font-size:12px; white-space:nowrap;">{{ n.created_at | us_datetime }}</span>
+    <form method="post" action="/notifications/dismiss" style="margin:0 0 0 auto; display:flex; gap:8px;">
+      <input type="hidden" name="id" value="{{ n.id }}">
+      {% if n.link %}<button class="linklike" type="submit" name="go" value="{{ n.link }}">open</button>{% endif %}
+      <button class="linklike" type="submit" title="Dismiss">&#10005;</button>
+    </form>
+  </div>
+  {% endfor %}
+</div>
+{% endif %}
 <div style="display:flex; align-items:baseline; gap:12px; flex-wrap:wrap;">
   <h3 class="dashsection">Work</h3>
   <form method="post" action="/scheduled-runs/run-now" style="margin:0 0 0 auto;">
@@ -44,8 +70,9 @@
             title="Process answers, Quick fixes and uploads now instead of waiting for the next scheduled run">Apply changes now</button>
   </form>
 </div>
-<p class="muted">The queues waiting on a person — counts are live on each load. Only the review queue is
-  split by assignee; the rest are shared pools anyone can work.</p>
+<p class="muted">The queues waiting on a person — counts are live on each load. The four right after the run status
+  are the ones that can cost money if missed (amber edge while they hold anything). Only the review queue is split by assignee; the
+  rest are shared pools anyone can work.</p>
 {{ tile_grid(work) }}
 
 {% if qb_entry %}
@@ -53,7 +80,8 @@
 <p class="muted">Invoices and credit memos on QB entry (no payments): when each store's were last marked entered in
   QuickBooks (someone clicking "mark entered"; automatic marks such as the QuickBooks reconcile import don't count),
   how many that sitting covered (marks with no gap over {{ qb_entry_gap }} minutes), and how many are
-  <strong>ready to export</strong> now.</p>
+  <strong>ready to export</strong> now. A store with bills ready and no entry in over {{ qb_entry_stale_days }} days
+  is marked &#9888;.</p>
 <div class="card" style="display:inline-block; padding:6px 12px;">
   <table style="width:auto;">
     <thead><tr><th>Store</th><th>Entered to QB</th><th style="text-align:right;">Records</th>
@@ -62,7 +90,9 @@
     {% for s in qb_entry %}
       <tr>
         <td><a href="/qb?store={{ s.store | urlencode }}&entered=yes" title="What was entered for this store">{{ (s.store | store_label) or s.store }}</a></td>
-        <td>{{ (s.last_at | us_datetime) if s.last_at else '—' }}</td>
+        <td>{{ (s.last_at | us_datetime) if s.last_at else '—' }}
+          {% if s.stale %}<span class="qb-stale" title="Bills are waiting and nothing was entered for this store in over {{ qb_entry_stale_days }} days">
+            &#9888; {{ ('%d days ago' % s.days_ago) if s.days_ago is not none else 'no entry yet' }}</span>{% endif %}</td>
         <td style="text-align:right;">{{ s.count if s.last_at else '—' }}</td>
         <td style="text-align:right;">
           {% if s.ready %}<a href="/qb?store={{ s.store | urlencode }}" title="Open QB entry for this store"><strong>{{ s.ready }}</strong></a>

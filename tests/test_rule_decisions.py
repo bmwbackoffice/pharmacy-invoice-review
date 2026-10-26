@@ -93,6 +93,21 @@ class StoreListFollowsSetup(unittest.TestCase):
         self.assertIn("Back office: it sells no goods", p)
 
 
+class OutOfStockLines(unittest.TestCase):
+    """2026-10-15 (Joel: both). Masterko's 'items out of stock' page ($162, never shipped), scanned on its own, was
+    held as a sales order and would have become a $162 bill. And a Melissa & Doug order recorded as the bill
+    ($1,485.48) included two lines 'On Backorder' ($120.24). On invoices the AI already leaves such lines out."""
+
+    def test_the_ai_is_told(self):
+        p = ce.build_system_prompt(stores=[{"store_name": "Maple Pharmacy"}], excluded_vendors=[], card_store_map={})
+        self.assertIn("a document that lists ONLY such items (e.g. a delivery slip's separate 'items out of stock' "
+                      "page, scanned on its own) is not a bill at all", p)
+        self.assertIn("the printed total MINUS the extended amounts of the lines marked backordered / out of stock / "
+                      "not shipped", p)
+        self.assertIn("total_source stays 'stated' when you start from the printed total", p)
+        self.assertIn("One exception, for sales orders and priced packing slips only", p)   # beside the read-the-total rule
+
+
 class BackOfficeGoods(unittest.TestCase):
     def setUp(self):
         self._saved = ce._BACK_OFFICE

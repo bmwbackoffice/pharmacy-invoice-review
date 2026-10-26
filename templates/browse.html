@@ -3,7 +3,7 @@
 {% block content %}
 <h2>Records
   <span class="muted">
-    {% if source == 'history' %}({{ total }} ledger rows · read-only){% else %}({{ rows|length }} shown, max 2000){% endif %}
+    {% if source == 'history' %}({{ total }} ledger rows · read-only){% else %}({{ '{:,}'.format(pg.total) }} total{% if pg.pages > 1 %} · page {{ pg.page }} of {{ pg.pages }}{% endif %}){% endif %}
   </span>
 </h2>
 
@@ -252,6 +252,21 @@
     {% endfor %}
     </tbody>
   </table>
+</div>
+{# Pages (2026-10-26): links keep every filter and the sort; the size choice is remembered per person. #}
+{% set rq = [] %}
+{% for k, v in params.items() %}{% if v and k != 'page' %}{% set _ = rq.append(k ~ '=' ~ (v|urlencode)) %}{% endif %}{% endfor %}
+{% set rbase = '/browse?' ~ (rq|join('&')) %}
+<div class="card" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+  <span class="muted">{% if pg.total %}Showing {{ '{:,}'.format((pg.page - 1) * pg.size + 1) }}–{{ '{:,}'.format([pg.page * pg.size, pg.total]|min) }} of {{ '{:,}'.format(pg.total) }}{% else %}Nothing to show{% endif %}</span>
+  {% if pg.pages > 1 %}
+    {% if pg.page > 1 %}<a class="btn secondary" style="padding:3px 10px;" href="{{ rbase }}&page_size={{ pg.page_size }}&page={{ pg.page - 1 }}">&larr; Prev</a>{% endif %}
+    <span class="muted">page {{ pg.page }} / {{ pg.pages }}</span>
+    {% if pg.page < pg.pages %}<a class="btn secondary" style="padding:3px 10px;" href="{{ rbase }}&page_size={{ pg.page_size }}&page={{ pg.page + 1 }}">Next &rarr;</a>{% endif %}
+  {% endif %}
+  <span class="muted" style="margin-left:auto;">Per page:</span>
+  {% for sz in page_size_options %}<a class="btn {{ '' if pg.page_size == (sz|string) else 'secondary' }}" style="padding:3px 10px;" href="{{ rbase }}&page_size={{ sz }}">{{ sz }}</a>{% endfor %}
+  <a class="btn {{ '' if pg.page_size == 'all' else 'secondary' }}" style="padding:3px 10px;" href="{{ rbase }}&page_size=all" title="Up to 2,000 a page">All</a>
 </div>
 {% endif %}
 {% endblock %}

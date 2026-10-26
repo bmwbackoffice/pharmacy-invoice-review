@@ -1,4 +1,7 @@
 """Deterministic review gates (spec area GT). Each test is a real incident or rule."""
+from pathlib import Path
+from unittest import mock
+
 from _base import PureTestCase, ce, inv
 
 
@@ -205,6 +208,81 @@ class RecordlessEmailsAndIgnoredConfirmations(PureTestCase):
         c = self.email("payment", "NJNG", payments=[self.pay("NJNG")])
         ce.apply_review_gates(c)
         self.assertEqual(len(c["payments"]), 1)
+
+
+class UnknownStoreScans(PureTestCase):
+    """2026-10-15: a Westgate scan (a SureCost purchase order) came in typed "unknown" with nothing read
+    from it, and was filed as informational: no one would ever have looked at it. A store scans a
+    document because it's a bill or a receipt, so a scan from one of our store mailboxes (Setup ›
+    Senders) that the AI can't tell goes to review, where a person dismisses it in a click if there's
+    nothing to enter. The same email from anyone else stays informational."""
+
+    REASON = "scan came from one of our stores"
+
+    @staticmethod
+    def email(etype, **kw):
+        c = {"email_type": etype, "vendor_matched": "", "store_matched": "Westgate Pharmacy",
+             "needs_human_review": False, "review_reason": "", "invoices": [], "credit_memos": [],
+             "payments": []}
+        c.update(kw)
+        return c
+
+    def test_unknown_scan_goes_to_review(self):
+        for etype in ("unknown", "Unknown", "", None):
+            c = self.email(etype, _from_store_scanner=True)
+            ce.apply_review_gates(c)
+            self.assertTrue(c["needs_human_review"], etype)
+            self.assertIn(self.REASON, c["review_reason"])
+            ce.apply_review_gates(c)                           # gates run twice: sentence once
+            self.assertEqual(c["review_reason"].count(self.REASON), 1)
+            self.assertTrue(ce.result_has_review({"classification": c}))
+            rows, _ = ce.build_result_rows([{"filename": "x.eml", "classification": c}])
+            self.assertEqual(rows, [], "a flagged whole email has no record row")
+
+    def test_unknown_email_from_anyone_else_is_informational(self):
+        c = self.email("unknown")
+        ce.apply_review_gates(c)
+        self.assertFalse(c["needs_human_review"])
+
+    def test_a_scan_the_ai_could_type_is_left_alone(self):
+        """A shipment notice (an unpriced packing slip), statement or letter: the AI told what it is."""
+        for etype in ("shipment_notice", "statement", "correspondence"):
+            c = self.email(etype, _from_store_scanner=True)
+            ce.apply_review_gates(c)
+            self.assertFalse(c["needs_human_review"], etype)
+
+    def test_a_scan_with_a_record_is_judged_on_its_record(self):
+        c = self.email("unknown", _from_store_scanner=True,
+                       invoices=[inv("Henry Schein", "77", 40.0, store="Westgate Pharmacy", invoice_date="2026-10-14")])
+        ce.apply_review_gates(c)
+        self.assertNotIn(self.REASON, c["review_reason"] or "")
+
+    def test_reviewer_answer_is_trusted(self):
+        c = self.email("unknown", _from_store_scanner=True, _reviewer_answered=True)
+        ce.apply_review_gates(c)
+        self.assertFalse(c["needs_human_review"], "the model followed the person (e.g. nothing to enter); no loop")
+
+    def test_reading_an_email_marks_scans_from_store_mailboxes(self):
+        """The flag comes from the email's From address and Setup › Senders, set where each email is read."""
+        ce.SENDER_STORE_MAP = {"westgatescanner@maplerx.com": "Westgate Pharmacy"}
+
+        def run(sender):
+            text = f"From: Scanner <{sender}>\nTo: invoices@maplerx.com\nSubject: Scan to E-mail Server Job\n"
+            classified = {"filename": "scan.eml", "raw_response": "{}", "error": None,
+                          "classification": self.email("unknown")}
+            with mock.patch.object(ce, "read_email_content", return_value=(text, [], None)), \
+                    mock.patch.object(ce, "_received_date_str", return_value=""), \
+                    mock.patch.object(ce, "classify_with_retry", return_value=classified), \
+                    mock.patch.object(ce, "assign_invoice_files", return_value=[]), \
+                    mock.patch.object(ce, "upload_record_files"), \
+                    mock.patch.object(ce, "save_review_files", return_value=[]):
+                return ce.process_source_email(None, Path("scan.eml"), "")
+
+        res = run("WestgateScanner@maplerx.com")
+        self.assertTrue(ce.result_has_review(res))
+        self.assertIn(self.REASON, res["classification"]["review_reason"])
+        res = run("someone@vendor.com")
+        self.assertFalse(ce.result_has_review(res))
 
 
 class ExcludedVendorCarryover(PureTestCase):

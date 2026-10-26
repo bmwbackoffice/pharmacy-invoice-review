@@ -59,6 +59,7 @@ import hashlib
 import html as html_module
 import io
 import json
+import time
 import mimetypes
 import os
 import re
@@ -141,6 +142,15 @@ MODEL = "claude-sonnet-5"
 # deliberate non-goal here.) Scans/images too dense even for this land in the
 # page-chunking path below (CHUNK_THRESHOLD_PAGES) or fail into review.
 MAX_TOKENS = 21000
+# Longest a single streamed answer may run before we give up (see _create_message). 21,000 output tokens
+# at a slow ~40 tokens/s is under 9 minutes.
+STREAM_MAX_SECONDS = 900
+# Extra Messages-API request fields for every classify call (thinking / effort settings). Empty = the
+# model's defaults. Set after test_thinking.py showed which setting reads documents as well for less.
+API_EXTRA = {}
+# An email whose API call fails (timeout / connection) in this many SEPARATE runs stops being retried
+# automatically and goes to the review queue instead (2026-10-23: two scans were retried 44 runs in a row).
+API_FAIL_RUNS_LIMIT = 2
 
 # Auto-split oversized single-PDF scans before classification. A stack of separate
 # paper invoices scanned at the office MFP arrives as ONE big PDF; asking the model
@@ -207,6 +217,16 @@ except ValueError:
 # A learnings re-check (Phase 1b) stops after this long, leaving the run time for new email within
 # scheduled_run.py's 90-minute limit; items it didn't reach keep their flags (2026-10-14).
 RECHECK_MAX_MINUTES = 45
+# The once-a-day whole-queue learnings re-check runs in the first run at or after this hour (24h clock).
+RECHECK_FULL_HOUR = int(os.environ.get("RECHECK_FULL_HOUR", "19"))
+_LEARNINGS_SNAPSHOT = Path(__file__).parent / "logs" / "learnings_snapshot.txt"
+_FULL_RECHECK_STATE = Path(__file__).parent / "logs" / "learnings_full_recheck.json"
+# Words too common in vendor names to tie a learning to one vendor.
+_VENDOR_STOPWORDS = {"pharmacy", "pharma", "pharmaceutical", "pharmaceuticals", "inc", "llc", "corp", "company",
+                     "distributors", "distributor", "distribution", "distributing", "health", "healthcare",
+                     "supply", "supplies", "services", "service", "group", "labs", "laboratories", "medical",
+                     "products", "usa", "the", "and", "natural", "naturals", "nutrition", "international",
+                     "sales", "systems", "solutions", "store", "stores"}
 
 # filename -> gmail deep-link, loaded once per run (see load_gmail_links()).
 GMAIL_LINKS = {}
@@ -440,7 +460,7 @@ Before citing a mismatch between the sum of visible line items and an invoice's 
 
 A scanned or photographed multi-page document sometimes has its pages out of physical order (e.g. the page printed "Page 2" was scanned before the page printed "Page 1"), upside-down, or sideways. None of that is a reason to report a line-item/total mismatch. Before recounting (per the instruction above), first work out the TRUE reading order and orientation: use each page's own printed page number/label if present, or content continuity otherwise (a running item list, a "continued" marker, matching invoice number/header repeated on each page) — then read every page, including any upside-down or sideways one, in its correct upright orientation and true sequence, exactly as you would if it had been scanned right-side up and in order. Recount and total the line items using THIS corrected order/orientation, not the physical scan order. Only report a line-item/total mismatch as a review reason if it still doesn't reconcile after correcting for order and orientation — being out-of-sequence or upside-down is never by itself a valid reason to flag a mismatch.
 
-Separately, before writing invoice_amount (and credit_amount / payment_amount), re-read the exact digits printed next to "Total" / "Amount Due" / "Balance" on the document one more time and confirm the number you are about to output matches them exactly, digit for digit — do not let a nearby number (a price, a quantity, an item code, a PO/order number) bleed into the total. When a single line item's Qty x Price already equals the printed total, that is a strong confirmation signal — use it to double-check your reading, not to substitute a different total than what's printed.
+Separately, before writing invoice_amount (and credit_amount / payment_amount), re-read the exact digits printed next to "Total" / "Amount Due" / "Balance" on the document one more time and confirm the number you are about to output matches them exactly, digit for digit — do not let a nearby number (a price, a quantity, an item code, a PO/order number) bleed into the total. The invoice amount is the FINAL amount the customer must pay -- the figure labeled "Please pay", "Amount due", "Balance due", "Net total" or "Invoice total", usually at the bottom of the document -- AFTER service charges, fees, discounts and credits. A summary/breakdown table (a "Merchandise summary" by category, a "Totals" row of catalog/net columns, a "Subtotal") is NOT the invoice amount when the document also prints a final figure. Example (UNFI): the merchandise summary's Net column totals $174.19, but the bottom box reads "NET TOTAL 179.44 <---- PLEASE PAY" (subtotal 194.59 + service charge, minus volume discount 15.15) -> invoice_amount 179.44. When unsure, check it: the final figure should equal subtotal + charges/fees/tax - discounts/credits as printed. When a single line item's Qty x Price already equals the printed total, that is a strong confirmation signal — use it to double-check your reading, not to substitute a different total than what's printed. (One exception, for sales orders and priced packing slips only: lines marked backordered / out of stock / not shipped come off the printed total — read the printed total exactly as above, then subtract them, as is_sales_order explains.)
 
 Set "total_source" on every record that has an amount. If you read the amount directly from a printed "Total" / "Amount Due" / "Balance" figure on the document, set total_source to "stated". If the document has NO printed Total / Amount Due / Balance anywhere — only itemized line items with no summary figure — set total_source to "derived" rather than inventing certainty; this is expected and fine, it is NOT an error to note in notes/review_reason by itself. Likewise, if a "Page X of Y" indicator (or any other evidence) shows this record's total-bearing page is absent from what you were given, set total_source to "derived" for whatever amount you could determine from what's visible. (A downstream code rule routes "derived" totals to human review, so you don't need to also flag them yourself.)
 
@@ -464,9 +484,9 @@ Also set "source_pages" for each record: when a single PDF attachment contains M
 
 Also set "page_rotations" for each record: scans and photos (e.g. WhatsApp IMG-*.jpg) often arrive upside-down or sideways. For each page you attribute to this record, report the CLOCKWISE rotation in degrees — one of 0, 90, 180, or 270 — needed to make that page display UPRIGHT for a human reviewer. Report it as an object keyed by the 1-based page number WITHIN source_document (the SAME numbering as source_pages), e.g. {"1": 0, "2": 90} means page 2 must be turned 90° clockwise to be upright. If source_document is a single IMAGE (a photo/scan — source_pages is null), still report its rotation under key "1", e.g. {"1": 90} for a sideways photo. Use 0 (or omit the page) for pages that are already upright; set page_rotations to null if none need rotating. This ONLY rotates the saved file for review — it must NOT change any value you extract or which pages belong to which record. Correct ROTATION only (upside-down / sideways); do NOT report anything for mirrored or flipped pages (that's a reflection, not a rotation, and is out of scope).
 
-Also OPTIONALLY set "blank_pages" and "page_order" for each record — both are CONSERVATIVE, opt-in cleanups of the saved file only (they never change any extracted value); MOST documents need NEITHER, so leave both null/empty unless clearly warranted. "blank_pages": a list of 1-based source_document page numbers (from among this record's source_pages) that are ENTIRELY blank — no visible content at all — which will be dropped from the saved file. Be strict: a mostly-white page that still shows a faint letterhead, footer, page number, or any stray marks is NOT blank; when unsure, OMIT it (default to keeping the page). Use null or an empty list if no page is blank. "page_order": normally null. Set it to a list that is an EXACT PERMUTATION of this record's source_pages, in the correct READING order, ONLY when you can clearly read a printed page indicator (e.g. "Page 2 of 4", a running header/footer) showing the physical scan order is wrong — e.g. source_pages "1-3" scanned out of order but printed "Page 3, Page 1, Page 2" would be page_order [2,3,1] to restore reading order. If the pages already read in correct physical order, OR you cannot confidently read the printed page numbers, leave page_order null — reordering on a guess is worse than leaving the scan order alone, so "no reordering" is the safe default.
+Also OPTIONALLY set "blank_pages" and "page_order" for each record — both are CONSERVATIVE, opt-in cleanups of the saved file only (they never change any extracted value); MOST documents need NEITHER, so leave both null/empty unless clearly warranted. "blank_pages": a list of 1-based source_document page numbers (from among this record's source_pages) that are ENTIRELY blank — no visible content at all — which will be dropped from the saved file. Be strict: a mostly-white page that still shows a faint letterhead, footer, page number, or any stray marks is NOT blank; when unsure, OMIT it (default to keeping the page). ONE exception also goes in blank_pages: a washed-out, unreadable GHOST of another page of this same record — a carbon/colored back copy, show-through from the reverse side, or a too-faint duplicate scan — when ANOTHER page of this record is the clear, readable version of the same document (same layout and items). It adds nothing, so drop it. Never list a page that has any content you can actually read and that isn't on the clear page. Use null or an empty list if no page is blank. "page_order": normally null. Set it to a list that is an EXACT PERMUTATION of this record's source_pages, in the correct READING order, ONLY when the physical scan order is clearly wrong, shown EITHER by a printed page indicator (e.g. "Page 2 of 4", a running header/footer) — e.g. source_pages "1-3" scanned out of order but printed "Page 3, Page 1, Page 2" would be page_order [2,3,1] to restore reading order — OR, for a document with no page numbers, by unmistakable content: the page that carries the document's header (vendor letterhead/logo, "Invoice #", date, customer / bill-to block, the column headings) is page 1, and a page that only continues the line items and ends with the totals ("Total Amount", "Balance due") and/or the signature/received stamp comes after it. E.g. a 2-page scan whose first physical page is the line-item tail + "Total Amount" + signature and whose second page is the letterhead with "Invoice #" and the first line items is page_order [2,1]. If the pages already read in correct physical order, OR neither printed page numbers nor such content make the order unmistakable, leave page_order null — reordering on a guess is worse than leaving the scan order alone, so "no reordering" is the safe default.
 
-Classify the email and return ONLY a valid JSON object — no commentary, no markdown:
+Classify the email and return ONLY a valid JSON object — no commentary, no markdown. Write it MINIFIED on a single line: no indentation, no line breaks, no spaces after ":" or "," (the layout below is only for readability; your answer is read by a program, and every extra space costs). Keep free-text fields (notes, reasons, routing_reason) to one short sentence each:
 {
   "email_type": "invoice | payment | statement | shipment_notice | correspondence | spam | unknown",
   "confidence": "high | medium | low",
@@ -477,6 +497,12 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
   "vendor_matched": "normalized vendor name if this email is about a specific vendor, else null — ALWAYS fill this in when identifiable, even for statements/shipment notices/correspondence that have no invoices/payments below",
   "store_matched": "%%STORE_CHOICES%%, or null if not applicable — ALWAYS fill this in when identifiable, even for statements/shipment notices/correspondence",
   "reference_number": "order #, statement #, tracking #, or other identifying number mentioned, or null — used as a fallback identifier when there's no formal invoice/payment number. Do NOT use a persistent customer/account number (one that would appear identically on every document for this account); prefer a per-transaction identifier, else null.",
+  "communication": {
+    "needs_response": "true/false -- see the COMMUNICATION rule below",
+    "request": "SHORT (max ~15 words): the sender's name or email, a colon, then what they want -- e.g. 'rxstore15@gmail.com: pay QuickWit $37.50 balance ASAP' -- or null",
+    "requested_by": "name or email of the person asking, or null",
+    "topic": "ALWAYS set (every email) -- ONE key from the REQUEST TYPE list below"
+  },
   "invoices": [
     {
       "vendor_name_raw": "as it appears in the email",
@@ -486,12 +512,12 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
       "store_raw": "as it appears in the email",
       "store_matched": "%%STORE_CHOICES%%",
       "store_confidence": "high | medium | low",
-      "invoice_number": "string or null",
+      "invoice_number": "the number printed in the document's INVOICE NUMBER field ('Invoice No.', 'Invoice #', 'Inv #', 'Bill #') — or null. Many forms print several numbers side by side in a header grid: 'Our Order No.', 'Customer P.O.', 'Customer No./Account #', 'Sales Order', 'Customer A/C Number'. NONE of those is the invoice number: when a box is labeled Invoice No., use that box even if another number is larger or printed first (Lantev forms: 'OUR ORDER NO. 599723' vs 'INVOICE NO. 9AG5444' -> 9AG5444; UNFI forms: 'DOCUMENT # INV#93055097' is the invoice number -> 93055097, NOT the large 'COVERSHEET# 33625479'). A coversheet, batch, manifest or route number is never the invoice number. Only when no invoice-number field exists at all may another per-transaction number stand in; never a customer/account number. If the SAME document appears more than once in this email (scanned twice, e.g. once upside-down), it is ONE record -- extract it once.",
       "invoice_date": "YYYY-MM-DD or null",
       "invoice_amount": number or null,
       "total_source": "'stated' if invoice_amount was read directly from a printed Total/Amount Due/Balance figure on the document, or 'derived' if NO such printed total exists anywhere on the document and this number was instead computed by summing the visible line items. Always set this — never leave it null when an amount is present.",
       "shipping_charge": "number or null — shipping/freight charge shown on the invoice, if any",
-      "is_sales_order": "true if this document is a SALES ORDER / order acknowledgement / order confirmation rather than a formal invoice — e.g. titled 'Sales Order' / 'Order Acknowledgement' / 'Order Confirmation', shows an 'Order Total' (not an invoice amount / amount due), or the email says 'we have received your order'. Showing full, itemized pricing does NOT make it an invoice — sales order confirmations routinely show full pricing; that alone is never a reason to set this to false. If the document itself is titled/labeled 'Sales Order' or shows 'Order Number'/'Order Total' rather than an invoice number/amount due, set this true even if every line item and price is shown, even if the document is handwritten or informal, and even if there is no other reason to doubt the amount. Example: a small vendor slip headed 'Sales Order #' with a handwritten quantity/item/amount table is a sales order — is_sales_order: true — NOT an invoice, no matter how complete the pricing looks. Do not invent or assume a 'policy' for processing a sales order as an invoice — no such policy exists; the correct handling of a sales order is to set is_sales_order true and let it be held, not to record it as an invoice yourself. A PACKING SLIP / packing list / delivery ticket that shows prices and a total is handled the same way: is_sales_order true (a packing slip with no prices is not a bill at all). Do NOT flag a sales order or priced packing slip for review just to watch for a later invoice or a possible duplicate: the system holds it for a few days, matches it to its invoice automatically when one arrives, and records it as the bill if none does — flag it only for a real problem (store, date, or amount unclear). Otherwise false.",
+      "is_sales_order": "true if this document is a SALES ORDER / order acknowledgement / order confirmation rather than a formal invoice — e.g. titled 'Sales Order' / 'Order Acknowledgement' / 'Order Confirmation', shows an 'Order Total' (not an invoice amount / amount due), or the email says 'we have received your order'. Showing full, itemized pricing does NOT make it an invoice — sales order confirmations routinely show full pricing; that alone is never a reason to set this to false. If the document itself is titled/labeled 'Sales Order' or shows 'Order Number'/'Order Total' rather than an invoice number/amount due, set this true even if every line item and price is shown, even if the document is handwritten or informal, and even if there is no other reason to doubt the amount. Example: a small vendor slip headed 'Sales Order #' with a handwritten quantity/item/amount table is a sales order — is_sales_order: true — NOT an invoice, no matter how complete the pricing looks. Do not invent or assume a 'policy' for processing a sales order as an invoice — no such policy exists; the correct handling of a sales order is to set is_sales_order true and let it be held, not to record it as an invoice yourself. A PACKING SLIP / packing list / delivery ticket that shows prices and a total is handled the same way: is_sales_order true (a packing slip with no prices is not a bill at all). Lines marked out of stock / backordered / not shipped were not delivered and are not billed, even when they show a price: a document that lists ONLY such items (e.g. a delivery slip's separate 'items out of stock' page, scanned on its own) is not a bill at all — create no invoice or sales order record for it, even though it shows prices (type the email shipment_notice if that is all it holds). For a sales order or priced packing slip, invoice_amount is what will actually be billed: the printed total MINUS the extended amounts of the lines marked backordered / out of stock / not shipped (if the printed total already leaves them out — they show $0, or it totals only what shipped — use it as printed). total_source stays 'stated' when you start from the printed total; say in notes which lines you left out and their total. Do NOT flag a sales order or priced packing slip for review just to watch for a later invoice or a possible duplicate: the system holds it for a few days, matches it to its invoice automatically when one arrives, and records it as the bill if none does — flag it only for a real problem (store, date, or amount unclear). Otherwise false.",
       "sales_tax": "number or null — sales tax charged on the invoice, if any",
       "not_received_note": "string or null — if this document shows checkmarks, strikeouts, handwritten notes, or other markings indicating specific line items were NOT received / short-shipped / back-ordered, briefly describe what's marked (e.g. 'Item ABC-123 marked not received, qty 2'). Null if no such markup is present.",
       "not_received_amount": "number or null — if not_received_note is set AND the dollar impact of the marked items is determinable from the document (their line total, or an explicit adjustment shown), the amount by which those items reduce the invoice total. Null if not determinable or not_received_note is null.",
@@ -569,6 +595,9 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
 }
 
 ONLY when email_type is "statement" (a vendor account statement or aging report that itemizes open/paid invoices), populate "statement_invoices" with EVERY invoice the statement references — one entry per listed invoice — so we can reconcile them against our records. This is reconciliation metadata; the statement itself still records no invoice/payment/credit_memo. For any NON-statement email, omit "statement_invoices" or return [].
+
+COMMUNICATION (every email, whatever its email_type -- this is IN ADDITION to the records above, never instead of them): set communication.needs_response to true ONLY when a PERSON has personally written something in this email that asks us (the pharmacy / its accounts-payable team) to DO or ANSWER something and is waiting on us -- e.g. a store manager's note on a forward ("its small bill please pay asap"), a vendor rep's written question or request ("can you confirm when this will be paid?", "please send the W-9", "call me about the balance"), a dispute, or a reply asking for a decision. Look at the human-written text: the email body, notes typed above a forwarded message, and replies in the thread. Set it FALSE for: standard template wording that is part of a vendor document or system-generated email ("Your statement is attached. Please remit payment at your earliest convenience", "please pay by the due date", "thank you for your business"); automated notifications, marketing and alerts; a request that is only "please process/enter this" when the email simply hands documents to the invoices inbox (processing them IS the response -- the system does that); a vendor's question or request that is only INSIDE an earlier message which one of OUR OWN staff (maplerx.com, lakewoodrx.com, carepax.com, 3mvitamins.com, thevitamindesk.com, rxstore15@gmail.com) forwarded to the invoices inbox -- that staff member is already handling the vendor; they forwarded it so the documents get entered, so only what the forwarder wrote themselves above the forwarded part counts (true only if THEY ask AP to do something beyond processing, e.g. "please pay this today"); and anything already resolved in the thread ("payment received, thank you"). When true, fill communication.request SHORT (max ~15 words) as "<sender's name, or their email address if no name is shown>: <what they want>" -- use the actual person/address, never a generic role like "store manager" or "billing department"; write "AP" for accounts payable; include amounts/invoice numbers if stated (e.g. "Amy Spitzer: use a one-time card for Maple's September invoices", "billing@smilingherbs.com: pay past-due statement ASAP"). Fill communication.requested_by with that name/email. When false, set request and requested_by to null. When unsure, false.
+REQUEST TYPE: ALWAYS set communication.topic (for every email, whether or not it needs a response) to the ONE key that best describes the nature of the message a person reading it would act on -- not the attached document's type: payment_reminder = Payment reminder / past due; payment_problem = Payment problem (declined / failed / wrong amount); billing_question = Billing question / dispute / credit; document_request = Request for documents or info (W-9, remittance, statement...); account_change = Account / banking / remit-address change; order_issue = Order / delivery / shipping issue; recall = Recall / compliance notice; internal_request = Internal request (from our own staff); notice = Notice / FYI (no action asked); promotion = Promotion / marketing; acknowledgment = Thank-you / acknowledgment only (nothing new); auto_reply = Automatic reply / out of office (a machine-sent auto-responder: "we received your email", out-of-office, "this mailbox is not monitored" -- no person wrote it); other = Other. Use acknowledgment ONLY when the NEW text this sender wrote (above the quoted/forwarded earlier messages, ignoring the greeting and signature) is nothing but thanks / got it / received / ok / noted -- no question, no request, no new information (amounts, dates, numbers, instructions) -- AND the email adds no attachment of its own (signature logos don't count); if in any doubt, pick the other type that fits. A vendor's "friendly reminder, we have not been paid" is payment_reminder even with the invoice attached; a plain invoice/statement email with only template wording is notice; a declined card/ACH is payment_problem; a new bank account or remit address is account_change; something our own staff wrote to AP is internal_request.
 
 Always set is_duplicate_suspect to false and duplicate_reason to null. Do not infer duplication from wording or tone (e.g. "reminder", "adjusted amount") — you cannot see the pharmacy's invoice records, so you have no basis for that judgment. Duplicate detection is performed separately by comparing this invoice against previously recorded invoices."""
 
@@ -868,12 +897,13 @@ _FIX_STORE = re.compile(r"^\s*Store:\s*(.+?)\s*$", re.I | re.M)
 _FIX_DATE = re.compile(r"^\s*Date:\s*(\d{4}-\d{2}-\d{2})\s*$", re.I | re.M)
 _FIX_AMOUNT = re.compile(r"^\s*Amount:\s*\$?\s*([\d,]+(?:\.\d+)?)\s*(?:\(confirmed\))?\s*$", re.I | re.M)
 _FIX_ENTER = re.compile(r"^\s*Enter in QuickBooks:\s*yes\s*$", re.I | re.M)
+_FIX_VENDOR = re.compile(r"^\s*Vendor:\s*(.+?)\s*$", re.I | re.M)   # 2026-10-21: pick the vendor on Quick fix
 _DATE_FIELD = {"invoice": "invoice_date", "credit_memo": "credit_memo_date", "payment": "payment_date"}
 _AMOUNT_FIELD = {"invoice": "invoice_amount", "credit_memo": "credit_amount", "payment": "payment_amount"}
 
 
 def parse_reviewer_fixes(answer, store_names=None):
-    """The Quick fix lines in a reviewer's answer -> {"store", "date", "amount", "enter"} (only those
+    """The Quick fix lines in a reviewer's answer -> {"vendor", "store", "date", "amount", "enter"} (only those
     present). A store must be one of `store_names` (the stores table; matched ignoring case, returned
     in its canonical spelling) or it's ignored; a date must be a real YYYY-MM-DD; an amount positive."""
     out = {}
@@ -902,6 +932,9 @@ def parse_reviewer_fixes(answer, store_names=None):
             pass
     if _FIX_ENTER.search(answer):
         out["enter"] = True
+    m = _FIX_VENDOR.search(answer)
+    if m and m.group(1).strip():
+        out["vendor"] = m.group(1).strip()      # a standard vendor name (the web form only offers those)
     return out
 
 
@@ -921,6 +954,10 @@ def apply_reviewer_fixes(classification, reviewer_answer, store_names=None):
     single = len(records) == 1
     for rtype, rec in records:
         done = []
+        if "vendor" in fixes and (single or not (rec.get("vendor_matched") or "").strip()):
+            rec["vendor_matched"] = fixes["vendor"]
+            rec["_reviewer_vendor"] = True
+            done.append(f"vendor {fixes['vendor']}")
         if "store" in fixes and (single or (rec.get("store_matched") or "").strip().lower() in ("", "unknown")):
             rec["store_matched"] = fixes["store"]
             rec["_reviewer_store"] = True
@@ -1104,10 +1141,22 @@ def apply_recordless_gate(classification):
     a person enters it (answers with the amount, date and store) or ignores it. Not when its payments
     were dropped as ignored confirmations, or for a payment email from a vendor whose confirmations are
     ignored: that email is just informational. Not on a reprocess with a reviewer's answer either: the
-    model followed the person (e.g. "nothing to enter"), so this can't loop. Idempotent."""
+    model followed the person (e.g. "nothing to enter"), so this can't loop. Idempotent.
+
+    Also (2026-10-15): a scan from one of our own store mailboxes (Setup › Senders, set as
+    _from_store_scanner by process_source_email) that the AI typed "unknown" and read nothing from. A
+    store scans a document because it's a bill or a receipt, so it isn't dropped as informational: a
+    person looks at it and dismisses it in a click if there's nothing to enter."""
     if not classification or _all_records(classification) or classification.get("_reviewer_answered"):
         return
     etype = (classification.get("email_type") or "").strip().lower()
+    if etype in ("", "unknown") and classification.get("_from_store_scanner"):
+        classification["needs_human_review"] = True
+        _append_text(classification, "review_reason",
+                     "This scan came from one of our stores, but the AI couldn't tell what it is and read no "
+                     "invoice, credit memo or payment from it — look at it: answer with the amount, date and "
+                     "store to enter it, or dismiss it if there's nothing to enter.")
+        return
     if etype not in _RECORD_EMAIL_TYPES:
         return
     if etype == "payment" and (classification.get("_ignored_confirmations")
@@ -1118,7 +1167,7 @@ def apply_recordless_gate(classification):
     _append_text(classification, "review_reason",
                  f"This email looks like a{'n' if label[0] in 'aeiou' else ''} {label}, but no {label} with an "
                  f"amount and date could be read from it — answer with the amount, date and store to enter "
-                 f"it, or ignore it if there's nothing to enter.")
+                 f"it, or dismiss it if there's nothing to enter.")
 
 
 def apply_amount_review_gate(rec, amount_field):
@@ -1626,6 +1675,58 @@ def reapply_vendor_standardization_backfill():
     return (checked, resolved)
 
 
+def resolve_vendor_review_items(actor="auto (vendor now in Vendor names)", dry_run=False):
+    """2026-10-20 (Joel: added vendors + aliases, clicked Apply changes now, items stayed): the vendor
+    backfill above only re-resolves RECORDED rows; a record flagged ONLY for "No standardized vendor
+    mapping" lives in the review queue, which nothing re-checked. For each unanswered queue item whose
+    reason has the vendor/account sentence, re-run the CURRENT standardization on its vendor + store:
+      - vendor now resolves AND nothing else is wrong -> answer it ("record it normally") so the next
+        run (or Apply changes now) reprocesses and records it;
+      - vendor now resolves but other reasons remain -> drop just the vendor sentence from the reason
+        (the item stays for those);
+      - an account-only gap re-flags as "no QB account" (stays).
+    Returns {"answered": [ids], "updated": [ids]}."""
+    global VENDOR_STD
+    if not USE_DB:
+        return {"answered": [], "updated": []}
+    VENDOR_STD = load_vendor_standardization()
+    if not VENDOR_STD:
+        return {"answered": [], "updated": []}
+    import psycopg2.extras as _extras
+    conn = _database().connect()
+    conn.autocommit = True
+    out = {"answered": [], "updated": []}
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, vendor_matched, store_matched, question FROM review_queue "
+                        " WHERE coalesce(answer, '') = '' AND (question ILIKE %s OR question ILIKE %s)",
+                        ("%No standardized vendor mapping found%", "%has no QuickBooks account assigned yet%"))
+            for row in cur.fetchall():
+                rec = {"vendor_matched": row.get("vendor_matched"), "store_matched": row.get("store_matched")}
+                apply_vendor_standardization(rec)
+                if not rec.get("standard_vendor"):
+                    continue                       # still not in the list
+                rest = _strip_vendor_std_reasons(row.get("question"))
+                still = rec.get("review_reason")   # "no QB account" sentence, when that's the gap now
+                new_q = " ".join(x for x in (rest, still) if x).strip()
+                if dry_run:
+                    (out["updated"] if new_q else out["answered"]).append(row["id"])
+                    continue
+                if new_q != (row.get("question") or "").strip():
+                    cur.execute("UPDATE review_queue SET question = %s WHERE id = %s", (new_q or row.get("question"), row["id"]))
+                if not new_q:
+                    cur.execute("UPDATE review_queue SET answer = %s, reviewed_by = %s, reviewed_at = now() "
+                                "WHERE id = %s AND coalesce(answer, '') = ''",
+                                (f"The vendor is now in Vendor names ({rec.get('standard_vendor')}). "
+                                 f"Nothing else was flagged -- record it normally.", actor, row["id"]))
+                    out["answered"].append(row["id"])
+                else:
+                    out["updated"].append(row["id"])
+    finally:
+        conn.close()
+    return out
+
+
 def reapply_excluded_vendor_backfill():
     """Additive backfill mirroring reapply_vendor_standardization_backfill(): when a vendor is newly
     added to excluded_vendors, flip skip_qb_import -> TRUE on the ALREADY-recorded, not-yet-entered
@@ -1768,13 +1869,36 @@ def _extract_recipients(text):
     return addrs
 
 
+def _addr_store(mapping, addr):
+    """Store for an address from sender_store_map / contact_store_map: the exact address first, else a
+    whole-domain entry written as '@domain.com' (2026-10-16: @3mvitamins.com -> 3M, @thevitamindesk.com
+    -> Maple). Used ONLY for the store hints -- the scanner-specific logic (preferring a store-scanned
+    copy, recordless-scan gate) still needs an exact scanner address."""
+    addr = (addr or "").strip().lower()
+    if not addr:
+        return None
+    if addr in mapping:
+        return mapping[addr]
+    if "@" in addr:
+        return mapping.get("@" + addr.rsplit("@", 1)[1])
+    return None
+
+
 def _sender_store_hint(text):
     """A decisive store instruction when the email came from a known self-scan
-    mailbox (sender_store_map). Empty string when the sender isn't mapped."""
+    mailbox or a store's own domain (sender_store_map). Empty string when the sender isn't mapped."""
     sender = _extract_sender(text)
-    store = SENDER_STORE_MAP.get(sender) if sender else None
+    store = _addr_store(SENDER_STORE_MAP, sender) if sender else None
     if not store:
         return ""
+    if sender not in SENDER_STORE_MAP:          # matched by domain -- a store's own address, not a scanner
+        return (
+            f"\n\n[STORE SIGNAL — this email was sent from {sender}, an address on a domain that "
+            f"belongs to {store}. Treat the store as {store} (store_matched = \"{store}\") with HIGH "
+            f"confidence. Only choose a different store if the invoice document ITSELF clearly and "
+            f"explicitly states a different pharmacy, and do NOT flag for review merely because the "
+            f"store would otherwise be uncertain.]"
+        )
     return (
         f"\n\n[STORE SIGNAL — this email was sent from {sender}, a known self-scan "
         f"mailbox for {store}. Treat the store as {store} (store_matched = \"{store}\") "
@@ -1790,7 +1914,7 @@ def _contact_store_hint(text):
     biller/vendor emailing US where a recipient address (not the sender) is what identifies
     the store. Empty string when no recipient matches, or when matched recipients point to
     CONFLICTING stores (ambiguous — leave it to normal review in that case)."""
-    stores = {CONTACT_STORE_MAP[a] for a in _extract_recipients(text) if a in CONTACT_STORE_MAP}
+    stores = {st for st in (_addr_store(CONTACT_STORE_MAP, a) for a in _extract_recipients(text)) if st}
     if len(stores) != 1:
         return ""
     store = next(iter(stores))
@@ -1810,9 +1934,9 @@ _SENDER_HISTORY = {}     # sender -> {store: count}, read once per run (one run 
 def _own_email_domains():
     """Our own mail domains: scanners and staff send for every store, so their history says nothing
     about one bill's store."""
-    own = {"maplerx.com", "lakewoodrx.com", "carepax.com"}
+    own = {"maplerx.com", "lakewoodrx.com", "carepax.com", "3mvitamins.com", "thevitamindesk.com"}
     for addr in list(SENDER_STORE_MAP) + list(CONTACT_STORE_MAP):
-        if "@" in addr:
+        if "@" in addr and not addr.endswith("@gmail.com"):   # one store Gmail != all of gmail.com
             own.add(addr.rsplit("@", 1)[1].lower())
     return own
 
@@ -1877,10 +2001,37 @@ def _iter_leaf_attachments(part):
     failed the WHOLE email and silently dropped the invoice inside. Recursing to the
     leaves reaches the actual document."""
     for sub in part.iter_attachments():
+        if sub.get_content_type() == "message/rfc822":
+            continue        # an attached EMAIL: handled by _attached_emails (its text + its own files)
         if sub.is_multipart():
             yield from _iter_leaf_attachments(sub)
         else:
             yield sub
+
+
+def _attached_emails(msg):
+    """Emails attached INSIDE an email (message/rfc822 -- how Outlook/Gmail 'forward as attachment' and
+    multi-select forwards send them). Before 2026-10-19 these were skipped entirely: _iter_leaf_attachments
+    can't descend into them, so e.g. 8 sushi order receipts attached to one note were never read.
+    Returns [(inner_message, header_text + body_text)] in order, including emails nested deeper."""
+    out = []
+    for part in msg.walk():
+        if part.get_content_type() != "message/rfc822":
+            continue
+        payload = part.get_payload()
+        inner = payload[0] if isinstance(payload, list) and payload else payload
+        if inner is None or not hasattr(inner, "get_body"):
+            continue
+        try:
+            bp = inner.get_body(preferencelist=("plain", "html"))
+            body = bp.get_content() if bp is not None else ""
+            if bp is not None and bp.get_content_type() == "text/html":
+                body = _strip_html(body)
+        except Exception:
+            body = ""
+        hdrs = "\n".join(f"{h}: {inner.get(h)}" for h in ("From", "To", "Subject", "Date") if inner.get(h))
+        out.append((inner, f"{hdrs}\n\n{body}".strip()))
+    return out
 
 
 def _read_eml(path):
@@ -1899,6 +2050,11 @@ def _read_eml(path):
         f"{h}: {msg.get(h)}" for h in ("From", "To", "Cc", "Subject", "Date") if msg.get(h)
     )
     text = f"{headers}\n\n{body}".strip()
+    inner_emails = _attached_emails(msg)
+    for i, (_inner, inner_text) in enumerate(inner_emails, 1):
+        # Each attached email is part of THIS email's content -- read it like the body (2026-10-19).
+        text += (f"\n\n===== ATTACHED EMAIL {i} of {len(inner_emails)} (sent as an attachment of the email above; "
+                 f"treat it as one of this email's documents) =====\n{inner_text}")
 
     # Raw (unstripped) HTML body for high-fidelity fallback rendering — kept
     # separate from `text` (which stays plaintext for classification). None
@@ -1907,7 +2063,11 @@ def _read_eml(path):
     html_body = html_part.get_content() if html_part is not None else None
 
     attachments = []
-    for part in _iter_leaf_attachments(msg):
+    leaf_parts = list(_iter_leaf_attachments(msg))
+    for _inner, _t in inner_emails:          # files carried INSIDE attached emails count too
+        if _inner.is_multipart():
+            leaf_parts.extend(_iter_leaf_attachments(_inner))
+    for part in leaf_parts:
         filename = part.get_filename() or "attachment"
         mimetype = part.get_content_type()
         # Guard each attachment so one unreadable part can't fail the whole email (and
@@ -2994,30 +3154,143 @@ def _create_message(client, *, model, max_tokens, system, messages, timeout):
     WHY NOT client.messages.create: on this machine the anthropic SDK (0.116.0 + httpx 0.28.1)
     HANGS INDEFINITELY on every request, ignoring its own timeout, while a direct httpx POST with
     the SAME key + CA bundle returns normally in ~2s (verified with test_api.py vs test_api_raw.py).
-    This routes around the SDK hang. The request/response schema is identical, so the rest of the
-    pipeline is unchanged. The CA bundle (corporate-proxy TLS) is still honored via verify=."""
+    This routes around the SDK hang. The CA bundle (corporate-proxy TLS) is still honored via verify=.
+
+    STREAMED since 2026-10-23: a non-streamed call had to finish inside `timeout` (120s), so a long
+    answer (a dense 6-page scan) was cut off every time -- and still billed -- and the email was retried
+    every run (345 timed-out calls 10/13-10/23, two 3M scans 44 times each). Streamed, `timeout` is
+    the longest allowed SILENCE between chunks; the answer itself may take as long as it needs, up to
+    STREAM_MAX_SECONDS overall."""
     from types import SimpleNamespace
     key = getattr(client, "api_key", None) or (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
     verify = str(CA_BUNDLE) if CA_BUNDLE.exists() else True
-    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json"}
-    body = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages}
-    resp = httpx.post("https://api.anthropic.com/v1/messages", headers=headers, json=body,
-                      timeout=httpx.Timeout(timeout, connect=15.0), verify=verify)
-    if resp.status_code != 200:
-        # Mirror the SDK's error wording so _is_auth_error / _is_invalid_request_error classify it
-        # (they match "authentication_error"/"invalid_request_error" or "error code: 401"/"400").
-        raise RuntimeError(f"API error code: {resp.status_code} - {resp.text[:500]}")
-    data = resp.json()
-    content = [SimpleNamespace(type=b.get("type"), text=b.get("text", ""))
-               for b in (data.get("content") or [])]
-    u = data.get("usage") or {}
+    headers = {"x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json",
+               "accept": "text/event-stream"}
+    body = {"model": model, "max_tokens": max_tokens, "system": system, "messages": messages, "stream": True}
+    body.update(API_EXTRA)            # e.g. thinking / effort settings (see API_EXTRA)
+    texts, u, stop_reason = [], {}, None
+    deadline = time.monotonic() + STREAM_MAX_SECONDS
+    with httpx.stream("POST", "https://api.anthropic.com/v1/messages", headers=headers, json=body,
+                      timeout=httpx.Timeout(timeout, connect=15.0), verify=verify) as resp:
+        if resp.status_code != 200:
+            resp.read()
+            # Mirror the SDK's error wording so _is_auth_error / _is_invalid_request_error classify it
+            # (they match "authentication_error"/"invalid_request_error" or "error code: 401"/"400").
+            raise RuntimeError(f"API error code: {resp.status_code} - {resp.text[:500]}")
+        for line in resp.iter_lines():
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"API call failed: answer still streaming after {STREAM_MAX_SECONDS}s -- gave up")
+            if not line.startswith("data:"):
+                continue
+            try:
+                ev = json.loads(line[5:].strip())
+            except json.JSONDecodeError:
+                continue
+            t = ev.get("type")
+            if t == "message_start":
+                u.update((ev.get("message") or {}).get("usage") or {})
+            elif t == "content_block_delta":
+                d = ev.get("delta") or {}
+                if d.get("type") == "text_delta":
+                    texts.append(d.get("text", ""))
+            elif t == "message_delta":
+                stop_reason = (ev.get("delta") or {}).get("stop_reason") or stop_reason
+                u.update({k: v for k, v in (ev.get("usage") or {}).items() if v is not None})
+            elif t == "error":
+                err = ev.get("error") or {}
+                raise RuntimeError(f"API error code: stream - {err.get('type')}: {str(err.get('message'))[:300]}")
+    content = [SimpleNamespace(type="text", text="".join(texts))]
     usage = SimpleNamespace(
         cache_creation_input_tokens=u.get("cache_creation_input_tokens", 0) or 0,
         cache_read_input_tokens=u.get("cache_read_input_tokens", 0) or 0,
         input_tokens=u.get("input_tokens", 0) or 0,
         output_tokens=u.get("output_tokens", 0) or 0,
+        # Of the output tokens, how many were the model's internal reasoning (billed, never shown).
+        thinking_tokens=((u.get("output_tokens_details") or {}).get("thinking_tokens") or 0),
     )
-    return SimpleNamespace(content=content, usage=usage, stop_reason=data.get("stop_reason"))
+    return SimpleNamespace(content=content, usage=usage, stop_reason=stop_reason)
+
+
+def _pick_recheck(candidates, learnings_text, hash_now, prev_hash):
+    """(items to re-check now, why) for the learnings re-check (2026-10-23).
+      * evening: the first run from RECHECK_FULL_HOUR on, once a day, when the learnings changed since the
+        last full re-check -> the whole queue;
+      * otherwise, when the learnings changed since the last run -> only the items whose vendor a NEW or
+        edited learning line mentions (by a distinctive word of the vendor's name).
+    Keeps logs/learnings_snapshot.txt (the learnings as of the last check) to tell which lines are new."""
+    now = datetime.now()
+    try:
+        snapshot = _LEARNINGS_SNAPSHOT.read_text(encoding="utf-8")
+    except Exception:
+        snapshot = None
+    try:
+        state = json.loads(_FULL_RECHECK_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        state = {}
+    changed = bool(prev_hash) and prev_hash != hash_now
+
+    def _save_snapshot():
+        try:
+            _LEARNINGS_SNAPSHOT.parent.mkdir(exist_ok=True)
+            _LEARNINGS_SNAPSHOT.write_text(learnings_text or "", encoding="utf-8")
+        except Exception:
+            pass
+
+    if (candidates and now.hour >= RECHECK_FULL_HOUR and state.get("date") != now.date().isoformat()
+            and state.get("hash") != hash_now):
+        try:
+            _FULL_RECHECK_STATE.parent.mkdir(exist_ok=True)
+            _FULL_RECHECK_STATE.write_text(json.dumps({"date": now.date().isoformat(), "hash": hash_now}),
+                                           encoding="utf-8")
+        except Exception:
+            pass
+        _save_snapshot()
+        return list(candidates), f"evening full re-check of all {len(candidates)} queued item(s)"
+    if not changed and snapshot is not None:
+        return [], ""
+    if snapshot is None:                       # first run with this feature: just take the baseline
+        _save_snapshot()
+        return [], ""
+    old = {l.strip() for l in snapshot.splitlines() if l.strip()}
+    new_lines = [l for l in (learnings_text or "").splitlines() if l.strip() and l.strip() not in old]
+    _save_snapshot()
+    if not new_lines or not candidates:
+        return [], ""
+    words = set(re.findall(r"[a-z0-9]+", " ".join(new_lines).lower().replace("&", " and ")))
+    picked = []
+    for r in candidates:
+        vname = (r.get("Vendor Matched") or "").lower().replace("&", " and ")
+        toks = [t for t in re.findall(r"[a-z0-9]+", vname) if len(t) >= 4 and t not in _VENDOR_STOPWORDS]
+        if toks and any(t in words for t in toks):
+            picked.append(r)
+    if not picked:
+        return [], ""
+    return picked, (f"{len(picked)} queued item(s) whose vendor a new learning mentions "
+                    f"(the whole queue is re-checked in the evening)")
+
+
+_API_FAILS_PATH = Path(__file__).parent / "logs" / "api_failures.json"
+
+
+def _api_fail_count(filename, bump=False):
+    """How many separate runs an email's API call has failed in (logs/api_failures.json). bump=True adds
+    this run (once per run per email). Best effort: any file problem -> treated as 0 failures."""
+    try:
+        data = json.loads(_API_FAILS_PATH.read_text(encoding="utf-8")) if _API_FAILS_PATH.exists() else {}
+    except Exception:
+        data = {}
+    rec = data.get(filename) or {"runs": []}
+    if bump:
+        run = os.environ.get("CLASSIFY_RUN_ID") or datetime.now().strftime("%Y%m%d%H")
+        if run not in rec["runs"]:
+            rec["runs"].append(run)
+        data[filename] = rec
+        try:
+            _API_FAILS_PATH.parent.mkdir(exist_ok=True)
+            _API_FAILS_PATH.write_text(json.dumps(data, indent=1), encoding="utf-8")
+        except Exception:
+            pass
+    return len(rec["runs"])
 
 
 def classify_email(client, filename, text, attachments, learnings_text="", reviewer_answer=""):
@@ -3076,7 +3349,9 @@ def classify_email(client, filename, text, attachments, learnings_text="", revie
         client,
         model=MODEL,
         max_tokens=MAX_TOKENS,
-        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
+        # 1-hour cache (2026-10-23): runs are 30 minutes apart, so the default 5-minute cache expired
+        # between every run and each run paid to write the ~15k-token instructions again.
+        system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral", "ttl": "1h"}}],
         messages=[{"role": "user", "content": content}],
         timeout=120.0,
     )
@@ -3089,7 +3364,8 @@ def classify_email(client, filename, text, attachments, learnings_text="", revie
         _cc = getattr(_u, "cache_creation_input_tokens", 0) or 0
         _cr = getattr(_u, "cache_read_input_tokens", 0) or 0
         print(f"  cache: {_cc} written, {_cr} read "
-              f"(input={getattr(_u, 'input_tokens', 0)}, output={getattr(_u, 'output_tokens', 0)})")
+              f"(input={getattr(_u, 'input_tokens', 0)}, output={getattr(_u, 'output_tokens', 0)}, "
+              f"thinking={getattr(_u, 'thinking_tokens', 0)})")
     stop_reason = getattr(response, "stop_reason", None)
     raw_text = "".join(
         block.text for block in response.content if block.type == "text"
@@ -3166,6 +3442,11 @@ def classify_with_retry(client, filename, text, attachments, learnings_text="", 
                 "filename": filename, "classification": None, "raw_response": None,
                 "skipped_attachments": [], "error": f"API call failed: {e}", "infra_error": True,
             }
+            if "timed out" in str(e).lower() or "gave up" in str(e).lower():
+                # A slow answer won't be faster a minute later, and each attempt is billed: don't
+                # repeat it in this run (the email is retried next run, then sent to review).
+                print(f"  API call timed out ({str(e)[:120]}) -- not retrying in this run")
+                break
             # Make a network/timeout stall VISIBLE (this exception path used to retry silently,
             # so a stalled request looked like a total freeze with no output).
             if i + 1 < attempts:
@@ -3174,6 +3455,11 @@ def classify_with_retry(client, filename, text, attachments, learnings_text="", 
         if not result.get("error"):
             return result
         last = result
+        if "max_tokens" in (result.get("error") or "") and i >= 1:
+            # Used the whole 21,000-token output budget twice: a third try rarely differs and each costs
+            # ~$0.30 (2026-10-23: two 3M scans did it 3 times a run). One retry only.
+            print(f"  ran out of output budget again ({result.get('error')}) -- not retrying further")
+            break
         if i + 1 < attempts:
             print(f"  attempt {i + 1} failed ({result.get('error')}); retrying...")
     return last
@@ -3317,6 +3603,9 @@ def _classify_oversized_scan(client, filename, text, pdf_att, learnings_text="",
                 rec["page_order"] = _offset_page_list(rec.get("page_order"), offset)
         if merged is None:
             merged = c                         # base: keep the first chunk's top-level fields
+        elif ((c.get("communication") or {}).get("needs_response")
+              and not (merged.get("communication") or {}).get("needs_response")):
+            merged["communication"] = c["communication"]
         else:
             for key in ("invoices", "credit_memos", "payments", "statement_invoices"):
                 if c.get(key):
@@ -3622,6 +3911,111 @@ def _earlier_store_copy(invoice, history, vendor_prior, source_id):
     return None
 
 
+def _num_key(value):
+    """Invoice number reduced to lowercase letters+digits ('INV/2026/51123' -> 'inv202651123')."""
+    return re.sub(r"[^0-9a-z]", "", _norm(value))
+
+
+def _num_core(value):
+    """_num_key without a short all-letter tag at the end or an INV/IN prefix: 'R205029-IN' and
+    'R205029' -> 'r205029', 'INV1234' -> '1234' (2026-10-20: Reisman's #R205029 from the store scan and
+    #R205029-IN from the vendor email, same $56.70 / date / store, sat as a possible duplicate).
+    The core keeps 4+ characters, so short numbers never collapse."""
+    k = _num_key(value)
+    m = re.match(r"^(.*\d)([a-z]{1,3})$", k)
+    if m and len(m.group(1)) >= 4:
+        k = m.group(1)
+    m = re.match(r"^(?:inv|in)(\d.*)$", k)
+    if m and len(m.group(1)) >= 4:
+        k = m.group(1)
+    return k
+
+
+# Characters a scan / AI read confuses with each other. A one-character CHANGE only counts as a
+# misread when it's one of these pairs: 1509881 vs 1509882 (The Monsey View) are two real consecutive
+# invoices, but 86I0704 vs 8610704 or 93G4241 vs 9304241 (Lantev) are the same bill read twice.
+_CONFUSABLE = {frozenset(p) for p in ("1i", "1l", "il", "17", "0o", "0d", "0q", "0g", "6g", "9g", "9q",
+                                      "5s", "2z", "8b", "38", "68", "69", "4a")}
+
+
+def _one_edit_apart(a, b):
+    """True when a and b look like the same number read slightly wrong: one character added or
+    dropped, or one character swapped for a look-alike (_CONFUSABLE)."""
+    if a == b or abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) > len(b):
+        a, b = b, a
+    i = 0
+    while i < len(a) and a[i] == b[i]:
+        i += 1
+    if len(a) == len(b):
+        return a[i + 1:] == b[i + 1:] and frozenset((a[i], b[i])) in _CONFUSABLE
+    return a[i:] == b[i + 1:]
+
+
+def _vendors_related(a, b):
+    """Same vendor for the near-number check: same duplicate key, or one name contained in the other
+    ('Zahler' / 'Advanced Nutrition by Zahler'), or a high fuzzy score."""
+    ka, kb = _dedupe_vendor_key(a), _dedupe_vendor_key(b)
+    if not ka or not kb:
+        return False
+    if ka == kb:
+        return True
+    na, nb = _norm_vendor_dedupe(a), _norm_vendor_dedupe(b)
+    if na and nb and len(min(na, nb, key=len)) >= 4 and (na in nb or nb in na):
+        return True
+    if _rapidfuzz:
+        return _rapidfuzz.token_set_ratio(na, nb) >= 90
+    return False
+
+
+def _loose_date(value):
+    """date from '2026-09-01', '9/1/26', '09/01/2026' ...; None if it can't be read."""
+    from datetime import datetime as _dt
+    v = str(value or "").strip()[:10]
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y"):
+        try:
+            return _dt.strptime(v, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _near_number_duplicate(invoice, history, source_id=None):
+    """A prior that is almost certainly the same bill but whose invoice # was read one character
+    differently (Zahler INV/2026/511123 vs Advanced Nutrition by Zahler INV/2026/51123, both $1,549.83,
+    Maple, 9/1/26 -- both entered in QB, reported by Yishai 2026-10-19). Requires ALL of: same store,
+    same amount (non-zero), related vendor, invoice #s one character apart (6+ characters), and invoice
+    dates within 7 days when both are known. Only ever FLAGS (possible duplicate for a person) --
+    never auto-ignores. Returns the prior or None."""
+    if invoice.get("skip_qb_import"):
+        return None          # do-not-enter vendor (McKesson etc.): never goes to QB, nothing to flag
+    num = _num_key(invoice.get("invoice_number"))
+    store = _norm(invoice.get("store_matched"))
+    amt = invoice.get("invoice_amount")
+    try:
+        if amt is None or abs(float(amt)) < 0.005:
+            return None
+    except (TypeError, ValueError):
+        return None
+    if len(num) < 6 or not store:
+        return None
+    d = _loose_date(invoice.get("invoice_date"))
+    for prior in history:
+        if _norm(prior.get("store_matched")) != store or not _amounts_equal(prior.get("invoice_amount"), amt):
+            continue
+        pnum = _num_key(prior.get("invoice_number"))
+        if len(pnum) < 6 or not _one_edit_apart(num, pnum):
+            continue
+        pd = _loose_date(prior.get("invoice_date"))
+        if d and pd and abs((d - pd).days) > 7:
+            continue
+        if not _vendors_related(invoice.get("vendor_matched"), prior.get("vendor_matched")):
+            continue
+        return prior
+    return None
+
+
 def check_duplicate(invoice, history, source_id=None, source_file=None):
     """Compare against previously recorded invoices (vendor + invoice number).
     The self-match gate is AMOUNT-based, not filename-based: a prior from the SAME
@@ -3776,6 +4170,14 @@ def check_duplicate(invoice, history, source_id=None, source_file=None):
             f"auto-ignored."), redundant_of, redundant_prior
     if self_match:
         return "self", None, None, None
+    near = _near_number_duplicate(invoice, history, source_id)
+    if near is not None:
+        return "near_possible", (
+            f"Possible duplicate: invoice #{invoice.get('invoice_number')} from {invoice.get('vendor_matched')} "
+            f"looks like #{near.get('invoice_number')} from {near.get('vendor_matched')}, already recorded from "
+            f"{near.get('source_file')} -- same store, same amount (${near.get('invoice_amount')}), and the "
+            f"invoice numbers differ by one character (likely a misread). Check both before entering; keep one."
+        ), near.get("source_file") or near.get("source_email_id"), near
     return "none", None, None, None
 
 
@@ -4539,7 +4941,7 @@ def apply_duplicate_checks(results, history, payment_history=None):
                 #     ignored as a reminder, no review, and don't add it to history as a new bill.
                 #   - NO matching invoice on file (status 'none') -> do NOT auto-resolve; leave it
                 #     as a live record with a clear note so a human sees it (possible missed invoice).
-                if status != "none":
+                if status not in ("none", "near_possible"):
                     inv["is_duplicate_suspect"] = False
                     inv["duplicate_ignored"] = True
                     inv["duplicate_of"] = dup_of
@@ -4672,11 +5074,25 @@ def apply_duplicate_checks(results, history, payment_history=None):
                     inv["duplicate_of"] = None
                     inv["duplicate_group_id"] = gid
                     append_to_history = True
+                elif prior_live and prior_live.get("entered_in_qb"):
+                    # 2026-10-20 (Joel): same vendor, number, amount and store, and the earlier copy is the
+                    # one already entered in QuickBooks -> nothing can go wrong, keep the entered one and
+                    # set this copy aside (resolved, no review). Was: flagged "verify manually".
+                    inv["is_duplicate_suspect"] = True
+                    inv["duplicate_ignored"] = True
+                    inv["duplicate_of"] = dup_of
+                    inv["duplicate_group_id"] = gid
+                    inv["duplicate_reason"] = (
+                        f"Invoice #{inv.get('invoice_number')} from {inv.get('vendor_matched')} for "
+                        f"${inv.get('invoice_amount')} is already entered in QuickBooks from "
+                        f"{dup_of} (same vendor, number, amount and store) — this copy is auto-ignored "
+                        f"[entered-preferred].")
+                    append_to_history = False
+                    print(f"  {inv.get('vendor_matched')} #{inv.get('invoice_number')}: identical copy already "
+                          f"entered in QuickBooks -> this one auto-ignored.")
                 else:
                     inv["is_duplicate_suspect"] = True
-                    inv["duplicate_reason"] = (
-                        reason + " The earlier copy is already entered in QuickBooks — verify "
-                        "manually before entering this one." if prior_live else reason)
+                    inv["duplicate_reason"] = reason
                     inv["duplicate_ignored"] = False
                     inv["duplicate_of"] = dup_of
                     inv["duplicate_group_id"] = gid
@@ -4728,16 +5144,18 @@ def apply_duplicate_checks(results, history, payment_history=None):
                     inv["duplicate_of"] = None
                     append_to_history = True   # so a later copy dedupes against this one
             else:
-                inv["is_duplicate_suspect"] = status in ("duplicate", "possible")
+                # near_possible = invoice # one character off (_near_number_duplicate): flagged like a
+                # possible duplicate, never auto-ignored.
+                inv["is_duplicate_suspect"] = status in ("duplicate", "possible", "near_possible")
                 inv["duplicate_reason"] = reason
                 inv["duplicate_ignored"] = (status == "duplicate")
                 inv["duplicate_of"] = dup_of if status == "duplicate" else None
                 # A matched cluster (real dup or possible) shares a group id, stamped on the
                 # original too — independent of the suspect/ignored flags. None otherwise.
                 inv["duplicate_group_id"] = (_group_id_for(prior, "invoice")
-                                             if status in ("duplicate", "possible") else None)
+                                             if status in ("duplicate", "possible", "near_possible") else None)
                 # Don't add a real duplicate (or a redundant self-match) to history.
-                append_to_history = status in ("none", "possible")
+                append_to_history = status in ("none", "possible", "near_possible")
                 if status == "none":
                     _resolve_waiting_reminders(inv, r["filename"], waiting_reminders)
             if append_to_history:
@@ -4813,7 +5231,7 @@ def resolve_store_preferred_duplicates(actor, dry_run=False):
     try:
         with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
             cur.execute(
-                "SELECT i.id, i.vendor_matched, i.store_matched, i.invoice_number, i.amount, "
+                "SELECT i.id, i.vendor_matched, i.store_matched, i.invoice_number, i.amount, i.invoice_date, "
                 "       i.email_filename, i.duplicate_suspect, i.duplicate_group_id, e.from_address "
                 "  FROM invoices i LEFT JOIN emails e ON e.filename = i.email_filename "
                 " WHERE i.duplicate_ignored IS NOT TRUE AND i.entered_in_qb IS NOT TRUE "
@@ -4824,14 +5242,20 @@ def resolve_store_preferred_duplicates(actor, dry_run=False):
             for r in cur.fetchall():
                 # Standard-name vendor key, the same one check_duplicate matches on (2026-10-12; the
                 # printed spelling split 'MaxiHealth' / 'Maxi Health' copies into separate clusters).
+                # Number matched on its core (2026-10-20): R205029 and R205029-IN are one bill.
                 key = (_dedupe_vendor_key(r["vendor_matched"] or ""),
-                       (r["invoice_number"] or "").strip().lower(),
+                       _num_core(r["invoice_number"]),
                        round(float(r["amount"]), 2),
                        _norm(r["store_matched"]))
                 clusters.setdefault(key, []).append(r)
 
             for key, members in clusters.items():
                 if len(members) < 2 or not any(m["duplicate_suspect"] for m in members):
+                    continue
+                # Copies whose printed numbers differ (only by a tag like -IN) must also share the date.
+                if (len({_num_key(m["invoice_number"]) for m in members}) > 1
+                        and len({str(m.get("invoice_date") or "").strip()[:10] for m in members}) > 1):
+                    skipped.append({"key": key, "reason": "numbers differ by a tag and dates differ"})
                     continue
                 scans = [m for m in members if _norm(m.get("from_address")) in smap]
                 others = [m for m in members if _norm(m.get("from_address")) not in smap]
@@ -4866,6 +5290,69 @@ def resolve_store_preferred_duplicates(actor, dry_run=False):
     finally:
         conn.close()
     return {"resolved": resolved, "skipped": skipped}
+
+
+def resolve_entered_twin_duplicates(actor, dry_run=False):
+    """2026-10-20 (Joel): a waiting copy of a bill that's ALREADY ENTERED in QuickBooks, where the only
+    difference is a tag on the invoice # (Reisman's R204977 entered from the Madison scan; the vendor's
+    email copy R204977-IN, same $226.80 / 9/29/26 / Madison, sat as a possible duplicate). Sets the
+    waiting copy aside (duplicate_ignored, restorable) when ALL hold: same standard vendor, same store,
+    same amount, same invoice date, same number core (_num_core), the twin is entered in QB, the copy is
+    not. Exact same-number copies are the record-time dedup's job; this catches the tag variants.
+    Returns {"resolved": [...]}."""
+    if not USE_DB:
+        return {"resolved": []}
+    import secrets as _secrets
+    import psycopg2.extras as _extras
+    conn = _database().connect()
+    conn.autocommit = False
+    resolved = []
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, vendor_matched, store_matched, invoice_number, amount, invoice_date, entered_in_qb, "
+                "       email_filename, duplicate_group_id, duplicate_ignored "
+                "  FROM invoices "
+                " WHERE duplicate_ignored IS NOT TRUE AND skip_qb_import IS NOT TRUE "
+                "   AND invoice_number IS NOT NULL AND invoice_number <> '' "
+                "   AND amount IS NOT NULL AND coalesce(invoice_date, '') <> ''")
+            groups = {}
+            for r in cur.fetchall():
+                core = _num_core(r["invoice_number"])
+                if len(core) < 4:
+                    continue
+                key = (_dedupe_vendor_key(r["vendor_matched"] or ""), core, round(float(r["amount"]), 2),
+                       _norm(r["store_matched"]), str(r["invoice_date"]).strip()[:10])
+                groups.setdefault(key, []).append(r)
+            for key, members in groups.items():
+                entered = [m for m in members if m["entered_in_qb"] is True]
+                waiting = [m for m in members if m["entered_in_qb"] is not True]
+                if not entered or not waiting:
+                    continue
+                keep = entered[0]
+                gid = (keep.get("duplicate_group_id")
+                       or next((m["duplicate_group_id"] for m in members if m.get("duplicate_group_id")), None)
+                       or _secrets.token_hex(4).upper())
+                reason = (f"Same bill as #{keep['invoice_number']} (record {keep['id']}), already entered in "
+                          f"QuickBooks: same vendor, store, amount (${key[2]:.2f}) and date; the invoice # differs "
+                          f"only by a tag. Set aside automatically -- restore it if it's a separate bill.")
+                resolved.append({"keep_id": keep["id"], "ignored_ids": [w["id"] for w in waiting],
+                                 "vendor": keep.get("vendor_matched"), "number": keep.get("invoice_number"),
+                                 "store": keep.get("store_matched")})
+                if dry_run:
+                    continue
+                if (keep.get("duplicate_group_id") or "") != gid:
+                    cur.execute("UPDATE invoices SET duplicate_group_id=%s WHERE id=%s", (gid, keep["id"]))
+                for w in waiting:
+                    cur.execute("UPDATE invoices SET duplicate_suspect=TRUE, duplicate_ignored=TRUE, duplicate_reason=%s, "
+                                "duplicate_of=%s, duplicate_group_id=%s, edited_at=now() WHERE id=%s",
+                                (reason, keep["email_filename"], gid, w["id"]))
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES ('invoices',%s,'duplicate_ignored','false','true',%s)", (w["id"], actor))
+        conn.commit() if not dry_run else conn.rollback()
+    finally:
+        conn.close()
+    return {"resolved": resolved}
 
 
 def resolve_payment_duplicates(actor, dry_run=False):
@@ -5045,6 +5532,76 @@ def resolve_split_payments(actor, dry_run=False):
     return {"resolved": resolved}
 
 
+# Copies whose numbers are one character apart still count as one bill when their dates are up to this many
+# days apart: the date was misread too (Masterko #3730 dated 8/12 vs #33730 dated 8/13, 2026-10-15).
+MISREAD_NUMBER_DAYS = 3
+
+
+def _misread_day(value):
+    """An invoice_date (YYYY-MM-DD…) as a date, or None."""
+    try:
+        return datetime.strptime(str(value or "").strip()[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _numbers_one_apart(a, b):
+    """True when two invoice numbers (letters and digits only) differ by ONE character, changed, missing
+    or extra (797203/797208, 3551/35551, 9304241/93G4241), or one is the other with up to 3 extra
+    characters that include a letter, at the start or the end (R204977-IN/R204977, INV1234/1234). The
+    shorter one needs 4+ characters, so short numbers like 12 and 13 never match."""
+    a = re.sub(r"[^a-z0-9]", "", (a or "").lower())
+    b = re.sub(r"[^a-z0-9]", "", (b or "").lower())
+    short, long_ = sorted((a, b), key=len)
+    if a == b or len(short) < 4:
+        return False
+    extra = len(long_) - len(short)
+    if 0 < extra <= 3:
+        for part in ((long_[len(short):] if long_.startswith(short) else ""),
+                     (long_[:extra] if long_.endswith(short) else "")):
+            if any(ch.isalpha() for ch in part):
+                return True
+    if extra == 0:
+        return sum(x != y for x, y in zip(a, b)) == 1
+    return extra == 1 and any(long_[:k] + long_[k + 1:] == short for k in range(len(long_)))
+
+
+def _misread_sets(pool):
+    """The copies in `pool` (one vendor, amount and store) that look like one bill, as sets of 2+ holding at
+    least one copy not yet entered in QB. Two copies link when they have the same date (any numbers), or
+    numbers one character apart and dates up to MISREAD_NUMBER_DAYS apart. Two ENTERED copies never link
+    to each other (they're both in QuickBooks already: nothing for this check to stop), but each can link
+    to a waiting copy."""
+    parent = list(range(len(pool)))
+
+    def root(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    for i in range(len(pool)):
+        for j in range(i + 1, len(pool)):
+            a, b = pool[i], pool[j]
+            if a["entered_in_qb"] and b["entered_in_qb"]:
+                continue
+            # (2026-10-19 a same-email exception skipped copies from ONE email with different numbers -- the 8
+            # sushi receipts. Removed 2026-10-21: one email can hold the SAME bill scanned twice and read under
+            # two numbers (UNFI Maple $206.45, INV 93055097 vs coversheet 33625479, both entered in QB). Real
+            # separate same-amount bills in one email are cleared once with "Not dup", which sticks.)
+            same_day = (str(a["invoice_date"]).strip() == str(b["invoice_date"]).strip()
+                        or (a["_day"] is not None and a["_day"] == b["_day"]))
+            near = (a["_day"] is not None and b["_day"] is not None
+                    and abs((a["_day"] - b["_day"]).days) <= MISREAD_NUMBER_DAYS
+                    and _numbers_one_apart(a["invoice_number"], b["invoice_number"]))
+            if same_day or near:
+                parent[root(i)] = root(j)
+    sets = {}
+    for i, m in enumerate(pool):
+        sets.setdefault(root(i), []).append(m)
+    return [s for s in sets.values() if len(s) >= 2 and any(not m["entered_in_qb"] for m in s)]
+
+
 def flag_number_misread_duplicates(actor, dry_run=False):
     """Catch duplicates the number-based dedup MISSES: same normalized vendor + amount + invoice_date
     + store but DIFFERENT invoice numbers (a misread digit — e.g. Emerson E29402997 vs E29402597 for
@@ -5053,10 +5610,18 @@ def flag_number_misread_duplicates(actor, dry_run=False):
     surface on /duplicates for a human to resolve — it never auto-ignores, because two genuinely
     different invoices could rarely share vendor+amount+date+store, and a person should decide.
     Conservative + idempotent:
-      - all members LIVE (not duplicate_ignored, not entered_in_qb, not skip_qb_import) with a date;
+      - members LIVE (not duplicate_ignored, not skip_qb_import) with a date;
       - >=2 members and >=2 DISTINCT invoice numbers (same number is the normal dedup's job);
       - SKIP a cluster whose members already all share ONE common group id — so a human's 'not a
         duplicate' decision is never re-flagged, and re-runs are no-ops.
+
+    2026-10-15 (Joel: yes): copies already ENTERED in QB are compared too. Only unentered copies were, so
+    a waiting copy whose misread twin was already entered sat on /qb unflagged: 11 waiting bills had one
+    (Maxi Health $5,230.84 #797203 vs entered #797208; Masterko $1,459.40 #3551 vs #35551). Only waiting
+    copies are flagged; an entered copy just gets the set's group id, so Possible duplicates shows it
+    beside them. Copies also link when their numbers are one character apart (or one adds a lettered
+    suffix, R204977-IN) and their dates are up to MISREAD_NUMBER_DAYS apart (_misread_sets). A blank
+    group id ('') counts as none: copies whose ids were all '' used to look already reviewed.
     Returns {"flagged": [...]}. dry_run reports without writing."""
     if not USE_DB:
         return {"flagged": []}
@@ -5070,53 +5635,165 @@ def flag_number_misread_duplicates(actor, dry_run=False):
         with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
             cur.execute(
                 "SELECT id, vendor_matched, store_matched, invoice_number, amount, invoice_date, "
-                "       duplicate_suspect, duplicate_reason, duplicate_group_id "
+                "       duplicate_suspect, duplicate_reason, duplicate_group_id, entered_in_qb, email_filename "
                 "  FROM invoices "
-                " WHERE duplicate_ignored IS NOT TRUE AND entered_in_qb IS NOT TRUE "
+                " WHERE duplicate_ignored IS NOT TRUE "
                 "   AND skip_qb_import IS NOT TRUE "
                 "   AND invoice_number IS NOT NULL AND invoice_number <> '' "
                 "   AND amount IS NOT NULL AND invoice_date IS NOT NULL AND invoice_date <> ''")
-            clusters = {}
+            pools = {}
             for r in cur.fetchall():
+                r["entered_in_qb"] = r["entered_in_qb"] is True
+                r["_day"] = _misread_day(r["invoice_date"])
                 # Standard-name vendor key, like every other duplicate check (DU-01; switched 2026-10-13 --
                 # the printed spelling kept 'Maxi Health' / 'MaxiHealth' copies apart).
                 key = (_dedupe_vendor_key(r["vendor_matched"] or ""),
                        round(float(r["amount"]), 2),
-                       str(r["invoice_date"]).strip(),
                        _norm(r["store_matched"]))
-                clusters.setdefault(key, []).append(r)
+                pools.setdefault(key, []).append(r)
 
-            for key, members in clusters.items():
-                if len(members) < 2:
+            for key, pool in pools.items():
+                if len(pool) < 2 or all(m["entered_in_qb"] for m in pool):
                     continue
-                numbers = {(m["invoice_number"] or "").strip().lower() for m in members}
-                if len(numbers) < 2:
-                    continue   # same number -> the normal vendor+number dedup already handles it
-                gids = {m["duplicate_group_id"] for m in members}
-                if len(gids) == 1 and None not in gids:
-                    continue   # already one shared group -> reviewed/flagged; leave it alone
-                gid = next((g for g in gids if g), None) or _secrets.token_hex(4).upper()
-                reason = (f"Same vendor, amount (${key[1]:.2f}), date, and store as "
-                          f"{len(members)} other copy(ies) but a DIFFERENT invoice number "
-                          f"({', '.join(sorted(m['invoice_number'] for m in members))}) — likely the "
-                          f"same invoice with a misread number. Verify and keep one before entering QB.")
-                flagged.append({"group": gid, "ids": [m["id"] for m in members],
-                                "vendor": members[0].get("vendor_matched"),
-                                "amount": key[1], "store": members[0].get("store_matched"),
-                                "numbers": sorted(m["invoice_number"] for m in members)})
-                if dry_run:
-                    continue
-                for m in members:
-                    newly = not m["duplicate_suspect"]
-                    cur.execute(
-                        "UPDATE invoices SET duplicate_suspect = TRUE, duplicate_group_id = %s, "
-                        "duplicate_reason = COALESCE(NULLIF(duplicate_reason, ''), %s), edited_at = now() "
-                        "WHERE id = %s", (gid, reason, m["id"]))
-                    if newly:
+                for members in _misread_sets(pool):
+                    numbers = {(m["invoice_number"] or "").strip().lower() for m in members}
+                    if len(numbers) < 2:
+                        continue   # same number -> the normal vendor+number dedup already handles it
+                    gids = {(m["duplicate_group_id"] or "").strip() or None for m in members}
+                    if len(gids) == 1 and None not in gids:
+                        continue   # already one shared group -> reviewed/flagged; leave it alone
+                    gid = next((g for g in gids if g), None) or _secrets.token_hex(4).upper()
+                    waiting = [m for m in members if not m["entered_in_qb"]]
+                    entered = [m for m in members if m["entered_in_qb"]]
+                    listed = ", ".join(sorted(m["invoice_number"] for m in members))
+                    if entered:
+                        twins = "; ".join(f"#{m['invoice_number']} dated {m['invoice_date']}" for m in entered)
+                        reason = (f"Same vendor, amount (${key[1]:.2f}) and store as {twins}, already entered "
+                                  f"in QuickBooks, but a different invoice number ({listed}) — likely the same "
+                                  f"bill with a misread number. Don't enter this copy unless it's a separate bill.")
+                    elif len({str(m["invoice_date"]).strip() for m in members}) == 1:
+                        reason = (f"Same vendor, amount (${key[1]:.2f}), date, and store as "
+                                  f"{len(members)} other copy(ies) but a DIFFERENT invoice number "
+                                  f"({listed}) — likely the "
+                                  f"same invoice with a misread number. Verify and keep one before entering QB.")
+                    else:
+                        reason = (f"Same vendor, amount (${key[1]:.2f}) and store as {len(members) - 1} other "
+                                  f"copy(ies), with invoice numbers one character apart ({listed}) and dates "
+                                  f"a few days apart — likely the same invoice with a misread number and date. "
+                                  f"Verify and keep one before entering QB.")
+                    flagged.append({"group": gid, "ids": [m["id"] for m in members],
+                                    "entered_ids": [m["id"] for m in entered],
+                                    "vendor": members[0].get("vendor_matched"),
+                                    "amount": key[1], "store": members[0].get("store_matched"),
+                                    "numbers": sorted(m["invoice_number"] for m in members)})
+                    if dry_run:
+                        continue
+                    for m in waiting:
+                        newly = not m["duplicate_suspect"]
+                        cur.execute(
+                            "UPDATE invoices SET duplicate_suspect = TRUE, duplicate_group_id = %s, "
+                            "duplicate_reason = COALESCE(NULLIF(duplicate_reason, ''), %s), edited_at = now() "
+                            "WHERE id = %s", (gid, reason, m["id"]))
+                        if newly:
+                            cur.execute(
+                                "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                "changed_by) VALUES ('invoices',%s,'duplicate_suspect','false','true',%s)",
+                                (m["id"], actor))
+                    # An entered copy is left as it is (not flagged, still entered); it only joins the set.
+                    for m in entered:
+                        if (m["duplicate_group_id"] or "").strip() == gid:
+                            continue
+                        cur.execute("UPDATE invoices SET duplicate_group_id = %s WHERE id = %s", (gid, m["id"]))
                         cur.execute(
                             "INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
-                            "changed_by) VALUES ('invoices',%s,'duplicate_suspect','false','true',%s)",
-                            (m["id"], actor))
+                            "changed_by) VALUES ('invoices',%s,'duplicate_group_id',%s,%s,%s)",
+                            (m["id"], m["duplicate_group_id"] or None, gid, actor))
+        conn.commit() if not dry_run else conn.rollback()
+    finally:
+        conn.close()
+    return {"flagged": flagged}
+
+
+def flag_numberless_duplicates(actor, dry_run=False, days=7):
+    """2026-10-21 (Joel): two scans of ONE handwritten Kalitzom slip ($805.00, 3M) were both recorded --
+    neither has an invoice #, so every number-based duplicate check skipped them, and one scan's date was
+    read as 9/29 instead of 9/24. Flags (never ignores) WAITING invoices with NO number that share the
+    standard vendor, store and amount with another no-number copy (waiting or entered) dated up to `days`
+    apart, from a DIFFERENT email (one email holding several no-number slips is several bills). Flagged
+    copies are hidden from QB entry and shown together on Possible duplicates. A set already sharing one
+    group id was reviewed ('not a duplicate' keeps it) and is left alone. Returns {"flagged": [...]}."""
+    if not USE_DB:
+        return {"flagged": []}
+    import secrets as _secrets
+    import psycopg2.extras as _extras
+    conn = _database().connect()
+    conn.autocommit = False
+    flagged = []
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT id, vendor_matched, store_matched, amount, invoice_date, entered_in_qb, email_filename, "
+                "       duplicate_suspect, duplicate_group_id "
+                "  FROM invoices "
+                " WHERE duplicate_ignored IS NOT TRUE AND skip_qb_import IS NOT TRUE "
+                "   AND coalesce(trim(invoice_number), '') = '' "
+                "   AND amount IS NOT NULL AND amount > 0 AND coalesce(store_matched, '') <> ''")
+            pools = {}
+            for r in cur.fetchall():
+                r["_day"] = _misread_day(r["invoice_date"])
+                key = (_dedupe_vendor_key(r["vendor_matched"] or ""), round(float(r["amount"]), 2),
+                       _norm(r["store_matched"]))
+                if key[0]:
+                    pools.setdefault(key, []).append(r)
+            for key, pool in pools.items():
+                if len(pool) < 2:
+                    continue
+                parent = list(range(len(pool)))
+
+                def root(i):
+                    while parent[i] != i:
+                        parent[i] = parent[parent[i]]
+                        i = parent[i]
+                    return i
+                for i in range(len(pool)):
+                    for j in range(i + 1, len(pool)):
+                        a, b = pool[i], pool[j]
+                        if a["entered_in_qb"] and b["entered_in_qb"]:
+                            continue
+                        if a["email_filename"] and a["email_filename"] == b["email_filename"]:
+                            continue
+                        if a["_day"] and b["_day"] and abs((a["_day"] - b["_day"]).days) <= days:
+                            parent[root(i)] = root(j)
+                sets = {}
+                for i, m in enumerate(pool):
+                    sets.setdefault(root(i), []).append(m)
+                for members in sets.values():
+                    waiting = [m for m in members if not m["entered_in_qb"]]
+                    if len(members) < 2 or not waiting:
+                        continue
+                    gids = {(m["duplicate_group_id"] or "").strip() or None for m in members}
+                    if len(gids) == 1 and None not in gids:
+                        continue           # already reviewed / flagged as one set
+                    gid = next((g for g in gids if g), None) or _secrets.token_hex(4).upper()
+                    dates = ", ".join(sorted({str(m["invoice_date"])[:10] for m in members}))
+                    reason = (f"No invoice # on these copies: same vendor, store and amount (${key[1]:.2f}), "
+                              f"dated {dates} -- likely the same bill scanned or sent twice. Keep one.")
+                    flagged.append({"group": gid, "ids": [m["id"] for m in members],
+                                    "vendor": members[0].get("vendor_matched"), "amount": key[1],
+                                    "store": members[0].get("store_matched")})
+                    if dry_run:
+                        continue
+                    for m in members:
+                        if m["entered_in_qb"]:
+                            cur.execute("UPDATE invoices SET duplicate_group_id=%s WHERE id=%s", (gid, m["id"]))
+                            continue
+                        cur.execute("UPDATE invoices SET duplicate_suspect=TRUE, duplicate_group_id=%s, "
+                                    "duplicate_reason=COALESCE(NULLIF(duplicate_reason, ''), %s), edited_at=now() "
+                                    "WHERE id=%s", (gid, reason, m["id"]))
+                        if not m["duplicate_suspect"]:
+                            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                        "changed_by) VALUES ('invoices',%s,'duplicate_suspect','false','true',%s)",
+                                        (m["id"], actor))
         conn.commit() if not dry_run else conn.rollback()
     finally:
         conn.close()
@@ -5207,6 +5884,50 @@ def dedupe_review_queue(actor, dry_run=False):
         if not dry_run:
             for m in drop:
                 web_db.ignore_review(m["id"], actor, reason)
+    return {"dismissed": dismissed}
+
+
+def dismiss_stale_reprocessed_reviews(run_id, filenames, actor, dry_run=False):
+    """2026-10-19 (Joel: yes): when a REPROCESSED email now produces real records, its older review
+    items are stale (Sushi charges kept #4001/#4017 "no receipt attached" after the fix recorded all 8
+    receipts). Dismisses (web_db.ignore_review -> ignored_reviews, restorable) an older item of an email
+    handled this run only when ALL hold:
+      - it was flagged by an earlier run (run_id differs) and is unanswered, unassigned, with no notes;
+      - the email now has at least one record (invoice, payment or credit memo);
+      - this run flagged NOTHING for that email (a fresh flag means it still needs a person).
+    Returns {"dismissed": [{"id", "source_email", "records"}]}."""
+    if not USE_DB or not filenames:
+        return {"dismissed": []}
+    import web_db
+    import psycopg2.extras as _extras
+    names = sorted({f for f in filenames if f} | {_record_source_id(f) for f in filenames if f})
+    conn = _database().connect()
+    conn.autocommit = True
+    try:
+        with conn.cursor(cursor_factory=_extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT rq.id, rq.source_email, "
+                "       (SELECT count(*) FROM invoices i WHERE i.email_filename = rq.source_email) "
+                "     + (SELECT count(*) FROM payments p WHERE p.email_filename = rq.source_email) "
+                "     + (SELECT count(*) FROM credit_memos c WHERE c.email_filename = rq.source_email) AS records "
+                "  FROM review_queue rq "
+                " WHERE rq.source_email = ANY(%s) "
+                "   AND COALESCE(rq.run_id, '') <> %s "
+                "   AND COALESCE(rq.answer, '') = '' AND COALESCE(rq.assigned_to, '') = '' "
+                "   AND NOT EXISTS (SELECT 1 FROM review_notes n "
+                "                    WHERE n.review_key IS NOT NULL AND n.review_key = rq.review_key) "
+                "   AND NOT EXISTS (SELECT 1 FROM review_queue r2 "
+                "                    WHERE r2.source_email = rq.source_email AND r2.run_id = %s) "
+                " ORDER BY rq.id", (names, run_id, run_id))
+            rows = [r for r in cur.fetchall() if r["records"]]
+    finally:
+        conn.close()
+    dismissed = []
+    for r in rows:
+        reason = (f"Stale: the email was reprocessed (run {run_id}) and now has {r['records']} record(s); "
+                  f"auto-dismissed. Restore it if it still needs attention.")
+        if dry_run or web_db.ignore_review(r["id"], actor, reason):
+            dismissed.append({"id": r["id"], "source_email": r["source_email"], "records": r["records"]})
     return {"dismissed": dismissed}
 
 
@@ -6022,6 +6743,12 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
 
     if not result.get("classification"):
         result["invoice_file_paths"] = []
+        if result.get("infra_error") and _api_fail_count(path.name, bump=True) >= API_FAIL_RUNS_LIMIT:
+            # Failed in API_FAIL_RUNS_LIMIT separate runs: stop paying for retries -- to the review queue.
+            result["infra_error"] = False
+            result["error"] = (f"The AI call failed in {API_FAIL_RUNS_LIMIT} runs in a row "
+                               f"({result.get('error')}) -- not retried automatically any more. "
+                               f"Check the document; split a very dense scan and upload the parts.")
         if result.get("infra_error"):
             # Couldn't REACH the API (connection/network) — transient. Leave the
             # email in test_emails/ (main won't move it) so a later run retries;
@@ -6037,6 +6764,9 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
         # Whether a reviewer's answer is being applied: apply_unlisted_skip_gate then trusts the
         # model's skip_qb_import (it followed the person) instead of sending the record back to review.
         c["_reviewer_answered"] = bool((reviewer_answer or "").strip())
+        # Sent from one of our own store mailboxes (Setup › Senders): apply_recordless_gate sends such a
+        # scan to review when the AI can't tell what it is, instead of dropping it as informational.
+        c["_from_store_scanner"] = bool(SENDER_STORE_MAP.get(_extract_sender(text)))
         # A reviewer's Quick fix values (store / date / amount / enter in QB) set in code, before the gates.
         apply_reviewer_fixes(c, reviewer_answer)
         # An order already released from its hold is an invoice now (don't hold it again).
@@ -6066,7 +6796,9 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
             # explicitly why nothing was produced, and shout if a record fell
             # through the routing without any explanation (the "other" bucket).
             records = _all_records(c)
-            if not records:
+            if not records and c.get("needs_human_review"):
+                print("  no invoice/credit-memo/payment records found — the whole email goes to review")
+            elif not records:
                 print("  no invoice/credit-memo/payment records found (informational/non-invoice email)")
             else:
                 def _excluded(rt, rec):
@@ -6092,7 +6824,119 @@ def process_source_email(client, path, learnings_text, reviewer_answer="", extra
                 print(f"  {len(records)} record(s) found, none needed a file/review "
                       f"({', '.join(parts)}) — recorded only")
 
+    # Communication needing a response (2026-10-16): stored on the emails row for the Correspondence
+    # page, independent of whatever records the email produced. Never affects record processing.
+    if USE_DB and isinstance(result.get("classification"), dict):
+        try:
+            comm = result["classification"].get("communication") or {}
+            if isinstance(comm, dict):
+                topic = comm.get("topic")
+                needs = bool(comm.get("needs_response"))
+                if needs and _forwarded_outside_request(text, comm):
+                    # 2026-10-20 (Joel): our own staff forwarded a vendor thread to get the documents
+                    # entered; the vendor's question is theirs to handle, not waiting on AP.
+                    print(f"  needs-response dropped: {comm.get('request')!r} is the vendor's, inside a "
+                          f"forward from our own staff.")
+                    needs = False
+                    comm = dict(comm, request=None, requested_by=None)
+                auto = _is_auto_reply(path, text)
+                if auto == "header" or (auto == "subject" and not needs):
+                    # The email's own headers say it's automatic (certain), or its subject starts
+                    # "Automatic reply:" and no person asked us anything. A human reply to an auto-reply
+                    # ("RE: Automatic reply...") is never matched.
+                    topic = "auto_reply"
+                    needs = False
+                    comm = dict(comm, request=None, requested_by=None)
+                if topic == "acknowledgment" and _has_real_attachment(path):
+                    topic = "other"      # a "thanks" that brings a file isn't empty -- never auto-ignore it
+                _database().save_email_communication(path.name, needs,
+                                                      comm.get("request"), comm.get("requested_by"),
+                                                      topic)
+        except Exception as e:
+            print(f"  (could not save the needs-response check: {e})")
+
     return result
+
+
+def _is_own_address(addr):
+    addr = (addr or "").strip().lower()
+    if "@" not in addr:
+        return False
+    try:
+        domains, singles = set(_database().OWN_EMAIL_DOMAINS), set(_database().OWN_EMAIL_ADDRESSES)
+    except Exception:
+        domains, singles = {"maplerx.com", "lakewoodrx.com", "carepax.com"}, set()
+    return addr in singles or addr.rsplit("@", 1)[1] in domains
+
+
+def _forwarded_outside_request(text, comm):
+    """True when this email is from one of OUR OWN addresses but the request the classifier found was
+    made by someone OUTSIDE (the request/requested_by names an outside email address) -- i.e. staff
+    forwarded a vendor's thread to the invoices inbox (Amy forwarding Nigun Music's "please let me know"
+    with the invoice, 2026-10-20). A request the forwarder wrote themselves is kept."""
+    if not _is_own_address(_extract_sender(text)):
+        return False
+    who = " ".join(str(comm.get(k) or "") for k in ("requested_by", "request"))
+    addrs = re.findall(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", who)
+    by = str(comm.get("requested_by") or "")
+    if addrs:
+        # the asker named by address: outside -> the vendor's request
+        first = re.findall(r"[\w.+'-]+@[\w-]+(?:\.[\w-]+)+", by) or addrs[:1]
+        return not _is_own_address(first[0])
+    return False
+
+
+_AUTO_SUBJECT = re.compile(r"^\s*(automatic reply|auto[- ]?reply|autoreply|auto[- ]?response|"
+                           r"out of (?:the )?office|ooo\b|away from (?:the )?office)", re.I)
+# (Bounces -- "Undeliverable", "Delivery Status Notification" -- are NOT auto-replies: they mean our own
+# email didn't arrive, which someone may need to know.)
+
+
+def _is_auto_reply(path, text):
+    """How sure we are this is a machine-sent auto-responder (2026-10-21):
+      'header'  -- the email says so itself: RFC 3834 Auto-Submitted (anything but 'no'), X-Autoreply /
+                   X-Autorespond, Precedence auto_reply. A person's reply never carries these.
+      'subject' -- only the subject STARTS with 'Automatic reply:', 'Auto-Reply', 'Out of Office'... A reply
+                   or forward ('RE: Automatic reply: ...') does NOT count -- once someone answers an
+                   auto-reply it's a real conversation (Joel). The caller trusts this only when the
+                   classifier also found no request from a person.
+      None      -- not an auto-reply. Bounce notices are deliberately not included."""
+    try:
+        p = Path(path)
+        if p.suffix.lower() == ".eml" and p.is_file():
+            from email.parser import BytesHeaderParser
+            with open(p, "rb") as f:
+                h = BytesHeaderParser().parse(f)
+            if (h.get("Auto-Submitted") or "no").strip().lower() != "no":
+                return "header"
+            if h.get("X-Autoreply") or h.get("X-Autorespond") or h.get("X-Autoresponse"):
+                return "header"
+            if (h.get("Precedence") or "").strip().lower() == "auto_reply":
+                return "header"
+            if _AUTO_SUBJECT.match(str(h.get("Subject") or "")):
+                return "subject"
+    except Exception:
+        pass
+    for line in (text or "").splitlines():
+        if line.lower().startswith("subject:"):
+            return "subject" if _AUTO_SUBJECT.match(line.split(":", 1)[1]) else None
+    return None
+
+
+def _has_real_attachment(path):
+    """True when the stored email carries an attachment that isn't a small inline picture (signature
+    logos and the like, image under 100 KB). Used to keep a 'thank you' that brings a file off the
+    acknowledgment type. On any read error it says True, so nothing is ignored by mistake."""
+    try:
+        import corr_forward
+        _hdr, _body, atts = corr_forward._load_original(Path(path).name)
+    except Exception:
+        return True
+    for _name, data, maintype, _sub in atts:
+        if (maintype or "").lower() == "image" and len(data or b"") < 100_000:
+            continue
+        return True
+    return False
 
 
 def main():
@@ -6148,6 +6992,7 @@ def main():
     # One id per classify run, for traceability (which run touched which email /
     # flagged which review item). DB-only; Excel mode is unaffected.
     run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
+    os.environ["CLASSIFY_RUN_ID"] = run_id      # _api_fail_count counts failures once per run
     if USE_DB:
         _database().create_run(run_id)
         print(f"Run: {run_id}")
@@ -6187,6 +7032,16 @@ def main():
     pending_deletes = []     # split review files superseded on reprocess, deleted after save
     resolved_review_files = []   # review rows resolved this run, deleted from the queue after save
 
+    # ---- Phase 0 (2026-10-20): queue items flagged only for a vendor that's now in Vendor names get
+    # answered "record it normally", so THIS run reprocesses them (Apply changes now works). ----
+    if USE_DB:
+        try:
+            _vr = resolve_vendor_review_items()
+            if _vr["answered"] or _vr["updated"]:
+                print(f"Vendor names: {len(_vr['answered'])} review item(s) now resolvable (reprocessing this run), "
+                      f"{len(_vr['updated'])} still flagged for something else.")
+        except Exception as e:
+            print(f"(vendor review-item recheck failed: {e})")
     # ---- Phase 1: resolve answered items from the review queue ----
     review_rows = load_review_queue()
     answered = [r for r in review_rows if (r.get("Answer") or "").strip()]
@@ -6370,17 +7225,25 @@ def main():
     if USE_DB:
         learnings_hash_now = hashlib.sha256((learnings_text or "").encode("utf-8")).hexdigest()
         prev_hash = _database().get_last_learnings_hash(run_id)
-        if prev_hash and prev_hash != learnings_hash_now and recheck_candidates:
+        # 2026-10-23 (cost): this used to re-check the WHOLE queue (~100 items) on every run whose
+        # learnings changed -- nearly every run, since answers add learnings -- 28% of API spend, 8%
+        # resolved. Now: right away only the items whose vendor a NEW learning mentions; the whole queue
+        # once a day, in the first run from RECHECK_FULL_HOUR on. Answered items are not affected (they
+        # are reprocessed every run, above).
+        recheck_list, recheck_why = _pick_recheck(recheck_candidates, learnings_text, learnings_hash_now,
+                                                  prev_hash)
+        if recheck_list:
             # Record the new hash NOW, not only when the run finishes: a re-check cut off by the run's
             # 90-minute limit used to start over on every following run. And stop after
             # RECHECK_MAX_MINUTES so new email still gets its turn; items not reached keep their flags.
             _database().set_run_learnings_hash(run_id, learnings_hash_now)
+            print(f"Learnings re-check: {recheck_why}.")
             recheck_until = datetime.now() + timedelta(minutes=RECHECK_MAX_MINUTES)
             resolved_ids = set()
-            for i_r, r in enumerate(recheck_candidates):
+            for i_r, r in enumerate(recheck_list):
                 if datetime.now() > recheck_until:
                     print(f"  Stopped the learnings re-check after {RECHECK_MAX_MINUTES} minutes "
-                          f"({i_r} of {len(recheck_candidates)} item(s) checked); the rest keep their flags.")
+                          f"({i_r} of {len(recheck_list)} item(s) checked); the rest keep their flags.")
                     break
                 filename = r.get("Filename")
                 src = REVIEW_PENDING_DIR / (filename or "")
@@ -6416,7 +7279,7 @@ def main():
                         pending_moves.append((src, PROCESSED_DIR / src.name))
             if resolved_ids:
                 queue_carryover = [r for r in queue_carryover if id(r) not in resolved_ids]
-            n = len(recheck_candidates)
+            n = len(recheck_list)
             print(f"Re-checking {n} queued item(s) against updated learnings — "
                   f"resolved {len(resolved_ids)}, kept {n - len(resolved_ids)}.")
 
@@ -6576,14 +7439,31 @@ def main():
                       f"ignored {r['ignored_ids']}")
         # Misread-number duplicates (same vendor+amount+date+store, DIFFERENT number) — flag them so
         # both can't silently land on /qb; a human resolves on /duplicates. Flags only, never ignores.
+        # Since 2026-10-15 a waiting copy is compared with copies already entered in QB too.
         mm = flag_number_misread_duplicates("auto-flagged (misread-number duplicate backstop)")
         if mm["flagged"]:
             print(f"  MISREAD-DUP: flagged {len(mm['flagged'])} set(s) with matching "
-                  f"vendor/amount/date/store but a differing invoice number (hidden from /qb; "
+                  f"vendor/amount/store and date but a differing invoice number (hidden from /qb; "
                   f"resolve on /duplicates):")
             for f in mm["flagged"]:
                 print(f"    {f['vendor']} ${f['amount']} @ {f['store']}: numbers {f['numbers']} "
-                      f"(ids {f['ids']}, group {f['group']})")
+                      f"(ids {f['ids']}, group {f['group']}"
+                      f"{', already entered in QB: ' + str(f['entered_ids']) if f.get('entered_ids') else ''})")
+            # A set just flagged here may be a store scan + vendor copy whose numbers differ only by a
+            # tag (R205029 / R205029-IN): settle it now rather than on the next run (2026-10-20).
+            sp2 = resolve_store_preferred_duplicates("auto-resolved (store-preferred backstop)")
+            for r in sp2["resolved"]:
+                print(f"  STORE-PREFERRED: {r['vendor']} #{r['number']} @ {r['store']}: kept the store scan "
+                      f"(id {r['keep_id']}), ignored {r['ignored_ids']}")
+        # No invoice # at all: same vendor/store/amount, dates a week apart, different emails (2026-10-21).
+        nn = flag_numberless_duplicates("auto-flagged (no-number duplicate check)")
+        for f in nn["flagged"]:
+            print(f"  NO-NUMBER-DUP: {f['vendor']} ${f['amount']} @ {f['store']}: ids {f['ids']} (group {f['group']})")
+        # A waiting copy of a bill already entered in QB, # differing only by a tag (R204977 / R204977-IN).
+        et = resolve_entered_twin_duplicates("auto-resolved (already-entered twin)")
+        for r in et["resolved"]:
+            print(f"  ENTERED-TWIN: {r['vendor']} #{r['number']} @ {r['store']} is in QB (id {r['keep_id']}); "
+                  f"set aside {r['ignored_ids']}")
         # Collapse duplicate copies of one invoice in the REVIEW QUEUE (dedup skips flagged records,
         # so copies pile up there). Keeps one (store-scanned preferred), dismisses the rest.
         rq = dedupe_review_queue("auto-collapsed (review-queue dedupe backstop)")
@@ -6671,6 +7551,17 @@ def main():
         row["Run ID"] = run_id
     queue_out = queue_carryover + new_review_rows + error_review_rows
     save_review_queue(queue_out)
+    # Older review items of reprocessed emails that now have records (and weren't re-flagged) are stale.
+    if USE_DB:
+        _ok = [r["filename"] for r in to_results if r.get("filename")
+               and not (r.get("error") or r.get("read_error") or r.get("infra_error"))]
+        try:
+            st = dismiss_stale_reprocessed_reviews(run_id, _ok, "auto-dismissed (stale after reprocess)")
+            for d in st["dismissed"]:
+                print(f"  STALE-REVIEW: auto-dismissed review #{d['id']} -- {d['source_email']} "
+                      f"now has {d['records']} record(s)")
+        except Exception as e:      # never fail a run over this cleanup
+            print(f"  STALE-REVIEW: skipped ({e})")
 
     # Guarantee an emails-row status write for every email HANDLED this run that produced NO recorded
     # row — flagged entirely to review (all records flagged, or a record-less model-flagged email) or
@@ -6749,6 +7640,9 @@ def main():
                   f"{recon.get('missing', 0)} missing, {recon.get('amount_mismatch', 0)} mismatch, "
                   f"{recon.get('matched', 0)} matched, {recon.get('in_flight', 0)} in-flight, "
                   f"{recon.get('pre_cutoff', 0)} pre-cutoff.")
+        if recon.get("in_quickbooks"):
+            print(f"Statement reconciliation: {recon['in_quickbooks']} 'missing' line(s) found in the uploaded "
+                  f"QuickBooks exports (entered outside the app) -- dismissed.")
 
     print(f"Review queue: {len(queue_out)} open item(s) "
           f"({len(new_review_rows) + len(error_review_rows)} new this run"
@@ -6787,6 +7681,28 @@ def main():
                 print(f"Account class rules: set class on {n_cls} record(s).")
         except Exception as e:
             print(f"(account class rules failed: {e})")
+        try:
+            import dup_settle
+            res = dup_settle.settle_duplicate_sets(verbose=True)
+            if res["resolved"] or res["twice"]:
+                print(f"Duplicates: {len(res['resolved'])} set(s) resolved (bill already in QuickBooks once), "
+                      f"{len(res['twice'])} entered twice in QuickBooks (see Duplicates).")
+        except Exception as e:
+            print(f"(duplicate settle failed: {e})")
+        try:
+            import corr_forward
+            fw_sent, fw_failed = corr_forward.run_forward_rules("classify run")
+            if fw_sent or fw_failed:
+                print(f"Correspondence forward rules: forwarded {fw_sent}"
+                      + (f", {fw_failed} failed (see above)" if fw_failed else "") + ".")
+        except Exception as e:
+            print(f"(correspondence forward rules failed: {e})")
+        try:
+            n_corr = _database().apply_correspondence_rules("classify run")
+            if n_corr:
+                print(f"Correspondence rules: auto-ignored {n_corr} email(s).")
+        except Exception as e:
+            print(f"(correspondence rules failed: {e})")
 
     # ---- Stamp the run row with completion time + counts ----
     if USE_DB:

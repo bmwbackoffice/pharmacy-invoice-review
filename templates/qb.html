@@ -240,7 +240,7 @@
     <div class="qbactions">
       <a class="btn ok" href="/qb/export.xlsx?{{ exportq }}{{ na_extra }}{{ act_extra }}"
          onclick="return exportQbClick(this)"
-         title="{{ 'Matches your column view' if export_follow else 'Uses your custom export layout' }} — Invoice # kept as text so long numbers and leading zeros stay exact">Export Excel</a>
+         title="Standard QuickBooks-entry layout (same for everyone) — Invoice # kept as text so long numbers and leading zeros stay exact">Export Excel</a>
       <button class="btn secondary" type="button" onclick="var p=document.getElementById('qbcolspanel');p.style.display=(p.style.display==='none'?'':'none');">Columns ⚙</button>
     </div>
   </div>
@@ -269,36 +269,10 @@
       {% endfor %}
     </ul>
 
-    <h3>Reference columns</h3>
-    <p class="muted">{{ reference_columns|join(', ') }} are always shown on screen (at the
-      end of each row) for quick access. They're left out of CSV export and "Copy visible
-      rows" by default since they're not QuickBooks data — tick to include one anyway.</p>
-    <ul class="collist">
-      {% for col in reference_columns %}
-        <li><label><input type="checkbox" name="include_ref" value="{{ col }}"
-          {{ 'checked' if col in export_include_refs }}> Include "{{ col }}"</label></li>
-      {% endfor %}
-    </ul>
-
-    <h3>CSV export</h3>
-    <p class="muted">The default download keeps the canonical QuickBooks import order unless
-      you customize it below.</p>
-    <label style="font-weight:400;"><input type="checkbox" name="export_follow" value="1"
-      {{ 'checked' if export_follow }} onchange="document.getElementById('exportcols').style.display=this.checked?'none':'';">
-      CSV export matches my column view</label>
-    <div id="exportcols" style="margin-top:8px;{{ 'display:none;' if export_follow }}">
-      <p class="muted" style="margin:0 0 6px;">Custom export layout:</p>
-      <ul id="expcols" class="collist">
-        {% for col in export_columns %}
-          <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
-            <label><input type="checkbox" name="export_col" value="{{ col }}" checked> {{ col }}</label></li>
-        {% endfor %}
-        {% for col in all_columns if col not in export_columns %}
-          <li data-col="{{ col }}"><button type="button" class="mv" onclick="moveItem(this,-1)">↑</button><button type="button" class="mv" onclick="moveItem(this,1)">↓</button>
-            <label><input type="checkbox" name="export_col" value="{{ col }}"> {{ col }}</label></li>
-        {% endfor %}
-      </ul>
-    </div>
+    <p class="muted" style="margin-top:10px;">The reference columns ({{ reference_columns|join(', ') }})
+      are always shown on screen for quick access. <strong>Copy Selected and Export always use the same
+      fixed QuickBooks-entry layout for everyone</strong> ({{ copy_columns|join(', ') }}) — this on-screen
+      arrangement doesn't change what's copied or exported.</p>
     <div style="margin-top:10px;"><button class="btn" type="submit">Save</button></div>
   </form>
   <form method="post" action="/qb/columns" class="pref-form" style="margin-top:8px;">

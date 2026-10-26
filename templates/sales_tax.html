@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% from "_macros.html" import money %}
+{% block content %}
+<style>
+  .stx { border:1px solid var(--line, #e5e7eb); border-radius:8px; background:#fff; margin:0 0 8px; overflow:hidden; }
+  .stx-head { display:flex; gap:12px; align-items:center; flex-wrap:wrap; padding:6px 12px; background:#f8fafc; }
+  .stx-head .who { font-weight:700; }
+  .stx table { width:auto; margin:0; border:0; border-top:1px solid var(--line, #e5e7eb); }
+  .stx th { position:static; background:#fff; font-weight:500; color:var(--muted, #6b7280); font-size:12px;
+            padding:4px 14px; white-space:nowrap; }
+  .stx td { padding:2px 14px; font-size:13px; white-space:nowrap; }
+  .stx th.num, .stx td.num { text-align:right; }
+  .stx tr.more { display:none; }
+  .stx.open tr.more { display:table-row; }
+  .stx .toggle { padding:3px 14px 6px; font-size:12px; }
+</style>
+<h2>Sales tax on bills
+  {% set nb = groups|map(attribute='bills')|map('length')|sum %}
+  <span class="muted">({{ nb }} bill{{ '' if nb == 1 else 's' }}, {{ groups|length }} vendor{{ '' if groups|length == 1 else 's' }})</span></h2>
+<p class="muted" style="max-width:1000px;">Bills where a sales-tax charge was read, grouped by vendor. If a vendor is
+allowed to charge sales tax, click <strong>OK to charge</strong> — all its bills leave this list, now and in the future
+(it's the <em>OK to charge sales tax</em> box in <a href="/reference/vendor_name_map">Setup › Vendor names</a>, so it can be
+undone there or under <em>OK'd vendors</em> below). Duplicates kept out and ignored bills aren't listed.</p>
+
+{% if msg %}<div class="card" style="border-color:var(--brand); background:#eff6ff;">{{ msg }}</div>{% endif %}
+
+<div class="card" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+  {% for key, label in [('open','To check'),('ok',"OK'd vendors"),('all','All')] %}
+    <a class="btn {{ '' if show==key else 'secondary' }}" href="/sales-tax?show={{ key }}{% if store %}&store={{ store|urlencode }}{% endif %}">{{ label }}</a>
+  {% endfor %}
+  <form method="get" action="/sales-tax" style="margin:0 0 0 12px; display:flex; gap:6px; align-items:center;">
+    <input type="hidden" name="show" value="{{ show }}">
+    <select name="store" onchange="this.form.submit()" style="width:auto;">
+      <option value="">all stores</option>
+      {% for s in stores %}<option value="{{ s }}" {{ 'selected' if s == store }}>{{ s | store_label }}</option>{% endfor %}
+    </select>
+  </form>
+</div>
+
+{% if not groups %}<div class="card muted">Nothing here.</div>{% endif %}
+
+{% for g in groups %}
+<div class="stx">
+  <div class="stx-head">
+    <span class="who">{{ g.vendor }}</span>
+    <span class="muted">{{ g.bills|length }} bill{{ '' if g.bills|length == 1 else 's' }} · {{ money(g.total_tax) }} sales tax</span>
+    {% if g.ok %}<span class="pill" style="background:#dcfce7;color:#166534;">OK to charge{% if g.ok_by %} — {{ g.ok_by }}{% if g.ok_at %}, {{ g.ok_at | us_date }}{% endif %}{% endif %}</span>{% endif %}
+    <form method="post" action="/sales-tax/vendor-ok" style="margin:0 0 0 auto;">
+      <input type="hidden" name="vendor" value="{{ g.standard_vendor or '' }}">
+      {% if not g.standard_vendor or not g.in_map %}
+        <span class="muted" style="font-size:12px;">not in Setup › Vendor names yet — add it there to mark it OK</span>
+      {% elif g.ok %}
+        <input type="hidden" name="ok" value="0">
+        <button class="btn secondary" type="submit" style="padding:3px 10px; font-size:12px;">Put back on the list</button>
+      {% else %}
+        <button class="btn" type="submit" style="padding:3px 12px; font-size:12px;"
+                onclick="return confirm('Mark {{ g.vendor|e }} as OK to charge sales tax at ALL stores? Its bills leave this list.');">OK to charge (all stores)</button>
+      {% endif %}
+    </form>
+    {# OK this vendor at one store only (2026-10-23). #}
+    {% set g_stores = g.bills | map(attribute='store_matched') | reject('none') | unique | list %}
+    {% if g.standard_vendor and g.in_map and not g.ok and g_stores %}
+    <form method="post" action="/sales-tax/store-ok" style="margin:0; display:inline-flex; gap:4px;">
+      <input type="hidden" name="vendor" value="{{ g.standard_vendor }}">
+      <select name="store" required style="font-size:12px; padding:2px 4px;">
+        <option value="">store…</option>
+        {% for st in g_stores %}<option value="{{ st }}">{{ st | store_label }}</option>{% endfor %}
+      </select>
+      <button class="btn secondary" type="submit" style="padding:3px 10px; font-size:12px;">OK for this store</button>
+    </form>
+    {% endif %}
+  </div>
+  <table>
+    <thead><tr><th>Store</th><th>Invoice #</th><th>Date</th><th class="num">Bill total</th><th class="num">Sales tax</th>
+        <th class="num">Tax %</th><th>QuickBooks</th><th></th><th></th></tr></thead>
+    <tbody>
+    {% for b in g.bills %}
+    <tr{% if loop.index > 5 %} class="more"{% endif %}>
+      <td>{{ (b.store_matched | store_label) or '—' }}</td>
+      <td>{{ b.invoice_number or '—' }}{% if b.vendor_matched and b.vendor_matched != g.vendor %} <span class="muted" style="font-size:11px;">({{ b.vendor_matched }})</span>{% endif %}</td>
+      <td>{{ (b.invoice_date | us_date) or b.invoice_date or '—' }}</td>
+      <td class="num">{{ money(b.amount) }}</td>
+      <td class="num"><strong>{{ money(b.sales_tax) }}</strong></td>
+      <td class="num muted">{% if b.tax_pct is not none %}{{ '%.2f'|format(b.tax_pct) }}%{% endif %}</td>
+      <td>{% if b.skip_qb_import %}<span class="muted">not entered (excluded)</span>{% elif b.entered_in_qb %}<span style="color:#137547;">&#10003; entered</span>{% else %}<span class="muted">not entered</span>{% endif %}</td>
+      <td style="white-space:nowrap;">{% set url = file_url(b.file_path) %}{% if url %}<a href="{{ url }}" target="_blank">file</a> · {% endif %}<a href="/records/invoice/{{ b.id }}" target="_blank">details</a></td>
+      <td style="white-space:nowrap;">
+        {# OK just this bill (2026-10-23) -- the vendor stays on the list for its other bills. #}
+        <form method="post" action="/sales-tax/bill-ok" style="margin:0;">
+          <input type="hidden" name="invoice_id" value="{{ b.id }}">
+          {% if b.store_ok_at %}
+            </form>
+            <form method="post" action="/sales-tax/store-ok" style="margin:0;">
+              <input type="hidden" name="vendor" value="{{ g.standard_vendor }}">
+              <input type="hidden" name="store" value="{{ b.store_matched }}">
+              <input type="hidden" name="ok" value="0">
+              <span class="muted" style="font-size:11.5px;">OK'd for {{ b.store_matched | store_label }} — {{ b.store_ok_by }}, {{ b.store_ok_at | us_date }}</span>
+              <button class="btn secondary" type="submit" style="padding:2px 8px; font-size:11.5px;">undo store</button>
+          {% elif b.bill_ok_at %}
+            <span class="muted" style="font-size:11.5px;">OK'd — {{ b.bill_ok_by }}, {{ b.bill_ok_at | us_date }}</span>
+            <input type="hidden" name="ok" value="0">
+            <button class="btn secondary" type="submit" style="padding:2px 8px; font-size:11.5px;">undo</button>
+          {% elif not g.ok %}
+            <button class="btn secondary" type="submit" style="padding:2px 9px; font-size:11.5px;" title="OK this bill's sales tax only">OK this bill</button>
+          {% endif %}
+        </form>
+      </td>
+    </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% if g.bills|length > 5 %}
+  <div class="toggle"><a href="#" onclick="var d=this.closest('.stx'); d.classList.toggle('open');
+     this.textContent = d.classList.contains('open') ? 'show fewer' : 'show all {{ g.bills|length }} bills'; return false;">show all {{ g.bills|length }} bills</a></div>
+  {% endif %}
+</div>
+{% endfor %}
+{% endblock %}

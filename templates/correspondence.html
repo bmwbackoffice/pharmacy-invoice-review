@@ -1,0 +1,333 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .corrtabs { display:flex; gap:6px; flex-wrap:wrap; margin:6px 0 14px; }
+  .corrtabs a { padding:6px 12px; border-radius:6px; background:#e5e7eb; color:var(--ink); text-decoration:none; font-size:13px; }
+  .corrtabs a.on { background:var(--brand); color:#fff; }
+  .corr { padding:14px 16px; }
+  .corr-head { display:flex; justify-content:space-between; gap:12px; align-items:flex-start; flex-wrap:wrap; }
+  .corr-subj { font-weight:700; font-size:15px; margin:0 0 3px; }
+  .corr-meta { font-size:12.5px; color:var(--muted); }
+  .corr-meta b { color:var(--ink); font-weight:600; }
+  .corr-what { font-size:13px; margin:8px 0 0; padding:6px 10px; background:#f3f7fc; border-radius:6px; }
+  /* The email itself: a paper-coloured panel so it stands apart from the white card around it. */
+  .corr-preview { margin:8px 0 6px; background:#fff8e1; border:1px solid #ecd27a; border-left:4px solid #d4a72c;
+                  border-radius:6px; }
+  .corr-preview-bar { display:flex; justify-content:space-between; align-items:center; padding:3px 10px;
+                      font-size:11.5px; color:#8a6d1a; border-bottom:1px solid #f1e2a8; }
+  .corr-preview-bar a, .corr-more a { color:#8a6d1a; font-weight:600; }
+  .corr-body { white-space:pre-wrap; font-size:12.5px; line-height:1.45; color:#2b2b2b; padding:6px 10px;
+               max-height:calc(4 * 1.45em + 12px); overflow:hidden; cursor:pointer; }
+  .corr-preview.open .corr-body { max-height:420px; overflow:auto; cursor:auto; }
+  .corr-more { display:none; font-size:11.5px; padding:2px 10px 4px; border-top:1px solid #f1e2a8; }
+  .corr-preview.open .corr-more { display:block; }
+  .corr-preview.fits .corr-toggle, .corr-preview.fits .corr-more { display:none !important; }
+  .corr-preview.fits .corr-body { cursor:auto; }
+  .corr-att { font-size:12px; color:var(--muted); margin-top:-4px; }
+  .corr-actions { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  .corr-actions input[type=text] { width:auto; min-width:240px; flex:1 1 240px; padding:6px 8px; font-size:13px; }
+  .corr-actions .btn { padding:6px 12px; font-size:13px; }
+  .corr-rule { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin-top:8px; font-size:12.5px; color:var(--muted); }
+  .corr-rule select, .corr-rule input[type=text] { width:auto; padding:5px 7px; font-size:12.5px; }
+  .corr-rule input[type=text] { min-width:220px; }
+  .corr-decided { font-size:12.5px; padding:6px 10px; border-radius:6px; background:#ecfdf5; color:var(--ok); margin-top:8px; }
+  .corr-decided.follow_up { background:#fef3c7; color:var(--warn); }
+  .corr-decided.ignored { background:#f3f4f6; color:var(--muted); }
+  .corr-reproc { margin-top:8px; font-size:12.5px; }
+  .corr-reproc summary { cursor:pointer; color:var(--brand); }
+  .corr-kinds { font-size:12.5px; color:var(--muted); margin:-6px 0 12px; }
+  .corr-kinds a.on { font-weight:700; color:var(--ink); text-decoration:none; }
+  .corr-reply { font-size:13px; margin:8px 0 0; padding:7px 10px; background:#fff1f0; border:1px solid #fecaca;
+                border-left:4px solid #dc2626; border-radius:6px; color:#7f1d1d; }
+  .corr-tag.corr-topic { background:#e0e7ff; color:#3730a3; font-weight:600; }
+  .corr-similar { margin-top:2px; }
+  .corr-similar a { text-decoration:none; background:#eef2ff; border-radius:4px; padding:0 5px; }
+  .corr-filter { font-size:13px; margin:-4px 0 12px; padding:6px 10px; background:#eef2ff; border-radius:6px; }
+  .corr-filter span { margin-right:10px; }
+  .corr-docs { font-size:12.5px; margin:6px 0 0; color:var(--muted); }
+  .corr-tag { display:inline-block; font-size:11px; font-weight:700; padding:1px 7px; border-radius:999px;
+              background:#fee2e2; color:#b91c1c; margin-left:6px; vertical-align:middle; }
+  /* ---- v2 card layout: decisions left, the email itself right ---- */
+  .c2 { padding:14px 16px; }
+  .c2-grid { display:grid; grid-template-columns:minmax(0,1.15fr) minmax(0,1fr); gap:18px; align-items:start; }
+  @media (max-width:1150px) { .c2-grid { grid-template-columns:1fr; } }
+  .c2-dim { color:var(--muted); }
+  .c2 .corr-reply, .c2 .corr-what { margin-top:7px; }
+  .c2 .corr-what { background:#f1f5f9; }
+  .c2-status { font-size:12.5px; margin-top:7px; padding:5px 10px; border-radius:6px; background:#ecfdf5; color:var(--ok); }
+  .c2-status.follow_up { background:#fef3c7; color:var(--warn); }
+  .c2-status.ignored { background:#f3f4f6; color:var(--muted); }
+  .c2-status.note { background:#fff7ed; color:#9a3412; }
+  .c2-status.fwd { background:#eff6ff; color:var(--brand); }
+  .c2-decide { margin-top:10px; }
+  .c2-decide input[type=text] { width:100%; padding:6px 8px; font-size:13px; }
+  .c2-btns { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:6px; }
+  .c2-btns .btn { padding:6px 12px; font-size:13px; }
+  .c2-fu { display:inline-flex; }
+  .c2-fu select { width:auto; padding:5px 6px; font-size:13px; border-radius:6px 0 0 6px; border-right:0; }
+  .c2-fu .btn { border-radius:0 6px 6px 0; }
+  .c2-more { display:flex; gap:4px 18px; flex-wrap:wrap; margin-top:10px; }
+  .c2-panel { flex:0 0 auto; font-size:12.5px; }
+  .c2-panel[open] { flex:1 1 100%; order:-1; }
+  .c2-panel > summary { cursor:pointer; color:var(--brand); display:inline-block; padding:3px 0; }
+  .c2-panel[open] { background:#f8fafc; border:1px solid var(--line); border-radius:6px; padding:6px 10px 10px; }
+  .c2-form { display:grid; grid-template-columns:90px 1fr; gap:6px 10px; align-items:center; margin-top:6px; }
+  .c2-form > label { color:var(--muted); text-align:right; }
+  .c2-form input[type=text], .c2-form select, .c2-form textarea { width:auto; padding:4px 7px; font-size:12.5px; }
+  .c2-form input[type=text] { min-width:220px; }
+  .c2-form textarea { width:100%; }
+  .c2-form .c2-sub { grid-column:1 / -1; color:var(--muted); }
+  .c2-form .btn { padding:5px 12px; font-size:13px; }
+  .c2-inline { margin-left:10px; color:var(--muted); display:inline-flex !important; align-items:center; gap:4px;
+               width:auto !important; font-weight:400; }
+  .c2-inline input[type=checkbox] { width:auto !important; margin:0; }
+  .c2-form select { max-width:300px; }
+  .c2-right .c2-preview { margin:0; }
+  .c2-right .corr-body { max-height:calc(11 * 1.45em + 12px); }
+  .c2-right .corr-preview.open .corr-body { max-height:560px; }
+  .c2-att { font-size:11.5px; padding:4px 10px; border-top:1px solid #f1e2a8; color:#8a6d1a; }
+  .flash { padding:8px 12px; background:#ecfdf5; border:1px solid #a7f3d0; border-radius:6px; margin-bottom:12px; }
+</style>
+
+<h2>Correspondence <span class="muted">({{ total }})</span></h2>
+<p class="muted">Emails the system read as <em>correspondence</em> — not a bill, payment or statement, so nothing else
+  in the app picks them up — plus any other email (invoice, statement…) where a person wrote a request that's
+  <span class="corr-tag" style="margin:0;">NEEDS REPLY</span> waiting on us; its documents are still processed as usual. Go through each one: <strong>Handled</strong> (dealt with), <strong>Follow up</strong>
+  (someone needs to act — say what in the note), or <strong>Dismiss</strong>. <strong>Forward</strong> sends it on (from the AP
+  mailbox) — the email stays where it is, with a "Forwarded to …" line, until you mark it. A <strong>rule</strong> can match the sender, the subject, the To/CC addresses, or any combination, and either
+  dismisses or forwards matching emails automatically (rules: <a href="/reference/correspondence_rules">Setup ›
+  Rules › Correspondence rules</a>; people to forward to: <a href="/reference/forward_contacts">Forward contacts</a>).</p>
+
+{% if flash %}<div class="flash">{{ flash }}</div>{% endif %}
+<div class="corr-kinds">Show:
+  {% for k, lbl in [('', 'everything'), ('reply', 'needs a reply'), ('corr', 'correspondence only')] %}
+    <a href="/correspondence?status={{ status }}{% if k %}&kind={{ k }}{% endif %}{% if search %}&search={{ search|urlencode }}{% endif %}"
+       class="{{ 'on' if (kind or '') == k and not mine }}">{{ lbl }}</a>{{ ' · ' if not loop.last }}
+  {% endfor %}
+  &nbsp;|&nbsp; <a href="/correspondence?status=follow_up&mine=1" class="{{ 'on' if mine }}">my follow-ups</a>
+</div>
+{% if f_sender or f_topic %}
+<div class="corr-filter">Showing only:
+  {% if f_sender %}<span>from <strong>{{ f_sender }}</strong>
+    <a href="/correspondence?status={{ status }}{% if f_topic %}&topic={{ f_topic }}{% endif %}" title="Clear">✕</a></span>{% endif %}
+  {% if f_topic %}<span>type <strong>{{ dict(topics).get(f_topic, f_topic) }}</strong>
+    <a href="/correspondence?status={{ status }}{% if f_sender %}&sender={{ f_sender|urlencode }}{% endif %}" title="Clear">✕</a></span>{% endif %}
+  <span class="muted">— a rule created from an email here starts pre-filled with this filter.</span>
+</div>
+{% endif %}
+
+<div class="corrtabs">
+  {% for key, label in statuses %}
+    <a href="/correspondence?status={{ key }}{% if kind %}&kind={{ kind }}{% endif %}{% if mine %}&mine=1{% endif %}{% if f_sender %}&sender={{ f_sender|urlencode }}{% endif %}{% if f_topic %}&topic={{ f_topic }}{% endif %}{% if f_assignee and key == 'follow_up' %}&assignee={{ f_assignee|urlencode }}{% endif %}{% if search %}&search={{ search|urlencode }}{% endif %}"
+       class="{{ 'on' if key == status }}">{{ label }} ({{ counts.get(key, 0) }})</a>
+  {% endfor %}
+  <form method="get" action="/correspondence" class="pref-form" style="margin-left:auto; display:flex; gap:6px;">
+    <input type="hidden" name="status" value="{{ status }}">
+    {% if f_sender %}<input type="hidden" name="sender" value="{{ f_sender }}">{% endif %}
+    {% if f_topic %}<input type="hidden" name="topic" value="{{ f_topic }}">{% endif %}
+    {% if kind %}<input type="hidden" name="kind" value="{{ kind }}">{% endif %}
+    {% if mine %}<input type="hidden" name="mine" value="1">{% endif %}
+    {% if status == 'follow_up' and not mine %}
+    <select name="assignee" onchange="this.form.submit()" title="Show only follow-ups assigned to…" style="padding:5px 6px;">
+      <option value="">Assigned to: anyone ({{ assignee_counts.values()|sum }})</option>
+      <option value="-" {{ 'selected' if f_assignee == '-' }}>Unassigned ({{ assignee_counts.get('-', 0) }})</option>
+      {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if f_assignee == u.username }}>{{ u.display_name or u.username }} ({{ assignee_counts.get(u.username, 0) }})</option>{% endfor %}
+    </select>
+    {% endif %}
+    <input type="text" name="search" value="{{ search }}" placeholder="sender / subject / note" style="width:220px; padding:5px 8px;">
+    <button class="btn secondary" type="submit" style="padding:5px 10px;">Search</button>
+    {% if search %}<a class="btn secondary" href="/correspondence?status={{ status }}" title="Clear the search" style="padding:5px 10px; text-decoration:none;">✕</a>{% endif %}
+  </form>
+</div>
+
+{% for r in rows %}
+{% set hidden_back %}
+    <input type="hidden" name="filename" value="{{ r.filename }}">
+    <input type="hidden" name="back_status" value="{{ status }}">
+    <input type="hidden" name="back_search" value="{{ search }}">
+    <input type="hidden" name="back_kind" value="{{ kind or '' }}">
+    <input type="hidden" name="back_mine" value="{{ '1' if mine else '' }}">
+    <input type="hidden" name="back_sender" value="{{ f_sender or '' }}">
+    <input type="hidden" name="back_topic" value="{{ f_topic or '' }}">
+    <input type="hidden" name="back_assignee" value="{{ f_assignee or '' }}">
+{% endset %}
+<div class="card corr c2">
+  <div class="c2-grid">
+  <!-- LEFT: what it is + what to do -->
+  <div class="c2-left">
+    <p class="corr-subj">{{ r.subject or r.filename }}{% if r.needs_response %}<span class="corr-tag">NEEDS REPLY</span>{% endif %}{% if r.topic %}<span class="corr-tag corr-topic">{{ dict(topics).get(r.topic, r.topic) }}</span>{% endif %}</p>
+    <div class="corr-meta">
+      <b>{{ r.sender_display or 'unknown sender' }}</b>
+      · {{ (r.received_at | us_datetime) or (r.date_added | us_date) or '—' }}
+      {% if r.info_store %} · {{ r.info_store | store_label }}{% endif %}
+      {% if r.info_vendor %} · vendor: {{ r.info_vendor }}{% endif %}
+      {% if r.recipient_list %}<br><span class="c2-dim">To/CC: {{ r.recipient_list | join(', ') }}</span>{% endif %}
+    </div>
+    {% if r.similar %}<div class="corr-meta corr-similar">Similar:
+      {% for k, val, c in r.similar %}
+        <a href="/correspondence?status=all&{{ 'topic=' ~ val if k == 'topic' else 'sender=' ~ (val|urlencode) }}"
+           title="Show them all (every tab)"><strong>{{ c[0] }} open</strong> / {{ c[1] }}</a>
+        {{ 'from ' ~ val if k != 'topic' else dict(topics).get(val, val) }}{{ ' · ' if not loop.last }}
+      {% endfor %}</div>{% endif %}
+
+    {% if r.needs_response %}
+      <div class="corr-reply"><strong>Waiting on us:</strong> {{ r.response_request or 'a person asked for something in this email' }}</div>
+    {% endif %}
+    {% if r.info_note and r.info_note != r.response_request %}
+      <div class="corr-what"><strong>System's read:</strong> {{ r.info_note }}</div>
+    {% endif %}
+    {% if r.email_type and r.email_type != 'correspondence' %}
+      <div class="corr-docs">Documents processed as usual ({{ r.email_type | replace('_', ' ') }}{% if r.n_records %}, {{ r.n_records }} record{{ '' if r.n_records == 1 else 's' }}{% endif %})
+        · <a href="/browse?email={{ r.filename | urlencode }}">see records</a></div>
+    {% endif %}
+
+    {% if r.corr_forwarded_to %}
+      <div class="c2-status fwd">↪ Forwarded to {{ r.corr_forwarded_to }}{% if r.corr_forwarded_at %} · {{ r.corr_forwarded_at | us_datetime }}{% endif %}</div>
+    {% endif %}
+    {% if r.corr_status == 'open' and r.corr_note %}
+      <div class="c2-status note">Note: {{ r.corr_note }}
+        {% if 'Sent back to be processed' in r.corr_note %} — came back: no invoice/credit memo/payment found in the attachments.{% endif %}</div>
+    {% endif %}
+    {% if r.corr_status != 'open' %}
+      <div class="c2-status {{ r.corr_status }}">
+        <strong>{{ {'handled':'Handled','follow_up':'Follow up','ignored':'Dismissed'}.get(r.corr_status, r.corr_status) }}</strong>
+        {% if r.corr_status == 'follow_up' %} → {{ r.corr_assigned_to or 'not assigned' }}{% endif %}
+        {% if r.corr_by %} · by {{ r.corr_by }}{% endif %}{% if r.corr_at %} · {{ r.corr_at | us_datetime }}{% endif %}
+        {% if r.corr_note %} — {{ r.corr_note }}{% endif %}
+      </div>
+    {% endif %}
+
+    <!-- main decision -->
+    <form method="post" action="/correspondence/act" class="c2-decide">
+      {{ hidden_back }}
+      <input type="text" name="note" placeholder="Note (optional) — what was done / who should follow up"
+             value="{{ r.corr_note or '' if r.corr_status == 'follow_up' else '' }}">
+      <div class="c2-btns">
+        {% if r.corr_status != 'handled' %}<button class="btn ok" name="action" value="handled">✓ Handled</button>{% endif %}
+        <span class="c2-fu">
+          <select name="assign_to" title="Who should follow up">
+            <option value="">assign to…</option>
+            {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if u.username == r.corr_assigned_to }}>{{ u.display_name or u.username }}</option>{% endfor %}
+          </select><button class="btn" name="action" value="follow_up" style="background:var(--warn);">{{ 'Update follow-up' if r.corr_status == 'follow_up' else 'Follow up' }}</button>
+        </span>
+        {% if r.corr_status != 'ignored' %}<button class="btn secondary" name="action" value="ignored">Dismiss</button>{% endif %}
+        {% if r.corr_status != 'open' %}<button class="btn secondary" name="action" value="open">Reopen</button>{% endif %}
+      </div>
+    </form>
+
+    <!-- secondary actions, collapsed -->
+    <div class="c2-more">
+      <details class="c2-panel">
+        <summary>↪ Forward…</summary>
+        <form method="post" action="/correspondence/act" class="c2-form">
+          {{ hidden_back }}<input type="hidden" name="action" value="forward">
+          <label>To</label>
+          <div>{% if contacts %}<select name="forward_pick"><option value="">— pick a contact —</option>
+            {% for c in contacts %}<option value="{{ c.email }}">{{ c.label }}</option>{% endfor %}</select> or {% endif %}
+            <input type="text" name="forward_to" placeholder="email(s), comma-separated"></div>
+          <label>Note</label><div><input type="text" name="note" placeholder="included at the top (optional)"></div>
+          <span></span><div><button class="btn secondary" type="submit"
+            onclick="return confirm('Send this email on now? It goes out from the AP mailbox. It stays in this list until you mark it.');">Forward</button></div>
+        </form>
+      </details>
+
+      {% if r.corr_status == 'open' %}
+      <details class="c2-panel" {{ 'open' if f_sender or f_topic }}>
+        <summary>⚙ Rule for emails like this…</summary>
+        <form method="post" action="/correspondence/act" class="c2-form">
+          {{ hidden_back }}<input type="hidden" name="action" value="rule"><input type="hidden" name="note" value="">
+          <div class="c2-sub">Match emails where — leave a box blank for "any"; everything filled must match:</div>
+          <label>Type is</label>
+          <div><select name="rule_topic"><option value="">(any type)</option>
+            {% for k, lbl in topics %}<option value="{{ k }}" {{ 'selected' if k == f_topic }}>{{ lbl }}</option>{% endfor %}</select>
+            {% if r.topic %}<a href="#" onclick="var f=this.closest('form'); f.rule_topic.value='{{ r.topic }}'; f.rule_sender.value=''; return false;">this type, any sender</a>{% endif %}</div>
+          <label>From</label>
+          <div><input type="text" name="rule_sender" value="{{ f_sender if f_sender else ('' if f_topic else (r.sender_addr or '')) }}" placeholder="(any sender)">
+            {% if r.sender_addr %}<a href="#" onclick="this.closest('form').rule_sender.value='{{ r.sender_addr }}';return false;">address</a>
+            · <a href="#" onclick="this.closest('form').rule_sender.value='{{ r.sender_domain }}';return false;">{{ r.sender_domain }}</a>
+            · <a href="#" onclick="this.closest('form').rule_sender.value='';return false;">any</a>{% endif %}</div>
+          <label>Subject has</label>
+          <div><input type="text" name="rule_subject" value="" placeholder="(any subject)">
+            <a href="#" onclick="this.closest('form').rule_subject.value={{ (r.subject or '')|tojson|forceescape }};return false;">use subject</a></div>
+          <label>To/CC has</label>
+          <div><input type="text" name="rule_recipients" value="" placeholder="(anyone)">
+            {% for a in r.recipient_list if a not in ('invoices@lakewoodrx.com',) %}<a href="#" onclick="this.closest('form').rule_recipients.value='{{ a }}';return false;">{{ a }}</a>{{ ' · ' if not loop.last }}{% endfor %}
+            <label class="c2-inline" title="At least one To/CC address is outside our own domains"><input type="checkbox" name="rule_outside" value="1"> only if sent to a vendor</label></div>
+          <label><strong>Then</strong></label>
+          <div><select name="rule_action" onchange="this.form.querySelector('.rule-fwd').style.display=(this.value==='forward'?'inline':'none'); this.form.querySelector('.rule-assign').style.display=(this.value==='follow_up'?'inline':'none');">
+              <option value="ignore">always dismiss</option>
+              <option value="forward">always forward to…</option>
+              <option value="follow_up">always mark Follow up…</option></select>
+            <span class="rule-assign" style="display:none;"><select name="rule_assign_to"><option value="">(not assigned)</option>
+              {% for u in users %}<option value="{{ u.username }}">{{ u.display_name or u.username }}</option>{% endfor %}</select></span>
+            <span class="rule-fwd" style="display:none;">{% if contacts %}<select name="rule_forward_pick"><option value="">— pick —</option>
+              {% for c in contacts %}<option value="{{ c.email }}">{{ c.label }}</option>{% endfor %}</select> or {% endif %}
+              <input type="text" name="rule_forward_to" placeholder="email(s)"></span>
+            <button class="btn secondary" type="submit"
+              onclick="return confirm('Create this rule? It applies right away to every matching email still in Open (dismiss rules clear them; follow-up rules move them to Follow up; forward rules send each one now, from the AP mailbox) and to future emails.');">Create rule</button></div>
+        </form>
+      </details>
+      {% endif %}
+
+      {% if (r.email_type or 'correspondence') == 'correspondence' %}
+      <details class="c2-panel">
+        <summary>📄 Not correspondence? Process as documents…</summary>
+        <form method="post" action="/correspondence/act" class="c2-form">
+          {{ hidden_back }}<input type="hidden" name="action" value="reprocess">
+          <div class="c2-sub">Sends this email back through the system so its attachments are read as invoices / statements.
+            Optionally teach it why (saved to <a href="/learnings">Learnings</a>):</div>
+          <label>Lesson</label>
+          <div><textarea name="learning" rows="2">{{
+            ('Emails from ' ~ (r.sender_addr or r.sender_display or 'this sender') ~ ' forwarding vendor documents (e.g. "'
+             ~ (r.subject or '') ~ '") are invoices/statements to process from the attachments, not correspondence.') }}</textarea></div>
+          <span></span><div><button class="btn" type="submit" onclick="return confirm('Send this email back to be processed as documents?');">Process as documents</button></div>
+        </form>
+      </details>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- RIGHT: the email itself -->
+  <div class="c2-right">
+    {% if r.preview.found %}
+      <div class="corr-preview c2-preview">
+        <div class="corr-preview-bar"><span>✉ Email{% if r.gmail_link %} · <a href="{{ r.gmail_link }}" target="_blank">open in Gmail</a>{% endif %}</span>
+          <a href="#" class="corr-toggle" onclick="return corrToggle(this);">show more ▾</a></div>
+        <div class="corr-body" title="Click to expand" onclick="if(!this.parentNode.classList.contains('open'))corrToggle(this);">{{ r.preview.body or '(no text in the email body)' }}</div>
+        <div class="corr-more"><a href="#" onclick="return corrToggle(this);">show less ▴</a></div>
+        {% if r.preview.attachments %}<div class="c2-att">📎 {{ r.preview.attachments | join(' · ') }}</div>{% endif %}
+      </div>
+    {% else %}
+      <div class="corr-preview c2-preview"><div class="corr-body muted">The stored copy of this email wasn't found{% if r.gmail_link %} — <a href="{{ r.gmail_link }}" target="_blank">open in Gmail</a>{% endif %}.</div></div>
+    {% endif %}
+  </div>
+  </div>
+</div>
+{% else %}
+  <div class="card muted">Nothing here{{ ' — all caught up' if status == 'open' }}.</div>
+{% endfor %}
+
+{% if pages > 1 %}
+<p>
+  {% if page > 1 %}<a href="/correspondence?status={{ status }}&search={{ search|urlencode }}&page={{ page - 1 }}">&larr; newer</a>{% endif %}
+  <span class="muted">page {{ page }} of {{ pages }}</span>
+  {% if page < pages %}<a href="/correspondence?status={{ status }}&search={{ search|urlencode }}&page={{ page + 1 }}">older &rarr;</a>{% endif %}
+</p>
+{% endif %}
+<script>
+// Open/close one email preview. The link sits ABOVE the email (always reachable) and again below it when open.
+function corrToggle(el) {
+  var box = el.closest('.corr-preview');
+  var open = box.classList.toggle('open');
+  box.querySelector('.corr-toggle').textContent = open ? 'show less ▴' : 'show more ▾';
+  var body = box.querySelector('.corr-body');
+  if (!open) { body.scrollTop = 0; if (box.getBoundingClientRect().top < 0) box.scrollIntoView({block: 'nearest'}); }
+  return false;
+}
+// No toggles when the whole email already fits in the 4-line preview.
+document.querySelectorAll('.corr-preview').forEach(function (box) {
+  var b = box.querySelector('.corr-body');
+  if (b.scrollHeight <= b.clientHeight + 2) { box.classList.add('fits'); b.removeAttribute('title'); }
+});
+</script>
+{% endblock %}

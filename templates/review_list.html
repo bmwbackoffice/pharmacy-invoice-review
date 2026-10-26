@@ -16,6 +16,7 @@
     {# preserve the active column sort across filter changes #}
     <input type="hidden" name="sort" value="{{ params.sort or '' }}">
     <input type="hidden" name="direction" value="{{ params.direction or '' }}">
+    {% if reason %}<input type="hidden" name="reason" value="{{ reason }}">{% endif %}
     <div>
       <label>Run</label><br>
       <select name="run" onchange="this.form.submit()" style="max-width:240px;">{{ run_options(runs, run) }}</select>
@@ -53,82 +54,131 @@
           style="width:auto;padding:0;margin:0 6px 0 0;vertical-align:middle;"
           {{ 'checked' if show_answered }}> Show answered ({{ answered_n }})</label>
     </div>
-    {% if run or store or vendor or search or show_answered or assigned %}<div><a class="btn secondary" href="/review" style="padding:5px 12px;">clear</a></div>{% endif %}
+    {% if run or store or vendor or search or show_answered or assigned or reason %}<div><a class="btn secondary" href="/review" style="padding:5px 12px;">clear</a></div>{% endif %}
     <noscript><button class="btn" type="submit">Apply</button></noscript>
   </form>
 </div>
-<div class="card" style="padding:0;">
+<style>
+  .rr { display:inline-flex; align-items:center; gap:4px; font-size:12px; font-weight:600; padding:2px 9px; border-radius:999px;
+        margin:2px 4px 2px 0; white-space:nowrap; text-decoration:none; border:1px solid transparent; }
+  .rr-dup { background:#ede9fe; color:#5b21b6; } .rr-vendor { background:#dbeafe; color:#1e40af; }
+  .rr-miss { background:#fef3c7; color:#92400e; } .rr-read { background:#fee2e2; color:#991b1b; }
+  a.rr:hover { border-color:currentColor; } a.rr.on { border-color:currentColor; box-shadow:0 0 0 1px currentColor; }
+  .rr-bar { display:flex; flex-wrap:wrap; align-items:center; gap:2px; margin:0 0 10px; }
+  .rr-bar .lbl { font-size:12.5px; color:var(--muted); margin-right:6px; }
+  .rq td { vertical-align:top; padding-top:10px; padding-bottom:10px; }
+  .rq .head { font-size:14px; } .rq .head b { font-weight:700; } .rq .sep { color:#c0c4cc; margin:0 5px; }
+  .rq .rest { font-size:12.5px; color:var(--muted); margin-top:3px; }
+  .rq .rest summary { cursor:pointer; list-style:none; } .rq .rest summary::-webkit-details-marker { display:none; }
+  .rq .rest summary::before { content:"▸ "; } .rq .rest details[open] summary::before { content:"▾ "; }
+  .rq .full { white-space:pre-line; margin:4px 0 0 12px; padding:6px 9px; background:#f8fafc; border-radius:6px; }
+  .rq .fix { font-size:12px; margin:0 8px 0 0; }
+  .rq .age { font-size:12px; font-weight:600; padding:1px 7px; border-radius:999px; background:#f1f5f9; color:#475569; display:inline-block; margin-top:3px; }
+  .rq .age.old { background:#fee2e2; color:#991b1b; } .rq .age.mid { background:#fef3c7; color:#92400e; }
+  .rq tr.stale td:first-child { box-shadow:inset 3px 0 0 #f87171; }
+  .rq .more { position:relative; display:inline-block; } .rq .more summary { list-style:none; cursor:pointer; padding:4px 9px; }
+  .rq .more summary::-webkit-details-marker { display:none; }
+  .rq .more .menu { position:absolute; right:0; top:110%; z-index:5; background:#fff; border:1px solid var(--line); border-radius:8px;
+                    box-shadow:0 6px 18px rgba(0,0,0,.12); padding:6px 0; min-width:150px; text-align:left; }
+  .rq .more .menu a { display:block; padding:5px 12px; white-space:nowrap; }
+  .rq .tags .pill { font-size:11.5px; margin:0 4px 3px 0; display:inline-block; }
+</style>
+
+{% if reason_chips %}
+<div class="rr-bar">
+  <span class="lbl">Why flagged:</span>
+  {% set _p = [] %}{% for k, v in params.items() if k not in ('reason',) and v %}{% set _ = _p.append(k ~ '=' ~ (v|urlencode)) %}{% endfor %}
+  {% set base = '/review?' ~ (_p|join('&')) %}
+  {% for k, lbl, css, n in reason_chips %}
+    <a class="rr {{ css }} {{ 'on' if reason == k }}" href="{{ base }}{{ '&' if _p }}{% if reason != k %}reason={{ k }}{% endif %}"
+       title="{{ 'Show all' if reason == k else 'Show only items flagged for this' }}">{{ lbl }} {{ n }}{% if k == 'vendor' and vendor_fix_n %} · {{ vendor_fix_n }} vendor{{ '' if vendor_fix_n == 1 else 's' }} to add{% endif %}</a>
+  {% endfor %}
+  {% if reason %}<a href="{{ base }}" style="font-size:12.5px; margin-left:6px;">✕ show all</a>{% endif %}
+</div>
+{% endif %}
+
+<div class="card rq" style="padding:0;">
   <table>
     <thead><tr>
       {{ sort_th('Flagged', 'flagged', params) }}
-      {{ sort_th('Vendor', 'vendor', params) }}
-      {{ sort_th('Store', 'store', params) }}
-      {{ sort_th('Invoice #', 'number', params) }}
-      {{ sort_th('Amount', 'amount', params, numeric=True) }}
-      <th>Status</th><th>Why flagged</th><th>Source email</th><th></th>
+      <th>Invoice <span class="muted" style="font-weight:400; font-size:12px;">· sort:
+        {% for lbl, key in [('vendor','vendor'), ('store','store'), ('#','number'), ('amount','amount')] %}
+          {%- set _q = [] -%}{%- for k, v in params.items() if k not in ('sort','direction') and v -%}{%- set _ = _q.append(k ~ '=' ~ (v|urlencode)) -%}{%- endfor -%}
+          {%- set _dir = 'asc' if not (params.sort == key and (params.direction or 'desc') == 'asc') else 'desc' -%}
+          <a href="?{{ (_q + ['sort=' ~ key, 'direction=' ~ _dir])|join('&') }}" style="color:inherit;">{{ lbl }}{% if params.sort == key %}{{ ' ▲' if (params.direction or 'desc') == 'asc' else ' ▼' }}{% endif %}</a>{{ ' · ' if not loop.last }}
+        {% endfor %}</span></th>
+      <th style="width:150px;">Assigned</th><th></th>
     </tr></thead>
     <tbody>
     {% for it in items %}
       {% set answered = (it.answer or '').strip() %}
-      <tr{% if answered %} style="background:#f7fbff;"{% endif %}>
-        <td class="muted" style="white-space:nowrap;">
-          <span title="review item id">#{{ it.id }}</span><br>
-          {% if it.email_received_at %}
-            <span title="Gmail receive time">{{ it.email_received_at | us_datetime }}</span>
-          {% else %}
-            <span title="Gmail receive time not captured for this email">—</span>
+      {% set w = it.why %}
+      <tr class="{{ 'stale' if (it.age_days or 0) > 14 and not answered }}"{% if answered %} style="background:#f7fbff;"{% endif %}>
+        <td style="white-space:nowrap; width:1%;">
+          <a href="/review/{{ it.id }}" target="_blank" style="font-weight:600;">#{{ it.id }}</a><br>
+          {% if it.age_days is not none %}
+            <span class="age {{ 'old' if it.age_days > 14 else ('mid' if it.age_days > 7 else '') }}"
+                  title="Flagged {{ it.flagged_at | us_datetime if it.flagged_at else '' }}{% if it.email_received_at %} · email received {{ it.email_received_at | us_datetime }}{% endif %}{% if it.run_id %} · run {{ it.run_id }}{% endif %}">
+              {{ 'today' if it.age_days == 0 else (it.age_days ~ ' day' ~ ('' if it.age_days == 1 else 's')) }}</span>
           {% endif %}
-          {% if it.run_id %}<br><span title="classify run">{{ it.run_id }}</span>{% endif %}
         </td>
-        <td>{{ it.vendor_matched or '—' }}</td>
-        <td>{{ (it.store_matched | store_label) or '—' }}</td>
-        <td style="white-space:nowrap; width:1%;">{{ it.invoice_number or '—' }}</td>
-        <td class="num">{{ money(it.amount) }}</td>
-        <td style="white-space:nowrap;">
-          {% if answered %}
-            <span class="pill" style="background:#dbeafe;color:#1e40af;">Answered — pending reprocess</span>
-            {% if it.reviewed_by %}<div class="muted">{{ it.reviewed_by }}{% if it.reviewed_at %} · {{ it.reviewed_at | us_datetime }}{% endif %}</div>{% endif %}
+        <td>
+          <div class="head">
+            <b>{{ it.vendor_matched or 'Vendor unknown' }}</b><span class="sep">·</span>{{ (it.store_matched | store_label) or 'store unknown' }}<span class="sep">·</span>{% if it.invoice_number %}#{{ it.invoice_number }}{% else %}<span class="muted">no #</span>{% endif %}<span class="sep">·</span>{% if it.amount is not none %}<b>{{ money(it.amount) }}</b>{% else %}<span class="muted">no amount</span>{% endif %}
+          </div>
+          <div style="margin-top:4px;">
+            {% for k, lbl, css in w.chips %}<span class="rr {{ css }}">{{ lbl }}</span>{% endfor %}
+            {% if 'dup' in w.reasons and it.duplicate_group_id %}<a class="fix" href="/browse?group={{ it.duplicate_group_id|urlencode }}" title="Show all versions of this invoice">see group</a>{% endif %}
+            {% if 'vendor' in w.reasons %}<a class="fix" href="/reference/vendor_name_map{% if w.vendor_name or it.vendor_matched %}?prefill={{ (w.vendor_name or it.vendor_matched)|urlencode }}{% endif %}" target="_blank" title="Add this vendor spelling to Vendor names, then Apply changes now">add to vendor names</a>{% endif %}
+            {% if 'account' in w.reasons %}<a class="fix" href="/reference/vendor_account_assignment" target="_blank">assign QB account</a>{% endif %}
+          </div>
+          {% if w.rest or w.full %}
+          <div class="rest">
+            <details>
+              <summary>{{ w.rest or 'Full reason' }}</summary>
+              <div class="full">{{ w.full }}</div>
+            </details>
+          </div>
           {% endif %}
-          {% if it.has_pending_upload %}
-            <span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded — pending reprocess</span>
-          {% endif %}
-          {% if not answered and not it.has_pending_upload %}
-            <span class="pill rev">Needs review</span>
-          {% endif %}
-          {% if it.note_count %}<div><span class="pill" style="background:#fef3c7;color:#92400e;" title="internal notes logged">📝 {{ it.note_count }}</span></div>{% endif %}
-          {% if it.assigned_to %}<div><span class="pill" style="background:#ecfdf5;color:#065f46;">👤 {{ it.assigned_to }}</span></div>{% endif %}
-          <form method="post" action="/review/{{ it.id }}/assign" style="margin-top:4px;">
-            <select name="assigned_to" onchange="this.form.submit()" style="font-size:12px;padding:2px 4px;">
+        </td>
+        <td>
+          <div class="tags">
+            {% if answered %}<span class="pill" style="background:#dbeafe;color:#1e40af;" title="{{ it.reviewed_by or '' }}{% if it.reviewed_at %} · {{ it.reviewed_at | us_datetime }}{% endif %}">Answered — pending reprocess</span>{% endif %}
+            {% if it.has_pending_upload %}<span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded</span>{% endif %}
+            {% if it.note_count %}<span class="pill" style="background:#fef3c7;color:#92400e;" title="internal notes logged">📝 {{ it.note_count }}</span>{% endif %}
+          </div>
+          <form method="post" action="/review/{{ it.id }}/assign" style="margin:0;">
+            <select name="assigned_to" onchange="this.form.submit()" style="font-size:12px;padding:3px 4px;max-width:140px;">
               <option value="">— unassigned —</option>
               {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if it.assigned_to == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
             </select>
           </form>
         </td>
-        <td class="muted">
-          <div style="white-space: pre-line; max-height: 140px; overflow-y: auto;">{{ it['question'] or '' }}</div>
-          {% if it.duplicate_group_id %}
-            <div style="margin-top:4px;"><a class="pill" style="background:#eef2ff;color:#4338ca;"
-               href="/browse?group={{ it.duplicate_group_id|urlencode }}"
-               title="Show all versions of this invoice">Group {{ it.duplicate_group_id }}</a></div>
-          {% endif %}
-        </td>
-        <td style="white-space:nowrap;">
-          {% if it.source_email %}<a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">records</a>{% endif %}
-          {% if it.gmail_link %}<br><a href="{{ it.gmail_link }}" target="_blank">Email link</a>{% endif %}
-        </td>
-        <td style="white-space:nowrap;">
-          <a class="btn {{ 'secondary' if answered else '' }}" href="/review/{{ it.id }}">{{ 'View / edit' if answered else 'Review' }}</a>
+        <td style="white-space:nowrap; width:1%; text-align:right;">
+          <a class="btn {{ 'secondary' if answered else '' }}" href="/review/{{ it.id }}" target="_blank">{{ 'View / edit' if answered else 'Review' }}</a>
           <form method="post" action="/review/{{ it.id }}/ignore" style="display:inline;margin:0;"
                 onsubmit="return confirm('Dismiss this item? It leaves the queue without being recorded, and can be restored from Dismissed.');">
-            <button class="btn secondary" type="submit" title="Remove from the queue without recording it"
-                    style="padding:4px 10px;">Dismiss</button>
+            <button class="btn secondary" type="submit" title="Remove from the queue without recording it" style="padding:4px 10px;">Dismiss</button>
           </form>
+          <details class="more"><summary class="btn secondary" title="More">⋯</summary>
+            <div class="menu">
+              {% if it.source_email %}<a href="/browse?email={{ it.source_email|urlencode }}" title="{{ it.source_email }}">Records from this email</a>{% endif %}
+              {% if it.gmail_link %}<a href="{{ it.gmail_link }}" target="_blank">Open email in Gmail</a>{% endif %}
+              {% if it.duplicate_group_id %}<a href="/browse?group={{ it.duplicate_group_id|urlencode }}">Duplicate group {{ it.duplicate_group_id }}</a>{% endif %}
+            </div>
+          </details>
         </td>
       </tr>
     {% else %}
-      <tr><td colspan="9" class="muted" style="padding:18px;">Nothing to review. 🎉</td></tr>
+      <tr><td colspan="4" class="muted" style="padding:18px;">{% if reason %}Nothing flagged for that reason with these filters.{% else %}Nothing to review. 🎉{% endif %}</td></tr>
     {% endfor %}
     </tbody>
   </table>
 </div>
+<script>
+// Close an open ⋯ menu when clicking elsewhere.
+document.addEventListener('click', function (e) {
+  document.querySelectorAll('.rq details.more[open]').forEach(function (d) { if (!d.contains(e.target)) d.removeAttribute('open'); });
+});
+</script>
 {% endblock %}

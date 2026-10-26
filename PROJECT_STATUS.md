@@ -3664,6 +3664,36 @@ button, so it covers new uploads and sweeps the current backlog in one click. `i
   don't). Live replay: 0 of the 32 logged QB-marked records and 0 of the 771 `qb_match_candidates` change;
   0 same-vendor/same-amount/same-store invoice pairs in the app that the old rule conflated. Preventive.
 
+### FEATURE: drag-to-resize table columns on every page (2026-10-15)
+
+Users couldn't always see long cell values (truncated/wrapped). Added a global, reusable column
+resizer in [base.html](templates/base.html) (CSS + a defensive IIFE, try/catch so it can never break a
+page): every table in `<main>` gets a thin grip on each header cell's right edge. Dragging resizes the
+column and STEALS width from the neighbor so the table doesn't overflow; on first drag the table
+switches to `table-layout:fixed` + wrapping and the compact `.trunc` ellipsis is dropped, so widening a
+column reveals the full value. Widths persist per page in `localStorage` (`colw:<path>:<tableIdx>`).
+Default (undragged) tables are unchanged. Verified interactively in the browser pane (served test page):
+drag resizes, reveals the full truncated email, neighbor gives space, and the width persists across reload.
+
+### CHANGE: unified QB-entry export/copy layout for all users (2026-10-15)
+Purged the now-dead per-user export prefs (`qb_export_follow_view` / `qb_export_columns` /
+`qb_export_include_refs`) from all users' preferences JSONB (only Joel had them; 0 remain).
+
+
+QB-entry Excel/CSV export and "Copy Selected" previously resolved columns per-user (qb_export_follow_view
+/ qb_export_columns / qb_export_include_refs), so different users got different layouts (a user with no
+prefs got the full canonical order, not Joel's). Now there is ONE house layout for everyone:
+`QB_EXPORT_LAYOUT = ["Date","Invoice #","Vendor","Account","Amount","Memo","Class"]` (Joel's design;
+Store omitted — not a QB-import column) in [review_app.py](review_app.py).
+- `qb_export` always uses it (the `layout` param is accepted but ignored); `copy_columns` = the same.
+- Removed the per-user export options: `qb_columns` now saves only the on-screen `qb_view_columns`; the
+  Columns ⚙ panel's "Reference columns" + "CSV export" (follow-view / custom layout) sections are gone
+  ([qb.html](templates/qb.html)); export-button tooltip updated. On-screen view-column arrange/reorder is
+  KEPT (display-only; no longer affects copy/export). Stale per-user export prefs in the DB are simply
+  never read now (harmless).
+- Verified: export cells resolve for the 7-col layout on real rows; no remaining references to the
+  removed prefs.
+
 ### FEATURE: review-queue dedupe backstop (collapse duplicate review items) (2026-10-12)
 
 Duplicate detection skips records already flagged for review, so when several copies of one invoice
@@ -6665,3 +6695,464 @@ QuickBooks).
 - "Ready to export" is a single number linking to /qb?store=… (10/14: Maple 36, Madison 18, Refuah 95, Westgate 66,
   3M 18, BMW 10, Lakewood Rx 19, Carepax 1).
 - `last_qb_entry_by_store` returns `ready` only.
+
+### 2026-10-15 — Correspondence triage page (/correspondence)
+- Emails classified 'correspondence' produce no record, so no queue showed them. New page lists them
+  (newest first, 50/page) with sender, subject, received, the classifier's vendor/store/one-line read
+  (emails.info_vendor/info_store/info_note — captured by _upsert_email from now on; older emails have
+  none), a body preview read from the stored .eml/.msg (review_app._email_preview, cached), attachments
+  and the Gmail link. Status on the emails row: corr_status NULL/open | follow_up | handled | ignored
+  (+ corr_note / corr_by / corr_at), changes logged to edit_log.
+- "Always ignore" (from this address / whole @domain / subject contains) creates a correspondence_rules
+  row and applies it to every OPEN correspondence email (database.apply_correspondence_rules). Rules run
+  at end of every classify run, at init, and after a save in Setup > Rules > Correspondence rules; they
+  never override a human decision.
+- Dashboard tile "Correspondence" (open + follow-up), top-nav "Correspondence" (+ Ignore rules).
+- One-time: correspondence_overview.py (--apply) backfills emails.from_address from the stored email for
+  older correspondence (so rules can match) and prints the top senders/domains to triage first.
+- Next (to design as we go): per-type handlers beyond ignore/handled/follow-up (e.g. assign to a person,
+  turn into a review item / reprocess as an invoice, reply drafts).
+
+### Store scans the AI can't tell go to review; 23 store scans re-read (2026-10-15, ~11:20)
+- Why: a Westgate scan (a SureCost purchase order for McKesson) came in typed "unknown" with nothing read from it
+  and was filed as informational, so no one would have looked at it. Joel: send such scans to review.
+- `apply_recordless_gate`: an email from one of our store mailboxes (Setup › Senders; `c["_from_store_scanner"]`,
+  set in `process_source_email` from the From address) that the AI typed "unknown" (or left blank) and read no
+  record from goes to review as a whole email: "This scan came from one of our stores, but the AI couldn't tell
+  what it is and read no invoice, credit memo or payment from it — look at it: answer with the amount, date and
+  store to enter it, or dismiss it if there's nothing to enter." Not when the AI typed it (shipment notice,
+  statement, correspondence), not when it has a record, and not on a reprocess with a reviewer's answer (no loop).
+  Both record-less sentences now say "dismiss" (the review page's button), not "ignore".
+- Run log: a record-less email that goes to review now says "the whole email goes to review" instead of
+  "(informational/non-invoice email)".
+- Re-read (Joel: yes): the 23 store-mailbox emails typed shipment_notice with no record, review item, dismissed
+  item or held order (Westgate 7, 3M 6, Refuah 5, Maple scanner 2, thevitamindesk forwards 2, vitamins@ 1; one
+  Refuah scan is from 3/2/2025). At ~11:18, holding the classify run lock: emails rows set to 'fetched' (edit_log,
+  changed_by "re-read store scans 2026-10-15") and the files moved processed_emails/ → test_emails/. No records,
+  so nothing to back up or re-point. The next scheduled run re-reads them under today's rules: a priced packing
+  slip is held as a sales order, an unpriced one stays a shipment notice, a scan the AI can't tell goes to review.
+- Tests: `UnknownStoreScans` (6) in tests/test_gates.py, including one that runs a fake scanner email through
+  `process_source_email`. Suite at ~11:20: 209 run; the 6 failures/errors all come from the Correspondence page
+  work above (its `corr_status` column isn't in the database until the app or a run applies the migration, and
+  correspondence.html has an ">Ignore<" button that `IgnoreLabels.test_old_labels_are_gone` forbids).
+- Outcome (11:30 run, 8.1 min, 26 emails): of the 23, 14 are still shipment notices (no prices, nothing to enter);
+  7 became excluded-vendor bills, recorded and kept out of QB (Amazon Business ×4 at Refuah, Masters
+  Pharmaceuticals ×3 at 3M); Bened Life #125057 ($346.50, Maple) was held and at once superseded by its invoice
+  (already entered); none came back "unknown". One is WRONG: a held order Masterko "#38730" ($162.00, Maple,
+  pending_sales_orders 428, release 10/18 11:38) is page 2 of delivery slip #33730 (8/12), an upside-down scan
+  whose only table is "items out of stock" (Lavenluv spray, never shipped or billed; #33730's own record notes
+  it). It must be dropped on Sales orders before 10/18 (Claude's drop was refused by the permission check;
+  left for Joel). Prompt gap: a page listing only out-of-stock items reads as a priced packing slip.
+- Found while checking (read-only; nothing changed): `flag_number_misread_duplicates` only compares copies NOT
+  entered in QB, so a waiting copy whose misread twin is already entered is never flagged. 11 waiting invoices
+  have an entered twin (same vendor, store, amount, dates within 7 days, different number). Likely the same bill:
+  Maxi Health/Refuah $5,230.84 #797203 vs #797208; Masterko/3M $1,459.40 #3551 vs #35551; Lantev/Refuah $718.08
+  #9304241 vs #93G4241 and $584.74 #8610704 vs #86I0704; Lantev/Westgate $624.54 + $359.25 #599722/#599723 vs
+  #9AG5445/#9AG5444 (all 9/10); Boiron/Westgate $485.94 #F12612345 vs #FI26123445 and $15.74 #F12612889 vs
+  #FI26122889; Reisman's Bakery/Madison $226.80 #R204977-IN vs #R204977. Probably separate bills: Talent Bridging/
+  Lakewood Rx $1,760 (#7984 8/24 vs #7898 8/17), Boiron/3M $44.59 (#FI24150750 10/9 vs #FI2614901 10/7).
+  Also Masterko/Maple $632.35 #3730 (8/12) and #33730 (8/13) are the same slip and BOTH marked entered (#33730
+  found in QB by the upload match 10/8; #3730 marked entered 10/12): check QB for a double entry.
+  Joel said yes to both (flag those waiting copies; have the sweep compare waiting copies with entered ones too):
+  done, see the next section.
+
+### Misread-number check compares waiting copies with entered ones; blank group ids (2026-10-15, ~12:25)
+- Joel: yes (flag the 9 now; close the gap). `flag_number_misread_duplicates` (DU-16) now also reads copies already
+  entered in QB. Copies of one vendor (standard name), amount and store link when they have the same date (the old
+  rule, any numbers) or numbers one character apart (`_numbers_one_apart`: one changed / missing / extra character,
+  or up to 3 extra characters with a letter at the start or end, R204977-IN / INV1234; the shorter needs 4+
+  characters) with dates up to `MISREAD_NUMBER_DAYS` = 3 apart (`_misread_sets`, union-find). Two entered copies
+  never link to each other; a set needs a waiting copy. Only waiting copies are flagged (duplicate_suspect + reason
+  "… already entered in QuickBooks … Don't enter this copy unless it's a separate bill."); an entered copy keeps its
+  state and only gets the set's duplicate_group_id (edit_log), which is how Possible duplicates shows it beside them
+  (list_duplicate_candidates already pulls every copy of a flagged group). "Not a duplicate" keeps the shared group,
+  so the decision sticks.
+- Bug fixed on the way: a duplicate_group_id of '' counted as a shared group, so copies whose ids were all '' were
+  never flagged. Two Lantev/Westgate pairs (9/24, $553.30 #90H32363 vs #90H3263 and $527.76 #90H32364 vs #90H3264,
+  each a Westgate scan + Lantev's own email, all four waiting) had been missed that way.
+- Dry run on live data at ~12:23 (session forced read-only): 11 sets = the 9 waiting copies with an entered twin +
+  those 2 Lantev pairs. Applied by the 12:30 scheduled run (the sweep runs at the end of every run).
+- Run log line now notes "already entered in QB: [ids]". The return value adds `entered_ids`.
+- Tests: `MisreadNumbers` (tests/test_duplicates.py) and `MisreadNumberSweepVsEntered` (7, tests/test_db_rollback.py:
+  waiting vs entered, misread number + date, separate bills left alone, two entered copies, "not a duplicate"
+  sticks, blank group ids, the set on Possible duplicates).
+- Related, for Joel to decide (prompt): the held Masterko "#38730" was a lone "items out of stock" page; and a
+  sales order recorded as the bill can include backordered lines in its total (Melissa & Doug #27231649, Westgate,
+  $1,485.48 includes 2 lines "On Backorder" = $120.24; waiting for QB entry). On full invoices the AI already leaves
+  out-of-stock lines out (34 records' notes say so).
+
+### 2026-10-15 (later) — Correspondence forwarding + sender-AND-subject rules
+- Forward: corr_forward.py sends a stored email on through the AP Gmail mailbox (gmail.modify already
+  allows send — no re-consent): "Fwd:" + note + original header block + text + original attachments;
+  source = local .eml/.msg, else raw from Gmail by gmail_message_id. Marks the email Handled, note
+  "Forwarded to …", emails.corr_forwarded_to/_at, edit_log row.
+- Rules: correspondence_rules.action 'ignore' | 'forward' (+ forward_to). The page's rule form takes
+  sender AND/OR subject. Forward rules only send emails that arrive after the rule's created_at
+  (database.forward_rule_matches) — never a backlog; run at end of each classify run
+  (corr_forward.run_forward_rules) before the ignore rules.
+- Setup > Rules > Forward contacts (forward_contacts table) = the page's pick-list.
+
+### AI instructions: out-of-stock / backordered lines on orders and packing slips (2026-10-15, ~13:25)
+- Joel: "both". In SYSTEM_PROMPT_TEMPLATE's is_sales_order rule, after "a packing slip with no prices is not a bill
+  at all": (1) lines marked out of stock / backordered / not shipped aren't billed, and a document that lists ONLY
+  such items (a delivery slip's separate "items out of stock" page scanned on its own) is not a bill: no invoice or
+  sales order record (shipment_notice if that's all the email holds); (2) for a sales order or priced packing slip,
+  invoice_amount = the printed total minus the extended amounts of those lines (as printed when the total already
+  leaves them out), total_source stays 'stated', and notes list the lines left out and their total. A one-line
+  exception beside the "re-read the printed total digit for digit" rule points to it.
+- Why: the Masterko "#38730" hold ($162, Maple) was the lone "items out of stock" page of slip #33730; the Melissa &
+  Doug order #27231649 (Westgate, $1,485.48) included two lines "On Backorder" ($120.24) and was recorded as the bill.
+  On invoices the AI already leaves such lines out (34 records' notes), so invoices aren't touched.
+- Applies from the 13:30 run. Not re-read: the Masterko hold still needs Drop order on Sales orders before 10/18,
+  and the Melissa & Doug bill is still $1,485.48 on QB entry (Joel to decide: $1,365.24 shipped, or wait for the
+  invoice). A dry run on those two emails wasn't possible from Claude's shell (no ANTHROPIC_API_KEY there).
+- Test: `OutOfStockLines` in tests/test_rule_decisions.py. Suite: 219 run, only the Correspondence label test fails.
+- ~13:40, Joel asked: the Masterko #38730 hold was dropped (web_db.ignore_sales_order, "joel (via Claude)"). The
+  Melissa & Doug #27231649 record was NOT ignored: Yishai had marked it entered in QB at 13:15 ($1,485.48). Ignoring
+  it here without removing the bill from QB would leave a QB bill the app calls ignored; and an invoice under another
+  number and amount wouldn't match the order, so it would be entered as well. Waiting on Joel.
+
+- (2026-10-15) Rules gained a third condition, To/CC contains (correspondence_rules.recipients_contains vs
+  emails.recipients = To+Cc read from the stored email by corr_forward.fill_recipients, run automatically
+  before any rule matching). Use case: skip anything a staff member (e.g. cspitzer@maplerx.com) is already
+  copied on. All filled conditions must match.
+
+- (2026-10-15) "Not correspondence? Process it as documents…" on each Correspondence card:
+  web_db.requeue_correspondence_as_documents moves the stored email back to test_emails/ + emails.status
+  ='fetched' (same mechanism as requeue_by_vendor.py) so the next run re-classifies it; optional learning
+  text is added to Learnings first (note: any learnings change triggers the gated Phase 1b review-queue
+  re-check on the next run). Emails with status 'fetched' are hidden from the page/counts until processed.
+
+### 2026-10-16 — Needs-reply detection on every email
+- Classifier prompt: new top-level "communication" {needs_response, request, requested_by} + COMMUNICATION
+  rule (human-written requests only; not vendor template wording, notifications, "please process this", or
+  resolved threads). Saved per email at the end of process_source_email via
+  database.save_email_communication -> emails.needs_response / response_request / response_requested_by.
+  Chunked emails: first chunk with needs_response wins. Record extraction is unchanged.
+- Correspondence page/counts/rules/forward-rules now cover email_type='correspondence' OR needs_response:
+  NEEDS REPLY tag, red "Waiting on us" line, link to the email's records; "Show: everything / needs a reply /
+  correspondence only" filter (?kind=reply|corr). Rules only ever change the email's correspondence status.
+- backfill_needs_response.py: one-time check of the last 14 days (--days=N) of processed non-correspondence
+  emails, reusing the exact COMMUNICATION rule text from SYSTEM_PROMPT_TEMPLATE.
+
+### FIX: Creating a forward rule now closes the email it was created from (2026-10-16)
+
+- Before: the "Create rule → forward" button forwarded the current email but left it Open (manual-forward
+  behavior), while the same rule marks every later match Handled. Now the rule's own forward of the
+  current email passes `mark_handled=True` (review_app.correspondence_act, action 'rule'). Manual
+  "Forward" button unchanged (still leaves status alone).
+
+### NEW: Correspondence rule condition "only if sent to someone outside (a vendor)" (2026-10-16)
+
+- `correspondence_rules.outside_recipient_only` (BOOLEAN, default FALSE). When set, the rule matches only
+  if at least one To/CC address (emails.recipients) is outside `database.OWN_EMAIL_DOMAINS`
+  (maplerx.com, lakewoodrx.com, carepax.com, 3mvitamins.com, thevitamindesk.com) and not in
+  `database.OWN_EMAIL_ADDRESSES` (rxstore15@gmail.com — single address; the rest of gmail.com is outside).
+  Applied in both apply_correspondence_rules (ignore) and forward_rule_matches (forward).
+- UI: checkbox on the Correspondence page's Rule row + Setup > Correspondence rules column.
+- Requested use: sender cspitzer@maplerx.com + outside-only + always ignore (Amy's emails to vendors).
+
+### NEW: Whole-domain store entries for the vitamin departments (2026-10-16)
+
+- `classify_emails._addr_store(mapping, addr)`: exact address, else an '@domain' entry. Used ONLY by
+  `_sender_store_hint` and `_contact_store_hint` (scanner-specific logic still needs an exact address).
+- `@3mvitamins.com` -> 3M Pharmacy, `@thevitamindesk.com` -> Maple Pharmacy in sender_store_map AND
+  contact_store_map, inserted by [add_vitamin_domains.py](add_vitamin_domains.py) (idempotent).
+- `_own_email_domains()` now includes 3mvitamins.com and thevitamindesk.com, and no longer treats
+  gmail.com as ours just because one store Gmail (e.g. rxstore15@gmail.com) is in a map.
+
+### FIX: Correspondence search — multi-word (2026-10-16)
+
+- Was one whole-phrase ILIKE, so "crowncare refua" matched nothing. Now every word must appear in at
+  least one field (any order): subject, from, vendor, store, the system's read (info_note), note,
+  response request, To/CC, filename. `web_db.list_correspondence`.
+
+### 2026-10-16 — Request types + type-based correspondence rules
+- database.CORR_TOPICS (payment_reminder, payment_problem, billing_question, document_request, account_change,
+  order_issue, recall, internal_request, notice, promotion, other). Classifier sets communication.topic on EVERY
+  email (REQUEST TYPE paragraph in the prompt) -> emails.topic via save_email_communication.
+- correspondence_rules.topic: "Request type is" condition (alone or with sender/subject/To-CC/outside) in both
+  matchers. Page shows the type as a tag; rule row has a type dropdown + "this type, any sender" link.
+- backfill_request_types.py: types existing Open/Follow-up page emails (--all for every status).
+
+### NEW: Near-number duplicate check (2026-10-19)
+
+- Missed pair (Yishai): Maple, $1,549.83, 9/1/26 — "Zahler" #INV/2026/511123 (store scan) vs "Advanced
+  Nutrition by Zahler" #INV/2026/51123 (vendor email). Both entered in QB. Exact-number dedup can't match.
+- `check_duplicate` now returns **near_possible** when nothing else matched but a prior has: same store,
+  same non-zero amount, related vendor (same key / one name inside the other / fuzzy ≥90), invoice #s one
+  character apart (letters+digits only, ≥6 chars), invoice dates within 7 days. Treated like "possible"
+  (flagged, grouped, kept in history) — never auto-ignored; not used to auto-resolve payment reminders;
+  never goes through the answered-revision supersede branch.
+- [find_near_number_dups.py](find_near_number_dups.py): READ-ONLY report of existing live pairs, BOTH-in-QB first.
+- Refined same day after the first report (18 pairs): a one-character CHANGE now counts only for look-alike
+  characters (`_CONFUSABLE`: 1/I/l/7, 0/O/D/Q/G, 5/S, 2/Z, 8/B/3/6, 6/G/9 ...); adding/dropping a character
+  still counts. Drops The Monsey View 1509881/1509882 and 1510237/1510238 (real consecutive invoices).
+  Report now has `--flag` (marks each pair possible-duplicate in one group; never ignores; edit_log).
+- First report: both-in-QB = Lantev 86I0704/8610704 + 93G4241/9304241 (Refuah), Zahler 090098/09098 +
+  51123/511123 (Maple), Maxi Health 797208/797203 (Refuah, $5,230.84). Not yet in QB: 9 McKesson pairs
+  (10-digit vs 9-digit read) + 2 Lantev Westgate.
+- Excluded (do-not-enter) vendors are skipped: `_near_number_duplicate` returns None when the record is
+  skip_qb_import; the report filters skip_qb_import and Exclude-from-QB vendors (Joel: McKesson etc. must
+  not land on Duplicates). Expected re-run: 5 both-in-QB pairs + 2 Lantev Westgate.
+- Exact-number misses seen in the report (McKesson 7652009400 ×2 live) are excluded-vendor records:
+  apply_duplicate_checks skips flagged records, and excluded-vendor flagged records never go to review,
+  so they're never deduped. Harmless for excluded vendors; for normal vendors flagged copies are deduped
+  after the review answer.
+
+### 2026-10-19 — Follow-up rules + assigning follow-ups
+- emails.corr_assigned_to; correspondence_rules.assign_to; rule action 'follow_up' (apply_correspondence_rules now
+  handles ignore AND follow_up: open matches -> Follow up, assigned to assign_to). Same timing as ignore rules.
+- Correspondence page: "assign to…" dropdown next to Follow up (also "Update follow-up" to reassign), assignee
+  shown on the card, "my follow-ups" filter (?mine=1). Rule row: "always mark Follow up…" + assignee.
+- My work lists correspondence follow-ups: assigned ones under that person, unassigned in the shared pool.
+
+### 2026-10-19 — "Similar" counts + filters on Correspondence
+- Each card: "Similar: N open / M total" from the same address, the same @domain (skipped for public mail
+  services -- review_app._PUBLIC_MAIL_DOMAINS) and the same request type; counts across all statuses
+  (web_db.correspondence_similarity). Each links to /correspondence?status=all&sender=...|topic=...
+- Filters ?sender= (address or @domain, substring of From) and ?topic=; "Showing only: ... x" bar; filters
+  carried through tabs, search and every action's redirect (back_sender/back_topic).
+- Rule row pre-fills from the active filter (sender filter -> sender box; topic filter -> type selected,
+  sender blank). NB: in correspondence_page the loop var is `from_hdr`, not `sender` (that's the filter param).
+
+### 2026-10-19 — Attached emails (message/rfc822) are now read
+- Bug: _iter_leaf_attachments never descended into attached EMAILS, so their text and their own files were
+  silently skipped (Sam's "Sushi charges": 8 That Sushi Spot receipts, $87.77 each, one per order, delivered
+  to Refuah/Madison/Westgate/3M; Schwartz #232266 PDF; Frier & Levitt; Community Connections receipt).
+- Fix: classify_emails._attached_emails() appends each attached email's headers+body to the text the model
+  reads ("===== ATTACHED EMAIL i of n ====="), and the files inside attached emails join the attachment list.
+- requeue_attached_emails.py (dry run / --commit) re-runs the 5 affected emails (backs up their rows first).
+- Correspondence page switched to the two-column layout (email on the right; Forward / Rule / Process-as-
+  documents collapsed into links); previous template in _tmp_view/correspondence.html.bak_20261019_pre_v2.
+
+## 2026-10-19 Misread-duplicate check: same-email copies
+- _misread_sets no longer links two copies from the SAME email with different invoice numbers (the 8 That Sushi Spot receipts were flagged as 4 duplicate pairs and hidden from /qb). Backup: _tmp_view/classify_emails.py.bak_20261019_misread_same_email.
+- diagnose_review_4017_4001.py: shows review items 4017/4001; --fix clears the false duplicate flag on the sushi bills.
+- Stale review items after a reprocess: dismiss_stale_reprocessed_reviews (after save_review_queue) auto-dismisses an email's older review items when the reprocess produced records and flagged nothing new; only unanswered/unassigned/no-notes items; restorable from Dismissed; logged as STALE-REVIEW. Backup: _tmp_view/classify_emails.py.bak_20261019_stale_reviews.
+
+## 2026-10-20 Scanned documents never "need a reply"
+- save_email_communication forces needs_response=FALSE for non-.eml/.msg sources; _apply_standing_rules clears still-open ones on startup (Monbar #1018 PDF with handwritten "zelle $44.40" note showed as NEEDS REPLY). Correspondence preview no longer dumps raw PDF bytes. My work: kind column widened (CORRESPONDENCE overlapped titles).
+
+## 2026-10-20 Correspondence: assigned-to filter on Follow up
+- Dropdown next to search on the Follow up tab: anyone / Unassigned / each user, with counts (web_db.correspondence_assignee_counts; list_correspondence assigned="-" = unassigned; ?assignee= param kept through actions).
+
+## 2026-10-20 Review queue redesign
+- review_reasons.py: splits the "why flagged" text into reason chips (duplicate, vendor not in list, no QB account, store, date, amount, total mismatch, page, attachment, hard to read, unknown doc) + one leftover line; repeated sentences removed. Pure regex, no AI.
+- /review: reason-count chips double as filters (?reason=), "N vendors to add" on the vendor chip, fix links (see group / add to vendor names prefilled / assign QB account), age badge (amber >7d, red >14d + red edge), one-line vendor·store·#·amount, Needs-review pill and run id dropped (run id in age tooltip), records/Gmail/group in a ⋯ menu. Backups: _tmp_view/review_list.html.bak_20261020_pre_v2, review_app.py.bak_20261020_review_v2.
+
+## 2026-10-20 Setup pages: Vendor names speed
+- Row Save is in place (fetch, X-Inplace header, JSON) - no full-page reload; "Saved" tick; filter keys updated.
+- Vendor names / Vendor -> account: the recheck of existing records (standardization backfill + excluded skips + statement reconcile) runs in a background thread (_start_vendor_recheck; saves during a run fold into one more pass); page polls /reference-recheck-status and shows the result.
+- Filter: debounced, tbody detached while toggling (one layout pass), "N of M shown", remembered per page in sessionStorage.
+- Backups: _tmp_view/review_app.py.bak_20261020_ref_speed, reference.html.bak_20261020_ref_speed.
+- Follow-up: Setup rows now render as plain text; inputs live in inert <template>s and go on the page only on Edit (or double-click a cell); Save/Cancel in place. Class-rule sync for vendor tables moved into the background recheck. Backup: _tmp_view/reference.html.bak_20261020_ref_speed2.
+- Setup table readability: no mid-word breaks (overrides resizable-table wrap), min widths per column type, narrow checkbox headers, sideways scroll; audit cell is one line "who · date" (full history in tooltip), header "Last change".
+
+### UI: "Use the standard name for all stores" on Setup > Vendor names / Account names Add form (2026-10-20)
+- Two buttons next to Add (empty boxes only, typed boxes untouched): "Use the standard name for the 5
+  pharmacies" (3M, Madison, Maple, Refuah, Westgate) and "Use it for all entries" (adds BMW, Lakewood Rx, Carepax).
+  Template-only (reference.html). Note: an empty store box already falls back to the standard name for
+  qb_vendor / qb_account, so filling is optional but makes the per-store names explicit.
+
+## 2026-10-20 Review item page redesign
+- review_detail.html: summary bar (vendor/store/#/amount, id, age, assign, Gmail + records links) -> "What's wrong" reason chips with fix links (see group, add to vendor names prefilled, assign QB account, enter amount/date/choose store -> opens Quick fix + focuses field, upload the document) -> one "Resolve it" box with tabs Quick fix / Answer (AI draft folded inside) / Upload files / Dismiss; default tab by reason; #fix/#answer/#upload/#dismiss hash opens a tab -> folded Details / Other records / Notes (open when any) / Flag for an admin. Document sticky on the right. Backup: _tmp_view/review_detail.html.bak_20261020_pre_v2.
+
+### NEW: Request type "Thank-you / acknowledgment only" (2026-10-20)
+- `database.CORR_TOPICS` + classifier prompt: `acknowledgment` = the sender's NEW text (above the quoted
+  thread, minus greeting/signature) is only thanks / got it / received / ok, no request or new info, and
+  no attachment of its own. Code guard `_has_real_attachment(path)` turns it back to `other` if the email
+  carries any attachment except a small inline image (<100 KB); read error -> treated as attached.
+- Use: rule with Request type = Thank-you only -> always ignore (Setup > Correspondence rules, or the
+  Rule row on the Correspondence page). Applies to emails classified from now on (older ones keep their type).
+
+## 2026-10-20 Vendor-only review items resolve after adding the vendor
+- classify_emails.resolve_vendor_review_items: unanswered queue items whose vendor now resolves in Vendor names -> answered "record it normally" when nothing else was flagged (reprocessed by the same run), else just the vendor sentence is dropped. Runs as Phase 0 of every classify run and in the web background recheck after a Vendor names / Vendor -> account save. resolve_vendor_reviews.py = manual dry run / --commit.
+
+## 2026-10-20 Store-preferred dedup: number tags
+- _num_core: invoice # without a short trailing letter tag or INV/IN prefix (R205029-IN = R205029). resolve_store_preferred_duplicates clusters on it (differing printed numbers also need the same date), and runs again right after the misread flagger so a new scan+vendor pair settles in the same run. Backup: _tmp_view/classify_emails.py.bak_20261020_suffix_dup.
+
+### Duplicates already settled by QuickBooks resolve themselves (2026-10-20)
+- Classifier, store_preferred branch: when the earlier identical copy (same vendor/#/amount/store) is
+  already entered in QB, the new copy is auto-ignored [entered-preferred] instead of flagged "verify
+  manually". (store_conflict -- different store -- and amount differences still go to a person.)
+- [resolve_entered_duplicates.py](resolve_entered_duplicates.py): one-off for open sets; keeps the single
+  entered copy via web_db.keep_and_ignore_others when all live copies are identical; dry-run default.
+- resolve_entered_twin_duplicates: waiting copy of a bill already entered in QB (same std vendor/store/amount/date, # core equal, e.g. R204977 vs R204977-IN) is set aside automatically (restorable). Runs every classify run after the misread flagger; also in resolve_store_preferred.py.
+
+## 2026-10-20 Page order
+- Prompt: page_order may now also be set from unmistakable content when a document has no printed page numbers (letterhead / Invoice # / bill-to page is page 1; a line-item tail ending with Total Amount / signature comes after). Triggered by MasterKo 3M #35551 (saved as 3551) scanned tail-first.
+- fix_page_order.py "<Drive link or name>" 2,1: reorders a saved PDF, updates the Drive copy in place (same link) + local copy; backup in _tmp_view/page_order_backups/.
+
+### QuickBooks register + "in QuickBooks once / twice" duplicate settling (2026-10-20)
+- Joel: if the bill is in QB once and the copies differ only non-monetarily (misread number, vendor spelling),
+  auto-resolve; only "entered twice" needs attention, in its own queue.
+- `qb_register` / `qb_register_coverage` (database.MIGRATIONS): every Bill/Credit row of each QB export
+  upload; per store, an upload replaces the rows in the date span it covers (so a bill deleted in QB drops
+  out on the next upload). Written by qb_match.process_qb_export.
+- `dup_settle.settle_duplicate_sets()`: sets with same store + amount + related vendor + numbers equal or a
+  misread apart, ≥1 copy entered. Count in QB = matching register bills (+ copies marked entered after the
+  export that it can't see); no export covering the date -> count = the app's entered marks.
+  1 -> keep_and_ignore_others(entered copy, prefer QB's number); ≥2 -> invoices.qb_twice note.
+  Runs at the end of each classify run and each QB upload; resolve_entered_duplicates.py = manual/dry-run.
+- Duplicates page: red banner "N bills entered twice in QuickBooks", those sets first and outlined, ?twice=1.
+
+## 2026-10-20 Possible duplicates: keep with a corrected #
+- "Keep, but fix the #..." under Keep this one (only copies not entered in QB): use another copy's # or type one. keep_and_ignore_others first, then web_db.set_kept_number (record + its history-ledger row + edit_log; skips the duplicate re-check, which would flag the keeper against the copy just set aside).
+- Page order prompt: content-based ordering (see above) confirmed with Joel.
+
+### NEW page: QB entry > "In QB twice?" (/qb-reconcile/doubles) (2026-10-20)
+- `web_db.qb_double_entries(show)`: pairs of bills in qb_register (uploaded QB exports) with same store +
+  amount + vendor (std name or related), dates ≤10 days apart, and same number / one-character misread /
+  no number + same date. "Not a duplicate" -> qb_double_dismissed (keyed on the bills' own details, so it
+  survives re-uploads); "put back" restores. Only bills from uploads made after 10/20 are known.
+- dup_reasons.py + short_dup_reason filter: Possible duplicates "Why flagged" shows one short line (misread / store-scan kept / first-arrived / revised amount / entered twin...), full text in the tooltip.
+- Same day: cross-store check — a pair across two stores' QB files counts only when vendor, invoice number,
+  date and amount are all identical ("same bill in two stores' QuickBooks"). Dashboard (Work): new tile
+  "In QuickBooks twice?" (open pairs) and the Possible duplicates tile notes "(N entered twice in QuickBooks)".
+
+### Needs-reply: a vendor's question inside a staff forward doesn't count (2026-10-20)
+- Joel: Amy forwarded Nigun Music's "please let me know" (+ invoice 217098) to invoices@ only to get it entered;
+  she's handling the vendor. Prompt: a vendor request that's only inside a thread one of our own staff forwarded
+  doesn't make needs_response true; only the forwarder's own words count (beyond "please process").
+- Code guard `_forwarded_outside_request(text, comm)`: sender is ours (database.OWN_EMAIL_DOMAINS/ADDRESSES)
+  and requested_by/request names an outside address -> needs_response False (logged in the run output).
+
+### Request type "Automatic reply / out of office" (2026-10-21)
+- CORR_TOPICS `auto_reply` + prompt. Code `_is_auto_reply(path, text)` forces it (and needs_response False). Header markers = certain; subject "Automatic reply:"... only at the START (RE:/FW: replies never) and only when no person asked anything
+  on RFC 3834 Auto-Submitted≠no, X-Autoreply/X-Autorespond, Precedence auto_reply, or subject "Automatic
+  reply:", "Auto-Reply", "Out of Office"... Bounces deliberately NOT included.
+- Use: rule Request type = Automatic reply -> ignore. mark_auto_replies.py backfills open ones (dry-run default).
+
+## 2026-10-21 Prompt: invoice # field + ghost pages
+- invoice_number: must come from the Invoice No. field; Our Order No. / Customer P.O. / Customer No. / Sales Order / A/C never (Lantev Westgate scan recorded OUR ORDER NO. 599723 instead of INVOICE NO. 9AG5444, record 1970).
+- blank_pages: also a washed-out ghost (carbon back copy / show-through / too-faint duplicate) of another page of the same record when that page is the clear version. Same Lantev scan had a faded yellow carbon as page 1.
+
+## 2026-10-21 Quick fix: vendor
+- Quick fix gets a Vendor field (datalist of Vendor names standard names), shown first when the item has no vendor or "Vendor not in list". Answer line "Vendor: <standard name>"; classify parse_reviewer_fixes/apply_reviewer_fixes set vendor_matched in code before the gates (vendor standardization then resolves it). "pick from the list" link on the vendor chip. Triggered by review #3583 (illegible handwritten vendor).
+
+## 2026-10-21 No-number duplicates
+- flag_numberless_duplicates: waiting invoices with NO invoice # sharing standard vendor + store + amount with another no-number copy dated within 7 days, from a different email -> flagged (never ignored) as one set on Possible duplicates. Runs every classify run; also in resolve_store_preferred.py. Triggered by Kalitzom $805.00 3M, two scans of one handwritten slip (one date misread 9/29 for 9/24).
+
+## 2026-10-21 "In QuickBooks twice" from the app's own marks
+- web_db._app_entered_twice: a duplicate group with 2+ invoices marked entered in QB (set-aside copies included) is listed on /qb-reconcile/doubles (kind app_marks, purple) until a QuickBooks export of that store, uploaded after the later entry and covering the bill date, holds the bill at most once (_qb_same_bill: store, related vendor, amount within $1, date within 10 days, number equal / one off / same core / missing) -- then it drops off by itself. If the newer export shows it 2+ times it stays, with that note. Not a duplicate dismiss works as usual. Triggered by Lantev Refuah $718.08 #93G4241 (entered 10/8, QB shows $718.00) + #9304241 (marked entered by Yishai 10/15, set aside 10/21).
+- Follow-up: app_marks pairs must also look like one bill (same store, amount within $1, dates within 10 days, related vendor) -- a shared group id alone had paired Lantev $624.54 with Ysf Trading $1,722.96. Note shortened to one line.
+
+## 2026-10-21 UNFI read twice under two numbers
+- Removed the 2026-10-19 same-email exception in _misread_sets (UNFI Maple $206.45: one email, same bill scanned twice, read as INV 93055097 and coversheet 33625479, both entered in QB). Sushi pairs to be protected with mark_not_duplicates.py --sushi (shared group, no flag = reviewed).
+- Prompt: UNFI Document # INV# is the invoice number, never COVERSHEET#; coversheet/batch/manifest/route numbers never; the same document twice in one email = ONE record.
+- /qb-reconcile/doubles: new kind same_day (same store/vendor/amount/date, unrelated numbers).
+
+### UI: Change requests hide Done by default (2026-10-21) — 'Show done (N)' checkbox brings them back (requests.html, client-side).
+- app_marks also pairs entered invoices never put in one set: same store + standard vendor + amount + date (key app|ids:...). diagnose_qb_bill.py <amount>: read-only register/coverage/twice-page check.
+
+### Setup vendor search: '&' = 'and', spaces/punctuation ignored (2026-10-21) — reference.html Filter box + web_db.vendor_lookup (SQL regexp_replace normalized LIKE alongside the plain ILIKE).
+
+### Dashboard notifications (2026-10-21)
+- web_db DDL user_notifications; set_request_status inserts one for the submitter when an admin changes a
+  change request's status (skip if unchanged or self). Dashboard shows unread ones at the top (open / ✕ /
+  dismiss all) -> POST /notifications/dismiss. list_notifications / dismiss_notifications in web_db.
+
+## 2026-10-21 Prompt: the final amount due
+- invoice amount = the final "Please pay / Amount due / Balance due / Net total" figure after charges, fees, discounts; a merchandise-summary / subtotal table is not it. UNFI Maple 8/17 (record 768): read $174.19 from the merchandise summary; bottom NET TOTAL 179.44 <-- PLEASE PAY. Its # was also the coversheet (33572112); Document # reads INV#92839613.
+
+## 2026-10-21 QB corrections + UNFI check
+- qb_corrections table (MIGRATIONS): editing amount / # / date / vendor / store / tax / shipping on a record already entered in QB opens a correction (one open item per record+field, old = what QB has, latest new value; editing back closes it). /qb-corrections page (To do / Done / All, "Done in QB" + note), My work kind "QB fix", dashboard tile, nav under QB entry; the edit page flashes a note.
+- check_unfi_invoices.py: one short AI read per UNFI PDF for DOCUMENT # and PLEASE PAY total; reports wrong # / amount; --fix corrects records not in QB (in-QB ones listed to fix on their edit page -> QB corrections).
+- Follow-up (Joel): records already in QB are NOT changed. update_record_field returns "pending" and only opens a QB correction; the record takes the new value on Done in QB (qb_confirmed=True) or when resolve_qb_corrections_from_register finds a newer export (uploaded after the change, covering the date) showing the new amount / # / date -- runs after every QB export upload and when /qb-corrections opens. check_unfi_invoices.py --fix sends in-QB fixes to QB corrections. Dashboard tile + My work already in.
+
+### NEW page: Records > Sales tax (/sales-tax) (2026-10-21)
+- Bills with sales_tax > 0 (not duplicate-ignored / ignored), grouped by vendor; 'OK to charge' sets
+  vendor_name_map.sales_tax_ok (+ _by/_at, also a Setup checkbox) and the vendor's bills drop off; tabs To check /
+  OK'd vendors / All, store filter. Dashboard Work tile 'Sales tax charged'. web_db.list_sales_tax_bills,
+  sales_tax_open_count, set_vendor_sales_tax_ok.
+
+## 2026-10-21 Twice page: Mark resolved + per-page edit rights
+- /qb-reconcile/doubles: "Not a duplicate" -> "Mark resolved" with a reason dropdown (extra bill deleted / bill corrected / two real bills / only once / other) + optional note, stored as the dismiss note; tab "Resolved".
+- users.edit_pages + web_db.WRITABLE_PAGES (In QuickBooks twice?, QB corrections, Correspondence): a read-only user can be allowed to change things on those pages (Users > Edit checkboxes). _read_only_guard lets their POSTs through on those paths; render() sets page_writable so base.html drops the read-only class there.
+
+## 2026-10-22 QB match review: which amount is right
+- Open record opens in a new tab. When QB and the bill amounts differ, Confirm splits into "Match - QuickBooks is right" (record takes the QB amount, logged) and "Match - the app is right" (QB correction: QB amount -> bill amount). qb_confirm_candidate(right="qb"|"bill").
+
+### API cost cuts (2026-10-23) — from logs/scheduled_runs.log analysis (10/12–10/23: ~$120 est. classifier;
+new email 56%, whole-queue learnings re-check 28%, answered items 16%; output tokens ≈ 68% of cost; plus 345
+timed-out calls, two 6-page 3M scans retried 44 runs each)
+- `_create_message` now STREAMS (raw httpx SSE): `timeout` = max silence between chunks; overall cap
+  STREAM_MAX_SECONDS=900. classify_with_retry: a timeout isn't retried in the same run. An email whose API call
+  fails in API_FAIL_RUNS_LIMIT=2 separate runs goes to review (logs/api_failures.json, CLASSIFY_RUN_ID).
+- Learnings re-check: `_pick_recheck` — on a learnings change only queue items whose vendor (distinctive word)
+  appears in a NEW learning line (logs/learnings_snapshot.txt); whole queue once a day from RECHECK_FULL_HOUR=19
+  (logs/learnings_full_recheck.json). Answered items unaffected (every run).
+- Prompt cache TTL 1h on the system block (runs are 30 min apart). Prompt asks for minified JSON + one-sentence
+  free-text fields. Not done: omitting null fields (code indexes some keys directly).
+
+## 2026-10-23 Sales tax page: vendors through aliases
+- list_sales_tax_bills resolves the standard vendor from Vendor names (names + aliases) when a bill has none saved -- excluded-vendor bills (skip_qb_import) never get standard_vendor, so Parmed / Parmed Pharmaceuticals showed as two vendors. OK-to-charge applies to them too; sales_tax_open_count follows the same list.
+- Per-bill OK: invoices.sales_tax_ok_by/at; "OK this bill" / undo on each row (/sales-tax/bill-ok); open list excludes OK'd bills, OK list includes them.
+- Per-store OK: sales_tax_ok_stores (standard_vendor, store); "OK for this store" (store picker of the vendor's stores) + "undo store" on its bills (/sales-tax/store-ok). OK-ness now decided per bill in list_sales_tax_bills (vendor all stores / vendor at the bill's store / the bill).
+- Sales tax page also re-resolves a saved standard_vendor that is no longer in Vendor names (2 Parmed bills carried an old "Parmed"). fix_stale_standard_vendors.py [--commit]: fixes such stale names on records (standard_vendor only, logged).
+
+## 2026-10-23 Twice page: credits too
+- qb_double_entries pairs QuickBooks Credit rows as well (credit with credit, bill with bill, grouped by type + absolute amount), same rules; a "Credit" badge on those boxes. Credit pair keys get a "|credit" suffix (bill keys unchanged, so resolved marks stick).
+- Bill vs credit pairs (kind bill_credit): same store, vendor, absolute amount, SAME bill # (both present) and SAME date -- one document entered once as a bill and once as a credit.
+
+### NEW page: Dashboard > Daily report (/reports/daily) (2026-10-26)
+- Joel: "how many items are being processed on daily basis and its breakdown ... maybe separate report page".
+- `web_db.daily_report(days)` (7/14/30/60/90; anything else -> 14, capped at 120): per day, newest first --
+  emails received (Gmail receive time; manual uploads on their upload day; rows with no `source` are review
+  documents re-read under their own name, not emails) split by type (invoice / payment / statement /
+  shipment_notice / correspondence / other); bills (invoice records saved that day, set-aside duplicates left out),
+  for_qb (not skip_qb_import), bills_amt; credit memos; payments (duplicates left out); sent to review
+  (runs.n_review summed by run day); entered in QB (invoices + credit memos marked by a PERSON that day, the
+  dashboard's rule: no "... via ..." / "auto..." marks; $ = invoices); duplicates set aside (invoices + payments,
+  coalesce(duplicate_ignored_at, date_added) because automatic set-asides at save time carry no timestamp).
+  Plus totals and a by-store table (period bills / entered; ready to export + last entry from last_qb_entry_by_store).
+- Page (review_app.daily_report_page, templates/daily_report.html): period buttons, Download CSV
+  (/reports/daily.csv), six total tiles, a stacked column chart of emails per day by type (server-side SVG,
+  `_daily_chart`: categorical slots 1-5 in fixed order + gray Other, validated with the dataviz palette checker;
+  hover / arrow-key readout built with textContent), the day-by-day table (weekend days in gray text) and By store,
+  definitions in "What the numbers mean". Visible to read-only users (GET).
+- Menu: Dashboard now has a dropdown: Daily report, Scheduled runs (Scheduled runs had no menu entry).
+- Tests: tests/test_daily_report.py (7: each column counts what the page says, period/totals, chart geometry,
+  page for a read-only user, CSV, menu). tests/test_my_work.py: stubbed list_correspondence_follow_ups and
+  list_qb_corrections (My work gained them 10/19 and 10/21; live data was leaking into the test's counts).
+- Last 30 days (to 10/26): 2,015 emails (94 a weekday, 12 a weekend day; 77% invoices), 1,424 bills ($1.10M; 498
+  for QuickBooks), 364 payments, 512 sent to review, 549 entered in QB by people ($696K), 555 duplicates set aside.
+  Busiest day 10/14 (167 emails).
+
+### Whole-app review (2026-10-26) — findings, nothing below changed yet unless marked (Joel to decide)
+- Data, read-only audit: the 241 bills waiting for QB entry all have store/vendor/date/amount, QB names and a Drive
+  document; no unflagged same-number duplicates; no overdue sales-order holds; runs clean since the 10/23 API fix.
+- NO DATABASE BACKUP: PostgreSQL is local (localhost:5432, 37 MB), no pg_dump job anywhere (pg_dump 18 is
+  installed). A disk failure loses every record, review answer, entered mark, Setup table, learning and edit log.
+- Statement lines status 'missing' that are ALSO not in the QB register (qb_register, uploads since 10/20):
+  Nutri-Supreme 11 lines $16,909.70 (Aug 7 - Sep 23; pharmacy registers are complete, so likely never entered),
+  Compudime 11 lines $10,626 (June-July, back office; BMW/Lakewood Rx registers are thin, so less certain), MasterKo
+  2 lines $710 (9/23), Bagel Nosh $78, credits Kayco -$25, Lantev -$152.10. No statement line is assigned to anyone.
+  5 'missing' lines ARE in the QB register (Lifeseed, HealthSource x2, Chester x2): the check doesn't clear lines
+  found there.
+- Back-office bills not entered: all 18 bills waiting > 30 days are BMW / Lakewood Rx (oldest 8/10; Sageteq $4,080,
+  Talent Bridging $3,520, Schwartz $2,425, Compudime, Microsoft, SRFax, Anthropic, PDF-XChange; ~$10.7K).
+- Documents open WITHOUT login: app.mount('/invoice_files' | '/payment_files' | '/review_pending', StaticFiles)
+  has no auth (checked: GET of a stored invoice PDF with no session -> 200). 2,206 / 1,962 / 1,744 files; payment
+  files can show card / check details. Fix would add a login check for those paths (QB memo links then ask to sign
+  in once per PC; login should then return to the link -- it always goes to /review today).
+- Bug: save_email_communication INSERTs an emails row for a re-read review document (split PDF/PNG): 71 rows with
+  no status / source / received_at since 10/19 (+1 'fetched' since 10/6, "unknown - Prodermix - 104507 ..."). Fix:
+  for non-.eml/.msg names only UPDATE an existing row; delete the junk rows.
+- Audit gap: automatic duplicate set-asides at save time don't stamp duplicate_ignored_at/by (646 of 791 invoices,
+  128 of 145 payments).
+- init_db (82 ALTER TABLE ... IF NOT EXISTS) runs in the web app on the first page that needs the classifier after
+  a restart (classify_emails._database) -- with a run in progress it can queue behind the run's locks and stall both
+  (the 10/14 pile-up). Suggest SET lock_timeout in init_db and continue on timeout.
+- dup_settle.settle_duplicate_sets compares store / amount / number / vendor across a set's copies but not dates.
+- Non-admin reviewers can change Setup (incl. Exclude from QB), add/edit learnings, upload QB exports, bulk-mark
+  entered (delete is admin-only). Session key, bcrypt passwords, escaping, whitelisted SQL, Chat tools, file-name
+  sanitizing: fine. CSV exports don't neutralize leading = + - @ (low). No login lockout; plain http on the LAN.
+- Process: nothing committed since 6d83277 (10/14); 12 days of several chats' work only in the working tree.
+- Layout: Possible duplicates sits under Records (a QB-entry work queue); Learnings under Chat (belongs in Setup);
+  Flags / Change requests under Review queue; Payments under QB entry while "Payments to enter" (533) has never been
+  used (no payment ever marked entered); the nav wraps to 3 rows under ~600px and the sticky header takes ~1/3 of the
+  screen; login lands on /review, not My work; dashboard Work = 14 equal tiles (money-critical ones not first;
+  Statement exceptions shows no $); Records page renders up to 2,000 rows (3.6 MB HTML); Correspondence uses
+  "Ignore" where the rest of the app says "Dismiss" (IgnoreLabels test fails on correspondence.html).

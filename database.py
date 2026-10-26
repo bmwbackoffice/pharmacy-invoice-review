@@ -535,6 +535,40 @@ CREATE INDEX IF NOT EXISTS qb_unmatched_rows_pending
 # every startup (all IF NOT EXISTS). Kept separate from DDL so ordering is clear.
 # Existing rows get NULL run_id/flagged_at (pre-tracking) — nothing breaks.
 MIGRATIONS = """
+-- QuickBooks register (2026-10-20): every Bill/Credit row of each uploaded QuickBooks export, so the app
+-- knows how many times a bill is in QuickBooks (dup_settle). Each upload REPLACES, per store, the rows in
+-- the date span it covers (qb_register_coverage), so a bill deleted in QuickBooks drops out on the next upload.
+CREATE TABLE IF NOT EXISTS qb_register (
+    id             SERIAL PRIMARY KEY,
+    batch_id       INTEGER,
+    qb_store       TEXT,
+    qb_type        TEXT,
+    qb_date        DATE,
+    qb_num         TEXT,
+    qb_name        TEXT,
+    qb_std_vendor  TEXT,
+    qb_amount      NUMERIC
+);
+CREATE INDEX IF NOT EXISTS qb_register_lookup ON qb_register (qb_store, qb_amount, qb_date);
+CREATE TABLE IF NOT EXISTS qb_register_coverage (
+    id           SERIAL PRIMARY KEY,
+    batch_id     INTEGER,
+    qb_store     TEXT,
+    date_from    DATE,
+    date_to      DATE,
+    uploaded_at  TIMESTAMPTZ DEFAULT now()
+);
+-- "Possibly in QuickBooks twice" pairs someone marked as NOT duplicates (QB reconcile > Double entries).
+-- Keyed on the two bills' own details (not qb_register ids, which change on every upload).
+CREATE TABLE IF NOT EXISTS qb_double_dismissed (
+    id            SERIAL PRIMARY KEY,
+    pair_key      TEXT UNIQUE NOT NULL,
+    note          TEXT,
+    dismissed_by  TEXT,
+    dismissed_at  TIMESTAMPTZ DEFAULT now()
+);
+-- A duplicate set whose bill is in QuickBooks twice (dup_settle): the note shown on the Duplicates page.
+ALTER TABLE invoices      ADD COLUMN IF NOT EXISTS qb_twice TEXT;
 ALTER TABLE emails        ADD COLUMN IF NOT EXISTS from_address TEXT;
 ALTER TABLE emails        ADD COLUMN IF NOT EXISTS run_id TEXT;
 ALTER TABLE emails        ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ;
@@ -557,6 +591,66 @@ ALTER TABLE credit_memos  ADD COLUMN IF NOT EXISTS class TEXT;
 -- Account-based class rules (2026-10-12): a class_rules row with `account` set forces that class on
 -- not-yet-entered invoices/credit memos whose standard/QB account matches (see apply_account_class_rules).
 ALTER TABLE class_rules   ADD COLUMN IF NOT EXISTS account TEXT;
+-- Correspondence triage (2026-10-15): emails classified 'correspondence' used to be recorded and then
+-- ignored by every queue. corr_status: NULL/'open' (needs a look) | 'follow_up' | 'handled' | 'ignored'.
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_status TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_note TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_by TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_at TIMESTAMPTZ;
+-- The classifier's own read of an informational email (vendor / store / routing reason = one-line
+-- "what is this"), captured from now on so the Correspondence page can show it.
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS info_vendor TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS info_store TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS info_note TEXT;
+-- Standing "always ignore" rules for correspondence: sender (substring of the From address, e.g.
+-- '@ups.com' or 'news@vendor.com') and/or subject_contains; both given = both must match.
+CREATE TABLE IF NOT EXISTS correspondence_rules (
+    id                 SERIAL PRIMARY KEY,
+    sender             TEXT,
+    subject_contains   TEXT,
+    action             TEXT NOT NULL DEFAULT 'ignore',
+    note               TEXT,
+    created_by         TEXT,
+    created_at         TIMESTAMPTZ DEFAULT now(),
+    edited_by          TEXT,
+    edited_at          TIMESTAMPTZ
+);
+-- Forwarding (2026-10-15): a rule can forward instead of ignore (action='forward', forward_to = one or
+-- more addresses, comma-separated). Forward rules only send emails that arrive AFTER the rule exists.
+ALTER TABLE correspondence_rules ADD COLUMN IF NOT EXISTS forward_to TEXT;
+-- To/CC condition (2026-10-15): e.g. skip anything a staff member is already copied on.
+ALTER TABLE correspondence_rules ADD COLUMN IF NOT EXISTS recipients_contains TEXT;
+-- Outside-recipient condition (2026-10-16, Joel): match only when at least one To/CC address is OUTSIDE our
+-- own domains (maplerx.com, lakewoodrx.com, carepax.com) -- i.e. it went to a vendor, not just staff.
+ALTER TABLE correspondence_rules ADD COLUMN IF NOT EXISTS outside_recipient_only BOOLEAN NOT NULL DEFAULT FALSE;
+-- An email's To + Cc addresses (lowercased), read from the stored email (corr_forward.fill_recipients).
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS recipients TEXT;
+-- Needs-response detection (2026-10-16): ANY email (invoice, statement, ...) whose human-written text asks
+-- us for something. Such emails also appear on the Correspondence page; record processing is unaffected.
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS needs_response BOOLEAN;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS response_request TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS response_requested_by TEXT;
+-- Request type (2026-10-16): what KIND of message this is (CORR_TOPICS), so rules can act on the nature of
+-- an email ('payment reminders -> forward to X') instead of on who sent it.
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS topic TEXT;
+ALTER TABLE correspondence_rules ADD COLUMN IF NOT EXISTS topic TEXT;
+-- Follow-up assignment (2026-10-19): who a Follow-up email is assigned to (users.username), and a rule
+-- action 'follow_up' that marks matching emails Follow up, optionally assigned (assign_to).
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_assigned_to TEXT;
+ALTER TABLE correspondence_rules ADD COLUMN IF NOT EXISTS assign_to TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_forwarded_to TEXT;
+ALTER TABLE emails        ADD COLUMN IF NOT EXISTS corr_forwarded_at TIMESTAMPTZ;
+-- People correspondence gets forwarded to (Setup > Rules > Forward contacts) -- the page's pick-list.
+CREATE TABLE IF NOT EXISTS forward_contacts (
+    id                 SERIAL PRIMARY KEY,
+    name               TEXT,
+    email              TEXT UNIQUE NOT NULL,
+    note               TEXT,
+    created_by         TEXT,
+    created_at         TIMESTAMPTZ DEFAULT now(),
+    edited_by          TEXT,
+    edited_at          TIMESTAMPTZ
+);
 ALTER TABLE payments      ADD COLUMN IF NOT EXISTS class TEXT;
 -- Shared duplicate GROUP id: a short human-typeable tag stamped on EVERY record in a matched
 -- duplicate cluster (the original AND every later match), independent of duplicate_suspect/
@@ -588,6 +682,22 @@ ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS exclude_from_statement_reco
 -- added up from the line items is accepted instead of sent to review. Off for every vendor until
 -- someone ticks it in Setup › Vendor names (2026-10-08). A missing/zero amount is still flagged.
 ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS trust_line_item_totals BOOLEAN NOT NULL DEFAULT FALSE;
+-- Sales tax OK (2026-10-21, Joel): this vendor is allowed to charge sales tax -> its bills drop off the
+-- Sales tax page (Records > Sales tax).
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS sales_tax_ok BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS sales_tax_ok_by TEXT;
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS sales_tax_ok_at TIMESTAMPTZ;
+-- One bill OK'd for its sales-tax charge, without OK'ing the whole vendor (2026-10-23).
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_tax_ok_by TEXT;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS sales_tax_ok_at TIMESTAMPTZ;
+-- A vendor OK'd to charge sales tax at ONE store only (2026-10-23).
+CREATE TABLE IF NOT EXISTS sales_tax_ok_stores (
+    standard_vendor TEXT NOT NULL,
+    store           TEXT NOT NULL,
+    ok_by           TEXT,
+    ok_at           TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (standard_vendor, store)
+);
 -- "Ignore payment confirmations" (2026-10-13): this vendor's payment confirmations (a utility's
 -- "payment received" / AutoPay emails, already seen in the bank) are read but not recorded as payments
 -- and not sent to review. Off for every vendor until someone ticks it in Setup › Vendor names.
@@ -636,6 +746,25 @@ BEGIN
   END IF;
 END
 $archive$;
+-- 2026-10-21 (Joel): an edit to a record already entered in QuickBooks becomes a "QB correction" to make
+-- in QuickBooks too (amount, number, date, vendor, store, tax, shipping), until someone marks it done.
+CREATE TABLE IF NOT EXISTS qb_corrections (
+    id           SERIAL PRIMARY KEY,
+    record_type  TEXT,
+    record_id    INTEGER,
+    field        TEXT,
+    old_value    TEXT,
+    new_value    TEXT,
+    store        TEXT,
+    vendor       TEXT,
+    number       TEXT,
+    changed_by   TEXT,
+    changed_at   TIMESTAMPTZ DEFAULT now(),
+    done_by      TEXT,
+    done_at      TIMESTAMPTZ,
+    note         TEXT
+);
+CREATE INDEX IF NOT EXISTS qb_corrections_open ON qb_corrections (record_type, record_id) WHERE done_at IS NULL;
 """
 
 
@@ -764,15 +893,76 @@ DEFAULT_STORE_SCOPE_RULES = [
 ]
 
 
+# Schema statements run only when they changed (2026-10-26, Joel: yes). Each pass of DDL + MIGRATIONS takes
+# exclusive table locks (82 ALTER TABLE ... IF NOT EXISTS), and the web app ran it on the first page that used the
+# classifier after a restart: with a classify run holding those tables it queued behind the run, every other query
+# queued behind it, and both stalled (the 10/14 pile-up). Now a fingerprint of the statements is kept in
+# schema_stamp; when it matches, no schema statement runs at all. When the code changed them, they run with a short
+# lock wait and a few tries, so a busy database never queues everyone behind them.
+SCHEMA_LOCK_TIMEOUT = "2s"
+SCHEMA_TRIES = 3
+SCHEMA_RETRY_SECONDS = 5
+
+
+def schema_fingerprint(*statements):
+    import hashlib
+    return hashlib.sha1("\n;\n".join(statements).encode("utf-8")).hexdigest()
+
+
+def apply_schema(name, *statements):
+    """Run the schema `statements` unless schema_stamp says this exact text was applied already. Each try waits at
+    most SCHEMA_LOCK_TIMEOUT for a lock; after SCHEMA_TRIES busy tries it carries on with the schema the database
+    has (the next start tries again). True when the schema is current, False when the database stayed busy."""
+    import time
+    from psycopg2 import errors as pg_errors
+    fp = schema_fingerprint(*statements)
+    for attempt in range(1, SCHEMA_TRIES + 1):
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT to_regclass('schema_stamp') IS NOT NULL")
+                if cur.fetchone()[0]:
+                    cur.execute("SELECT fingerprint FROM schema_stamp WHERE name = %s", (name,))
+                    row = cur.fetchone()
+                    if row and row[0] == fp:
+                        conn.rollback()
+                        return True
+                cur.execute(f"SET LOCAL lock_timeout = '{SCHEMA_LOCK_TIMEOUT}'")
+                for sql in statements:
+                    cur.execute(sql)
+                cur.execute("CREATE TABLE IF NOT EXISTS schema_stamp (name TEXT PRIMARY KEY, fingerprint TEXT, "
+                            "applied_at TIMESTAMPTZ DEFAULT now())")
+                cur.execute("INSERT INTO schema_stamp (name, fingerprint, applied_at) VALUES (%s, %s, now()) "
+                            "ON CONFLICT (name) DO UPDATE SET fingerprint = EXCLUDED.fingerprint, applied_at = now()",
+                            (name, fp))
+            conn.commit()
+            return True
+        except pg_errors.LockNotAvailable:
+            conn.rollback()
+            print(f"(schema '{name}': tables busy, try {attempt} of {SCHEMA_TRIES})")
+            if attempt < SCHEMA_TRIES:
+                time.sleep(SCHEMA_RETRY_SECONDS)
+        finally:
+            conn.close()
+    print(f"(schema '{name}': the database stayed busy; carrying on with the schema it has, the next start tries again)")
+    return False
+
+
 def init_db():
+    """Bring the schema up to date (only when its statements changed: apply_schema), then seed the reference tables
+    and apply the standing rules. Those two only touch rows; they too wait at most a few seconds for a lock."""
+    from psycopg2 import errors as pg_errors
+    apply_schema("base", DDL, MIGRATIONS, _NORM_VENDOR_FN_DDL, _EXCLUSION_VIEW_DDL)
     conn = connect()
     try:
         with conn.cursor() as cur:
-            cur.execute(DDL)
-            cur.execute(MIGRATIONS)
+            cur.execute("SET LOCAL lock_timeout = '10s'")
             _seed_reference_tables(cur)
             _apply_standing_rules(cur)
         conn.commit()
+    except pg_errors.LockNotAvailable:
+        conn.rollback()
+        print("(init_db: reference tables busy; seeding and standing rules skipped this time)")
     finally:
         conn.close()
 
@@ -842,10 +1032,15 @@ def _apply_standing_rules(cur):
     ON CONFLICT DO NOTHING, so re-running never clobbers hand edits or duplicates.
     Add new standing rules here rather than editing the seed data (which won't reach
     already-populated tables)."""
-    # SQL vendor normalizer used by the duplicate-matching queries (see constant above).
-    cur.execute(_NORM_VENDOR_FN_DDL)
-    # Unified vendor-exclusion spellings view (reads the vendor_name_map flags).
-    cur.execute(_EXCLUSION_VIEW_DDL)
+    # 2026-10-20: a scanned/uploaded document (not .eml/.msg) never needs a reply -- clear any
+    # still-open ones flagged before save_email_communication learned that.
+    cur.execute("UPDATE emails SET needs_response = FALSE, response_request = NULL, "
+                "response_requested_by = NULL "
+                "WHERE needs_response IS TRUE AND filename !~* '[.](eml|msg)$' "
+                "AND coalesce(corr_status, 'open') = 'open'")
+    # The SQL vendor normalizer (_NORM_VENDOR_FN_DDL) and the vendor-exclusion spellings view (_EXCLUSION_VIEW_DDL)
+    # are re-created by init_db's apply_schema now, only when their text changes (2026-10-26): replacing the view on
+    # every start needed an exclusive lock on it, the same pile-up risk as the table changes.
     # A 7th selectable store. Fresh installs get the richer DEFAULT_STORES row; an
     # existing DB (stores already populated, so the seed skipped) gets this bare row
     # here — %%STORE_LINES%% then includes it every run. DO NOTHING keeps the seed row.
@@ -862,6 +1057,8 @@ def _apply_standing_rules(cur):
     )
     # Account-based class rules (class_rules.account) — keep not-yet-entered records in line.
     apply_account_class_rules("init", cur=cur)
+    # Correspondence "always ignore" rules — catches emails that arrived before a rule was added.
+    apply_correspondence_rules("init", cur=cur)
 
 
 def _seed_reference_tables(cur):
@@ -1121,6 +1318,163 @@ def apply_account_class_rules(username="system", dry_run=False, cur=None):
             conn.close()
 
 
+# Our own mail domains. A rule with outside_recipient_only matches only when some To/CC address is NOT
+# one of these (= the email went to a vendor / outsider, not only to staff).
+OWN_EMAIL_DOMAINS = ("maplerx.com", "lakewoodrx.com", "carepax.com", "3mvitamins.com", "thevitamindesk.com")
+# Single internal addresses on public domains (e.g. a store's Gmail) -- the rest of that domain stays outside.
+OWN_EMAIL_ADDRESSES = ("rxstore15@gmail.com",)
+_OUTSIDE_RCPT_SQL = (
+    "NOT coalesce(r.outside_recipient_only, FALSE) OR EXISTS ("
+    "SELECT 1 FROM unnest(string_to_array(coalesce(e.recipients, ''), ',')) AS a(addr) "
+    "WHERE position('@' IN btrim(a.addr)) > 0 "
+    "AND lower(split_part(btrim(a.addr), '@', 2)) NOT IN ("
+    + ", ".join(f"'{d}'" for d in OWN_EMAIL_DOMAINS) + ") "
+    "AND lower(btrim(a.addr)) NOT IN ("
+    + ", ".join(f"'{x}'" for x in OWN_EMAIL_ADDRESSES) + "))")
+
+
+def apply_correspondence_rules(username="system", cur=None):
+    """Auto-ignore OPEN correspondence emails that match a correspondence_rules row (Setup > Rules >
+    Correspondence). sender = case-insensitive substring of the From address ('@ups.com' catches a
+    whole domain); subject_contains = case-insensitive substring of the subject; a rule with both
+    needs both; a rule with neither is skipped. Only touches emails still open (never re-opens or
+    overrides a human decision). Returns how many emails it changed. Idempotent."""
+    own = cur is None
+    conn = connect() if own else None
+    try:
+        c = conn.cursor() if own else cur
+        try:                                    # To/CC rules need each email's recipients on file
+            import corr_forward
+            corr_forward.fill_recipients(c)
+        except Exception as _e:
+            print(f"(could not fill email recipients: {_e})")
+        c.execute("""
+            WITH m AS (
+              SELECT DISTINCT ON (e.filename) e.filename, r.id AS rule_id, r.note,
+                     lower(coalesce(r.action, 'ignore')) AS action, nullif(btrim(coalesce(r.assign_to, '')), '') AS assign_to
+                FROM emails e
+                JOIN correspondence_rules r
+                  ON lower(coalesce(r.action, 'ignore')) IN ('ignore', 'follow_up')
+                 AND (btrim(coalesce(r.sender,'')) <> '' OR btrim(coalesce(r.subject_contains,'')) <> ''
+                      OR btrim(coalesce(r.recipients_contains,'')) <> '' OR btrim(coalesce(r.topic,'')) <> '')
+                 AND (btrim(coalesce(r.topic,'')) = '' OR r.topic = e.topic)
+                 AND (btrim(coalesce(r.sender,'')) = ''
+                      OR position(lower(btrim(r.sender)) IN lower(coalesce(e.from_address,''))) > 0)
+                 AND (btrim(coalesce(r.subject_contains,'')) = ''
+                      OR position(lower(btrim(r.subject_contains)) IN lower(coalesce(e.subject,''))) > 0)
+                 AND (btrim(coalesce(r.recipients_contains,'')) = ''
+                      OR position(lower(btrim(r.recipients_contains)) IN lower(coalesce(e.recipients,''))) > 0)
+                 AND (""" + _OUTSIDE_RCPT_SQL + """)
+               WHERE (e.email_type = 'correspondence' OR e.needs_response IS TRUE)
+                 AND coalesce(e.corr_status, 'open') = 'open'
+               ORDER BY e.filename, r.id)
+            UPDATE emails e
+               SET corr_status = CASE WHEN m.action = 'follow_up' THEN 'follow_up' ELSE 'ignored' END,
+                   corr_at = now(),
+                   corr_by = %s || ' (rule #' || m.rule_id || ')',
+                   corr_assigned_to = CASE WHEN m.action = 'follow_up' THEN m.assign_to ELSE e.corr_assigned_to END,
+                   corr_note = coalesce(m.note, CASE WHEN m.action = 'follow_up' THEN 'marked Follow up by rule'
+                                                     ELSE 'auto-ignored by rule' END)
+              FROM m
+             WHERE e.filename = m.filename""", (username,))
+        n = c.rowcount
+        if own:
+            conn.commit()
+        return n
+    finally:
+        if own:
+            conn.close()
+
+
+def forward_rule_matches(cur=None):
+    """[(filename, rule_id, forward_to, note)] -- OPEN correspondence emails matching a FORWARD rule
+    (same sender/subject matching as apply_correspondence_rules) that were never forwarded -- including
+    ones already sitting in Open when the rule was created (Joel 2026-10-16: new rules act on existing
+    open items too). Sending is done by corr_forward.run_forward_rules."""
+    own = cur is None
+    conn = connect() if own else None
+    try:
+        c = conn.cursor() if own else cur
+        try:                                    # To/CC rules need each email's recipients on file
+            import corr_forward
+            corr_forward.fill_recipients(c)
+        except Exception as _e:
+            print(f"(could not fill email recipients: {_e})")
+        c.execute("""
+            SELECT DISTINCT ON (e.filename) e.filename, r.id, r.forward_to, r.note
+              FROM emails e
+              JOIN correspondence_rules r
+                ON lower(coalesce(r.action, '')) = 'forward'
+               AND btrim(coalesce(r.forward_to, '')) <> ''
+               AND (btrim(coalesce(r.sender,'')) <> '' OR btrim(coalesce(r.subject_contains,'')) <> ''
+                      OR btrim(coalesce(r.recipients_contains,'')) <> '' OR btrim(coalesce(r.topic,'')) <> '')
+               AND (btrim(coalesce(r.topic,'')) = '' OR r.topic = e.topic)
+               AND (btrim(coalesce(r.sender,'')) = ''
+                    OR position(lower(btrim(r.sender)) IN lower(coalesce(e.from_address,''))) > 0)
+               AND (btrim(coalesce(r.subject_contains,'')) = ''
+                    OR position(lower(btrim(r.subject_contains)) IN lower(coalesce(e.subject,''))) > 0)
+               AND (btrim(coalesce(r.recipients_contains,'')) = ''
+                    OR position(lower(btrim(r.recipients_contains)) IN lower(coalesce(e.recipients,''))) > 0)
+                 AND (""" + _OUTSIDE_RCPT_SQL + """)
+             WHERE (e.email_type = 'correspondence' OR e.needs_response IS TRUE)
+               AND coalesce(e.corr_status, 'open') = 'open'
+               AND e.corr_forwarded_at IS NULL
+             ORDER BY e.filename, r.id""")
+        return c.fetchall()
+    finally:
+        if own:
+            conn.close()
+
+
+# Request types for the Correspondence page + rules (key, label). The classifier picks ONE key per email.
+CORR_TOPICS = [
+    ("payment_reminder", "Payment reminder / past due"),
+    ("payment_problem", "Payment problem (declined / failed / wrong amount)"),
+    ("billing_question", "Billing question / dispute / credit"),
+    ("document_request", "Request for documents or info (W-9, remittance, statement...)"),
+    ("account_change", "Account / banking / remit-address change"),
+    ("order_issue", "Order / delivery / shipping issue"),
+    ("recall", "Recall / compliance notice"),
+    ("internal_request", "Internal request (from our own staff)"),
+    ("notice", "Notice / FYI (no action asked)"),
+    ("promotion", "Promotion / marketing"),
+    # 2026-10-20 (Joel): a reply that only says thanks / got it, with no new information, request or
+    # attachment -- so a rule can ignore them ("Thank-you only -> always ignore").
+    ("acknowledgment", "Thank-you / acknowledgment only (nothing new)"),
+    # 2026-10-21 (Joel): automatic replies (out-of-office, "we received your email" auto-responders).
+    ("auto_reply", "Automatic reply / out of office"),
+    ("other", "Other"),
+]
+CORR_TOPIC_KEYS = {k for k, _ in CORR_TOPICS}
+
+
+def save_email_communication(filename, needs_response, request=None, requested_by=None, topic=None):
+    """Store the classifier's needs-response read for one email (creates a bare emails row if the
+    email has none yet -- the normal save fills the rest)."""
+    # 2026-10-20 (Joel): only a real email can ask us to reply. A scanned/uploaded document (PDF,
+    # image) is processed for its records only -- a handwritten "zelle $44.40 ... for #1018" on a
+    # Monbar invoice put it on the Correspondence page as NEEDS REPLY.
+    if not str(filename or "").lower().endswith((".eml", ".msg")):
+        needs_response = False
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            topic = (topic or "").strip().lower() or None
+            if topic and topic not in CORR_TOPIC_KEYS:
+                topic = "other"
+            cur.execute("""INSERT INTO emails (filename, needs_response, response_request, response_requested_by, topic)
+                           VALUES (%s, %s, %s, %s, %s)
+                           ON CONFLICT (filename) DO UPDATE SET needs_response = EXCLUDED.needs_response,
+                               response_request = EXCLUDED.response_request,
+                               response_requested_by = EXCLUDED.response_requested_by,
+                               topic = coalesce(EXCLUDED.topic, emails.topic)""",
+                        (filename, bool(needs_response), (request or None) if needs_response else None,
+                         (requested_by or None) if needs_response else None, topic))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def load_vendor_standardization():
     """Everything the classifier needs to standardize a vendor + resolve its store-specific
     QB names. `lookup` maps a bare .strip().lower() spelling (standard name AND every store
@@ -1234,19 +1588,25 @@ def _upsert_email(cur, row, run_id=None):
     cur.execute(
         """
         INSERT INTO emails (filename, source, gmail_link, subject, email_type,
-                            status, error, run_id, date_added, updated_at)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                            status, error, run_id, date_added, updated_at,
+                            info_vendor, info_store, info_note)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, now(), %s, %s, %s)
         ON CONFLICT (filename) DO UPDATE SET
             gmail_link = COALESCE(EXCLUDED.gmail_link, emails.gmail_link),
             email_type = EXCLUDED.email_type,
             status     = EXCLUDED.status,
             error      = EXCLUDED.error,
             run_id     = COALESCE(EXCLUDED.run_id, emails.run_id),
+            info_vendor = COALESCE(EXCLUDED.info_vendor, emails.info_vendor),
+            info_store  = COALESCE(EXCLUDED.info_store, emails.info_store),
+            info_note   = COALESCE(EXCLUDED.info_note, emails.info_note),
             updated_at = now()
         """,
         (fn, row.get("Source") or "manual", row.get("Gmail Link") or None,
          row.get("Subject"), row.get("Email Type"), status,
-         row.get("Error") or None, run_id, _date(row.get("Date Added"))),
+         row.get("Error") or None, run_id, _date(row.get("Date Added")),
+         row.get("Vendor Matched") or None, row.get("Store Matched") or None,
+         row.get("Routing Reason") or None),
     )
 
 
@@ -2619,6 +2979,45 @@ def reconcile_statement_lines(run_id=None, grace_days=None):
                     counts[new_status] = counts.get(new_status, 0) + 1
                     if new_status == "matched":
                         counts["alias_resolved"] += 1
+
+            # --- Third pass: already in QuickBooks (2026-10-26, Joel: yes) ----------------------------
+            # A 'missing' line whose bill is in an uploaded QuickBooks export (qb_register, every upload
+            # since 10/20) was entered in QuickBooks directly, outside the app. The QB upload's own pass
+            # (qb_match.process_qb_export) checks only that upload's Bill rows and needs the standard
+            # names to agree, so a statement read after the upload, a credit, or a vendor spelled another
+            # way on the statement ('HealthSource Distributors' / 'HealthSource' WSTLC-1110 $172.96) stayed
+            # 'missing'. Here: the same invoice number, the same amount (QuickBooks keeps a credit without
+            # its minus sign), and a related vendor or the same date. A different amount stays open for a
+            # person (Lifeseed #808: statement $906.00, QuickBooks $585.36). Dismissed like the upload's
+            # pass, and logged.
+            counts["in_quickbooks"] = 0
+            cur.execute("SELECT to_regclass('qb_register') IS NOT NULL")
+            if cur.fetchone()[0]:
+                import classify_emails as ce
+                cur.execute("SELECT id, vendor, invoice_number, invoice_date, amount FROM statement_lines "
+                            "WHERE status = 'missing' AND coalesce(btrim(invoice_number), '') <> '' "
+                            "AND amount IS NOT NULL")
+                for lid, vendor, inv_no, inv_date, amount in cur.fetchall():
+                    key = ce._num_key(inv_no)
+                    if not key:
+                        continue
+                    cur.execute("SELECT qb_type, qb_num, qb_name, qb_std_vendor, qb_amount, qb_date, qb_store "
+                                "FROM qb_register WHERE regexp_replace(lower(qb_num), '[^a-z0-9]', '', 'g') = %s "
+                                "AND abs(abs(qb_amount) - abs(%s)) < 0.005", (key, amount))
+                    hit = next((r for r in cur.fetchall()
+                                if ce._vendors_related(vendor, r[3] or r[2]) or ce._vendors_related(vendor, r[2])
+                                or (inv_date is not None and inv_date == r[5])), None)
+                    if not hit:
+                        continue
+                    who = "auto: found in QuickBooks"
+                    cur.execute("UPDATE statement_lines SET status = 'dismissed', dismissed_by = %s, "
+                                "dismissed_at = now(), updated_at = now() WHERE id = %s", (who, lid))
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES ('statement_lines', %s, 'status', 'missing', %s, %s)",
+                                (lid, f"dismissed (in QuickBooks: {hit[0]} #{hit[1]} {hit[2]} "
+                                      f"${abs(float(hit[4])):,.2f}, {hit[6]}, entered outside the app)", who))
+                    counts["missing"] = counts.get("missing", 0) - 1
+                    counts["in_quickbooks"] += 1
         conn.commit()
     finally:
         conn.close()

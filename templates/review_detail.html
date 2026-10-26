@@ -1,71 +1,99 @@
 {% extends "base.html" %}
 {% from "_macros.html" import money %}
 {% block content %}
-<p><a href="/review">&larr; back to queue</a></p>
-<div class="row">
-  <div class="card" style="flex:1 1 420px;">
-    <h3 style="margin-top:0;">Review item <span class="muted">#{{ item.id }}</span></h3>
-    {% if (item.answer or '').strip() %}
-      <span class="pill" style="background:#dbeafe;color:#1e40af;">Answered — pending reprocess</span>
-      {% if item.reviewed_by %}<span class="muted"> by {{ item.reviewed_by }}{% if item.reviewed_at %} · {{ item.reviewed_at | us_datetime }}{% endif %}</span>{% endif %}
-      <p class="muted" style="margin-top:6px;">This stays in the queue until the next <code>classify_emails.py</code> run reprocesses it. You can revise the answer below.</p>
-    {% elif has_pending_upload %}
-      <span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded — pending reprocess</span>
-      <p class="muted" style="margin-top:6px;">Uploaded document(s) below will be used to reprocess this record on the next <code>classify_emails.py</code> run.</p>
-    {% else %}
-      <div class="pill rev">Needs review</div>
-    {% endif %}
-    {% if item.gmail_link %} · <a href="{{ item.gmail_link }}" target="_blank">open source email in Gmail</a>{% endif %}
-    <p class="muted" style="margin-top:12px;">Why the AI flagged this:</p>
-    <div class="card" style="background:#fffdf5;">{{ item['question'] or '—' }}
-      {% if item.duplicate_group_id %}
-        <div style="margin-top:8px;"><a class="pill" style="background:#eef2ff;color:#4338ca;"
-           href="/browse?group={{ item.duplicate_group_id|urlencode }}"
-           title="Show all versions of this invoice">Group {{ item.duplicate_group_id }}</a></div>
-      {% endif %}
-    </div>
-
-    <table>
-      <tr><th>Vendor</th><td>{{ item.vendor_matched or '—' }}</td></tr>
-      <tr><th>Store</th><td>{{ (item.store_matched | store_label) or '—' }}</td></tr>
-      <tr><th>Invoice #</th><td>{{ item.invoice_number or '—' }}</td></tr>
-      <tr><th>Amount</th><td>{{ money(item.amount) }}</td></tr>
-      <tr><th>Source email</th><td>
-        {% if item.source_email %}<a href="/browse?email={{ item.source_email|urlencode }}">{{ item.source_email }}</a>{% else %}—{% endif %}
-      </td></tr>
-      <tr><th>Received (Gmail)</th><td>
-        {% if item.email_received_at %}{{ item.email_received_at | us_datetime }}
-        {% else %}<span class="muted">not captured for this email — run backfill_received_at.py --commit</span>{% endif %}
-      </td></tr>
-      <tr><th>Run</th><td>{% if item.run_id %}<a href="/review?run={{ item.run_id }}">{{ item.run_id }}</a>{% else %}<span class="muted">pre-tracking</span>{% endif %}</td></tr>
-      <tr><th>Assigned to</th><td>
+{# 2026-10-20 redesign (Joel): summary bar -> what's wrong (reason chips + fix links) -> ONE tabbed
+   "Resolve it" box (Quick fix / Answer / Upload files / Dismiss) -> folded extras; the document stays
+   in view on the right. Previous layout: _tmp_view/review_detail.html.bak_20261020_pre_v2. #}
+<style>
+  .rd-grid { display:grid; grid-template-columns:minmax(380px, 1fr) minmax(420px, 1.15fr); gap:14px; align-items:start; }
+  @media (max-width:1000px) { .rd-grid { grid-template-columns:1fr; } }
+  .rd-doc { position:sticky; top:62px; }
+  .rd-doc iframe, .rd-doc img { height:calc(100vh - 150px) !important; min-height:420px; }
+  .rd-sum { display:flex; justify-content:space-between; gap:10px; flex-wrap:wrap; align-items:baseline; }
+  .rd-sum .who { font-size:17px; font-weight:700; } .rd-sum .sep { color:#c0c4cc; margin:0 5px; }
+  .rd-links { margin-top:6px; font-size:13px; } .rd-links a { margin-right:14px; }
+  .rd-h { font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); margin:0 0 6px; }
+  .rr { display:inline-flex; align-items:center; font-size:12px; font-weight:600; padding:2px 9px; border-radius:999px; margin:2px 4px 2px 0; white-space:nowrap; }
+  .rr-dup { background:#ede9fe; color:#5b21b6; } .rr-vendor { background:#dbeafe; color:#1e40af; }
+  .rr-miss { background:#fef3c7; color:#92400e; } .rr-read { background:#fee2e2; color:#991b1b; }
+  .rd-fix { font-size:12.5px; margin-right:12px; }
+  .rd-rest { font-size:13px; color:var(--muted); margin-top:6px; }
+  .rd-rest summary { cursor:pointer; } .rd-rest .full { white-space:pre-line; margin-top:6px; padding:8px 10px; background:#fffdf5; border-radius:6px; color:#333; }
+  .rd-tabs { display:flex; gap:4px; flex-wrap:wrap; border-bottom:1px solid var(--line); margin:-2px 0 12px; }
+  .rd-tabs button { border:none; background:none; padding:7px 12px; font-size:14px; cursor:pointer; color:var(--muted); border-bottom:2px solid transparent; margin-bottom:-1px; }
+  .rd-tabs button.on { color:var(--brand); border-bottom-color:var(--brand); font-weight:600; }
+  .rd-panel[hidden] { display:none; }
+  .rd-fold { margin-top:4px; } .rd-fold > details { border-top:1px solid var(--line); padding:9px 2px; }
+  .rd-fold > details > summary { cursor:pointer; font-weight:600; font-size:14px; }
+  .rd-fold > details > summary .muted { font-weight:400; }
+  .rd-fold table th { width:150px; }
+</style>
+<p style="margin:0 0 8px;"><a href="/review">&larr; back to queue</a></p>
+{% set w = why %}
+<div class="rd-grid">
+<div>
+  {# ---- Summary bar ---- #}
+  <div class="card" style="margin-top:0;">
+    <div class="rd-sum">
+      <div>
+        <span class="who">{{ item.vendor_matched or 'Vendor unknown' }}</span><span class="sep">·</span>{{ (item.store_matched | store_label) or 'store unknown' }}<span class="sep">·</span>{% if item.invoice_number %}#{{ item.invoice_number }}{% else %}<span class="muted">no #</span>{% endif %}<span class="sep">·</span>{% if item.amount is not none %}<b>{{ money(item.amount) }}</b>{% else %}<span class="muted">no amount</span>{% endif %}
+      </div>
+      <div class="muted" style="font-size:13px; display:flex; gap:8px; align-items:center;">
+        <span>#{{ item.id }}{% if age_days is not none %} · {{ 'today' if age_days == 0 else (age_days ~ ' day' ~ ('' if age_days == 1 else 's')) }}{% endif %}</span>
         <form method="post" action="/review/{{ item.id }}/assign" style="margin:0;">
-          <select name="assigned_to" onchange="this.form.submit()">
+          <select name="assigned_to" onchange="this.form.submit()" style="font-size:12.5px; padding:3px 4px;" title="Assigned to">
             <option value="">— unassigned —</option>
             {% for u in users %}<option value="{{ u.username }}" {{ 'selected' if item.assigned_to == u.username }}>{{ u.display_name or u.username }}</option>{% endfor %}
           </select>
         </form>
-      </td></tr>
-    </table>
-
-    {% if siblings %}
-    <p class="muted" style="margin-top:14px;">Other records from this email (already recorded, not in the queue):</p>
-    <table style="font-size:13px;">
-      <thead><tr><th>Vendor</th><th>#</th><th class="num">Amount</th><th>Status</th></tr></thead>
-      <tbody>
-      {% for s in siblings %}
-        <tr>
-          <td><a href="/browse?email={{ item.source_email|urlencode }}">{{ s.vendor_matched or '—' }}</a></td>
-          <td>{{ s.number or '—' }}</td>
-          <td class="num">{{ money(s.amount) }}</td>
-          <td>{% if s.skip_qb_import %}<span class="pill skip">excluded — in Browse</span>{% else %}<span class="muted">recorded{% if s.entered_in_qb %} · in QB{% endif %}</span>{% endif %}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
+      </div>
+    </div>
+    {% if (item.answer or '').strip() %}
+      <div style="margin-top:8px;"><span class="pill" style="background:#dbeafe;color:#1e40af;">Answered — waiting for the next run</span>
+        {% if item.reviewed_by %}<span class="muted"> by {{ item.reviewed_by }}{% if item.reviewed_at %} · {{ item.reviewed_at | us_datetime }}{% endif %}</span>{% endif %}</div>
+    {% elif has_pending_upload %}
+      <div style="margin-top:8px;"><span class="pill" style="background:#dbeafe;color:#1e40af;">Files uploaded — waiting for the next run</span></div>
     {% endif %}
+    <div class="rd-links">
+      {% if item.gmail_link %}<a href="{{ item.gmail_link }}" target="_blank">Open email in Gmail ↗</a>{% endif %}
+      {% if item.source_email %}<a href="/browse?email={{ item.source_email|urlencode }}">Records from this email{% if siblings %} ({{ siblings|length }}){% endif %}</a>{% endif %}
+    </div>
+  </div>
 
+  {# ---- What's wrong ---- #}
+  <div class="card">
+    <div class="rd-h">What's wrong</div>
+    {% if w.chips %}
+      <div>
+      {% for k, lbl, css in w.chips %}
+        <span class="rr {{ css }}">{{ lbl }}</span>
+        {%- if k == 'dup' and item.duplicate_group_id %}<a class="rd-fix" href="/browse?group={{ item.duplicate_group_id|urlencode }}" target="_blank">see group</a>
+        {%- elif k == 'vendor' %}<a class="rd-fix" href="#" data-fix="vendor">pick from the list</a><a class="rd-fix" href="/reference/vendor_name_map{% if w.vendor_name or item.vendor_matched %}?prefill={{ (w.vendor_name or item.vendor_matched)|urlencode }}{% endif %}" target="_blank" title="Add this spelling to Vendor names, then Apply changes now on the queue">add to vendor names</a>
+        {%- elif k == 'account' %}<a class="rd-fix" href="/reference/vendor_account_assignment" target="_blank">assign QB account</a>
+        {%- elif k == 'amount' or k == 'total' %}<a class="rd-fix" href="#" data-fix="amount">enter amount</a>
+        {%- elif k == 'date' %}<a class="rd-fix" href="#" data-fix="date">enter date</a>
+        {%- elif k == 'store' %}<a class="rd-fix" href="#" data-fix="store">choose store</a>
+        {%- elif k in ('page', 'attach', 'read') %}<a class="rd-fix" href="#" data-tab="upload">upload the document</a>
+        {%- endif %}
+      {% endfor %}
+      </div>
+    {% endif %}
+    {% if w.rest or w.full %}
+    <details class="rd-rest" {{ 'open' if not w.chips }}>
+      <summary>{{ w.rest or 'Full reason' }}</summary>
+      <div class="full">{{ w.full or item['question'] or '—' }}</div>
+    </details>
+    {% elif not w.chips %}<p class="muted" style="margin:0;">No reason recorded.</p>{% endif %}
+  </div>
+
+  {# ---- Resolve it: one box, four tabs ---- #}
     {# ---- Quick fix: one-click answers for the common flags, applied in code on the next run ---- #}
+    {% macro fix_vendor() %}
+      <label>Vendor <span class="muted" style="font-weight:400;">(from Vendor names)</span></label>
+      <input name="vendor" list="fix-vendor-list" autocomplete="off" placeholder="start typing a vendor…" style="max-width:340px;">
+      <datalist id="fix-vendor-list">{% for v in vendor_names %}<option value="{{ v }}">{% endfor %}</datalist>
+      <div class="muted" style="font-size:12px; margin-top:3px;">Not in the list? <a href="/reference/vendor_name_map" target="_blank">Add it in Vendor names</a>, then pick it here.</div>
+    {% endmacro %}
     {% macro fix_store() %}
       <label>Store</label>
       <select name="store">
@@ -87,20 +115,26 @@
         <input type="checkbox" name="enter" value="1" style="width:auto;margin:0 6px 0 0;vertical-align:middle;">
         This is a real bill — enter it in QuickBooks</label>
     {% endmacro %}
-    {% set all_fixes = {'store': fix_store, 'date': fix_date, 'amount': fix_amount, 'enter': fix_enter} %}
-    <div class="card" id="quick-fix" style="background:#f3faf6;border:1px solid #cfe8da;margin-top:14px;">
-      <label style="font-weight:700;">Quick fix</label>
-      {% if fix_error %}<p class="pill rev" style="display:inline-block;margin:4px 0;">{{ fix_error }}</p>{% endif %}
-      <p class="muted" style="margin:4px 0 6px;">
+  {% set all_fixes = {'vendor': fix_vendor, 'store': fix_store, 'date': fix_date, 'amount': fix_amount, 'enter': fix_enter} %}
+  <div class="card" id="resolve">
+    <div class="rd-tabs" role="tablist">
+      {% for key, lbl in [('fix', 'Quick fix'), ('answer', 'Answer'), ('upload', 'Upload files'), ('dismiss', 'Dismiss')] %}
+        <button type="button" data-tab="{{ key }}" class="{{ 'on' if key == default_tab }}">{{ lbl }}{% if key == 'upload' and manual_attachments %} ({{ manual_attachments|length }}){% endif %}</button>
+      {% endfor %}
+    </div>
+
+    <div class="rd-panel" id="quick-fix" data-panel="fix" {{ 'hidden' if default_tab != 'fix' }}>
+      {% if fix_error %}<p class="pill rev" style="display:inline-block;margin:0 0 6px;">{{ fix_error }}</p>{% endif %}
+      <p class="muted" style="margin:0 0 6px;">
         {% if fix_kinds %}Fix what this item was flagged for. The next run applies it exactly, so it won't come back for the same reason.
         {% else %}For a wrong store, date or amount, fix it here instead of typing an answer.{% endif %}</p>
       <form method="post" action="/review/{{ item.id }}/quick-fix" style="margin:0;">
-        {% for k in fix_kinds %}{{ all_fixes[k]() }}{% endfor %}
+        {% for k in fix_kinds %}<div data-fixfield="{{ k }}">{{ all_fixes[k]() }}</div>{% endfor %}
         {% set others = all_fixes.keys() | reject('in', fix_kinds) | list %}
         {% if others %}
-        <details {{ 'open' if not fix_kinds }} style="margin-top:8px;">
+        <details id="more-fixes" {{ 'open' if not fix_kinds }} style="margin-top:8px;">
           <summary class="muted" style="cursor:pointer;">{{ 'More fixes' if fix_kinds else 'Show fixes' }}</summary>
-          {% for k in others %}{{ all_fixes[k]() }}{% endfor %}
+          {% for k in others %}<div data-fixfield="{{ k }}">{{ all_fixes[k]() }}</div>{% endfor %}
         </details>
         {% endif %}
         <label>Note (optional)</label>
@@ -109,62 +143,54 @@
       </form>
     </div>
 
-    <div class="card" id="ai-assist" style="background:#f5f8ff;border:1px solid #dbe4f5;margin-top:14px;">
-      <label style="font-weight:700;">AI assist — draft answer + learning ✨</label>
-      <p class="muted" style="margin:4px 0 8px;">Describe the decision in your own words; Claude drafts
-        both a record-specific <b>Answer</b> and a general <b>Learning</b> rule from this record's
-        context. Nothing is saved until you use it in your answer or click “Save as learning now”.</p>
-      <textarea id="ai-rough" rows="2" placeholder="e.g. this is 3M — 112 Hillside is Braun's default billing address"></textarea>
-      <div style="margin-top:8px;">
-        <button class="btn secondary" type="button" id="ai-draft-btn" style="padding:5px 12px;">Draft</button>
-        <span class="muted" id="ai-status" style="margin-left:8px;"></span>
-      </div>
-      <div id="ai-draft-box" style="display:none;margin-top:12px;">
-        <label style="font-weight:700;">Proposed answer (for this record)</label>
-        <div id="ai-answer-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
-        <label style="font-weight:700;margin-top:8px;">Proposed learning (general rule)</label>
-        <div id="ai-learning-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
-        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
-          <input id="ai-refine" placeholder="Refine: e.g. also mention credit memos" style="flex:1 1 220px;">
-          <button class="btn secondary" type="button" id="ai-refine-btn" style="padding:5px 12px;">Refine</button>
+    <div class="rd-panel" data-panel="answer" {{ 'hidden' if default_tab != 'answer' }}>
+      <form method="post" action="/review/{{ item.id }}/answer" style="margin:0;">
+        <label style="margin-top:0;">Answer — your decision for this record</label>
+        <textarea name="answer" id="answer_box" rows="3" required>{{ item.answer or '' }}</textarea>
+        <label>Rule to learn <span class="muted" style="font-weight:400;">(optional — a general rule the AI should remember)</span></label>
+        <textarea name="notes_to_learn" id="notes_to_learn" rows="2">{{ item.notes_to_learn or '' }}</textarea>
+        <label style="font-weight:400;display:block;margin:8px 0;white-space:normal;cursor:pointer;">
+          <input type="checkbox" name="track_outcome" value="1" style="width:auto;padding:0;margin:0 6px 0 0;vertical-align:middle;">
+          Track outcome — keep it in <a href="/tracked">Tracked</a> after it reprocesses, to confirm the result</label>
+        <div><button class="btn" type="submit">Submit answer</button>
+          <span class="muted" style="font-size:12.5px; margin-left:8px;">Applied by the next run (or "Apply changes now" on the queue).</span></div>
+      </form>
+      <details id="ai-assist" style="margin-top:12px; border-top:1px solid var(--line); padding-top:8px;">
+        <summary style="cursor:pointer; font-weight:600;">Draft it with AI ✨</summary>
+        <p class="muted" style="margin:6px 0 8px;">Describe the decision in your own words; Claude drafts the Answer and a
+          Rule to learn. Nothing is saved until you use it or click "Save as learning now".</p>
+        <textarea id="ai-rough" rows="2" placeholder="e.g. this is 3M — 112 Hillside is Braun's default billing address"></textarea>
+        <div style="margin-top:8px;">
+          <button class="btn secondary" type="button" id="ai-draft-btn" style="padding:5px 12px;">Draft</button>
+          <span class="muted" id="ai-status" style="margin-left:8px;"></span>
         </div>
-        <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
-          <button class="btn" type="button" id="ai-use-btn" style="padding:5px 12px;">Use in my answer</button>
-          <button class="btn secondary" type="button" id="ai-save-btn" style="padding:5px 12px;">Save as learning now</button>
+        <div id="ai-draft-box" style="display:none;margin-top:12px;">
+          <label style="font-weight:700;">Proposed answer (for this record)</label>
+          <div id="ai-answer-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
+          <label style="font-weight:700;margin-top:8px;">Proposed learning (general rule)</label>
+          <div id="ai-learning-text" class="card" style="background:#fff;white-space:pre-wrap;"></div>
+          <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap;align-items:center;">
+            <input id="ai-refine" placeholder="Refine: e.g. also mention credit memos" style="flex:1 1 220px;">
+            <button class="btn secondary" type="button" id="ai-refine-btn" style="padding:5px 12px;">Refine</button>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
+            <button class="btn" type="button" id="ai-use-btn" style="padding:5px 12px;">Use in my answer</button>
+            <button class="btn secondary" type="button" id="ai-save-btn" style="padding:5px 12px;">Save as learning now</button>
+          </div>
         </div>
-        <p class="muted" style="margin:8px 0 0;">“Use in my answer” fills both fields below — edit or clear
-          either before submitting. “Save as learning now” saves only the learning.</p>
-      </div>
+      </details>
     </div>
 
-    <form method="post" action="/review/{{ item.id }}/answer">
-      <label>Answer (your decision for this record)</label>
-      <textarea name="answer" id="answer_box" rows="3" required>{{ item.answer or '' }}</textarea>
-      <label>Notes to Learn (a general rule the AI should remember — optional)</label>
-      <textarea name="notes_to_learn" id="notes_to_learn" rows="3">{{ item.notes_to_learn or '' }}</textarea>
-      <p class="muted">Submitting records your answer. The next <code>classify_emails.py</code> run
-        applies it: appends the note to learnings, reprocesses this split file, and moves it to results.</p>
-      <label style="font-weight:400;display:inline;margin:0 0 8px;white-space:normal;cursor:pointer;">
-        <input type="checkbox" name="track_outcome" value="1"
-          style="width:auto;padding:0;margin:0 6px 0 0;vertical-align:middle;">
-        Track outcome — keep this record in the <a href="/tracked">Tracked</a> tab after it reprocesses,
-        so you can confirm the result before writing a rule.</label>
-      <div><button class="btn" type="submit">Submit answer</button></div>
-    </form>
-    {% if item.reviewed_by %}<p class="muted">Last reviewed by {{ item.reviewed_by }} at {{ item.reviewed_at | us_datetime }}</p>{% endif %}
-
-    <div class="card" style="background:#f5faf5;border:1px solid #d7ead7;margin-top:14px;">
-      <label style="font-weight:700;">Add PDFs (from the zip) &amp; reprocess</label>
-      <p class="muted" style="margin:4px 0 8px;">If the pipeline couldn't open the original attachment
-        (e.g. a zip), upload the extracted PDF(s)/image(s) here. These will be used to reprocess this
-        record on the next classifier run. PDF and image files only.</p>
+    <div class="rd-panel" data-panel="upload" {{ 'hidden' if default_tab != 'upload' }}>
+      <p class="muted" style="margin:0 0 8px;">If the original attachment couldn't be read (a zip, a missing page, a portal
+        link), upload the PDF(s)/image(s) here. The next run reprocesses this item with them.</p>
       {% if manual_attachments %}
       <ul style="list-style:none;padding:0;margin:0 0 10px;">
         {% for m in manual_attachments %}
         <li style="padding:3px 0;{% if m.consumed_at %}opacity:.6;{% endif %}">
           📄 {% if m.preview_url %}<a href="{{ m.preview_url }}" target="_blank">{{ m.original_name or 'file' }}</a>{% else %}{{ m.original_name or 'file' }}{% endif %}
           <span class="muted" style="font-size:12px;">· {{ m.uploaded_by or 'someone' }}{% if m.uploaded_at %} · {{ m.uploaded_at | us_datetime }}{% endif %}
-            {% if m.consumed_at %}· used ✓{% else %}· pending next run{% endif %}</span>
+            {% if m.consumed_at %}· used ✓{% else %}· waiting for the next run{% endif %}</span>
         </li>
         {% endfor %}
       </ul>
@@ -175,80 +201,127 @@
       </form>
     </div>
 
-    <div class="card" style="background:#fdf6f6;border:1px solid #f0d9d9;margin-top:14px;">
-      <label style="font-weight:700;">Not an actionable record?</label>
-      <p class="muted" style="margin:4px 0 8px;">Dismiss and remove it from the queue — no reprocess,
-        no API call. It's snapshotted and restorable from <a href="/ignored">Dismissed</a>.</p>
+    <div class="rd-panel" data-panel="dismiss" {{ 'hidden' if default_tab != 'dismiss' }}>
+      <p class="muted" style="margin:0 0 8px;">Not an actionable record? Dismiss it — no reprocess, no AI call. It can be
+        restored from <a href="/ignored">Dismissed</a>.</p>
       <form method="post" action="/review/{{ item.id }}/ignore" style="margin:0;">
         <input name="reason" placeholder="Reason (optional)">
-        <div style="margin-top:8px;">
-          <button class="btn" type="submit" style="background:#b45309;">Dismiss item</button>
-        </div>
-      </form>
-    </div>
-
-    <div class="card">
-      <h3 style="margin-top:0;">Flag for review</h3>
-      {% if flagged %}<div class="ok-msg">Flagged for review — an admin will see it on the
-        <a href="/flags">Flags</a> page.</div>{% endif %}
-      <p class="muted" style="margin-top:4px;">See something wrong with this item, or want it
-        looked into? Describe it below. An admin can then review it and, if useful, run an
-        automated read-only investigation.</p>
-      <form method="post" action="/records/review/{{ item.id }}/flag">
-        <textarea name="note" rows="3" required
-                  style="width:100%; max-width:620px; display:block;"
-                  placeholder="What looks wrong, or what should be looked at?"></textarea>
-        <div style="margin-top:8px;">
-          <button class="btn" type="submit">Flag for review</button>
-          <a class="btn secondary" href="/flags">View flags</a>
-        </div>
+        <div style="margin-top:8px;"><button class="btn" type="submit" style="background:#b45309;">Dismiss item</button></div>
       </form>
     </div>
   </div>
 
-  <div class="card preview" style="flex:1 1 560px;">
-    <h3 style="margin-top:0;">Source document</h3>
-    {% if preview %}
-      <div class="preview-actions"><a class="btn secondary" href="{{ preview }}" target="_blank" style="padding:4px 10px;">Open full size ↗</a>
-        <span class="muted"> · drag the preview's bottom edge to resize</span></div>
-      {% if preview.lower().endswith('.pdf') %}
-        <iframe src="{{ preview }}"></iframe>
-      {% elif preview.lower().endswith('.png') or preview.lower().endswith('.jpg') or preview.lower().endswith('.jpeg') or preview.lower().endswith('.gif') or preview.lower().endswith('.webp') %}
-        <img src="{{ preview }}" alt="source document">
-      {% else %}
-        <a href="{{ preview }}" target="_blank">open document</a>
-      {% endif %}
-    {% else %}
-      <p class="muted">No source file recorded for this item.</p>
+  {# ---- Folded extras ---- #}
+  <div class="card rd-fold">
+    <details>
+      <summary>Details <span class="muted">— source email, received, run</span></summary>
+      <table style="margin-top:6px;">
+        <tr><th>Source email</th><td>{% if item.source_email %}<a href="/browse?email={{ item.source_email|urlencode }}">{{ item.source_email }}</a>{% else %}—{% endif %}</td></tr>
+        <tr><th>Received (Gmail)</th><td>{% if item.email_received_at %}{{ item.email_received_at | us_datetime }}{% else %}<span class="muted">not captured</span>{% endif %}</td></tr>
+        <tr><th>Flagged</th><td>{{ (item.flagged_at or item.date_flagged) | us_datetime }}</td></tr>
+        <tr><th>Run</th><td>{% if item.run_id %}<a href="/review?run={{ item.run_id }}">{{ item.run_id }}</a>{% else %}<span class="muted">pre-tracking</span>{% endif %}</td></tr>
+        {% if item.reviewed_by %}<tr><th>Last reviewed</th><td>{{ item.reviewed_by }} · {{ item.reviewed_at | us_datetime }}</td></tr>{% endif %}
+      </table>
+    </details>
+    {% if siblings %}
+    <details>
+      <summary>Other records from this email <span class="muted">({{ siblings|length }} — already recorded)</span></summary>
+      <table style="font-size:13px; margin-top:6px;">
+        <thead><tr><th>Vendor</th><th>#</th><th class="num">Amount</th><th>Status</th></tr></thead>
+        <tbody>
+        {% for s in siblings %}
+          <tr>
+            <td><a href="/browse?email={{ item.source_email|urlencode }}">{{ s.vendor_matched or '—' }}</a></td>
+            <td>{{ s.number or '—' }}</td>
+            <td class="num">{{ money(s.amount) }}</td>
+            <td>{% if s.skip_qb_import %}<span class="pill skip">excluded — in Browse</span>{% else %}<span class="muted">recorded{% if s.entered_in_qb %} · in QB{% endif %}</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </details>
     {% endif %}
+    <details {{ 'open' if notes }}>
+      <summary>Notes <span class="muted">({{ notes|length }}) — internal, kept after reprocessing</span></summary>
+      {% for n in notes %}
+        <div style="border-bottom:1px solid var(--line); padding:6px 0;">
+          <div style="white-space:pre-wrap;">{{ n.note }}</div>
+          <div class="muted" style="font-size:12px;">{{ n.author or 'someone' }}{% if n.created_at %} · {{ n.created_at | us_datetime }}{% endif %}
+            {% if user.role == 'admin' %}
+            <form method="post" action="/review/{{ item.id }}/note/{{ n.id }}/delete" style="display:inline;margin:0 0 0 8px;"
+                  onsubmit="return confirm('Delete this internal note? This cannot be undone.');">
+              <button class="btn" style="background:#b91c1c;padding:2px 8px;font-size:12px;" type="submit">Delete</button>
+            </form>
+            {% endif %}
+          </div>
+        </div>
+      {% endfor %}
+      <form method="post" action="/review/{{ item.id }}/note" style="margin-top:8px;">
+        <textarea name="note" rows="2" placeholder="Add a note…" required></textarea>
+        <div style="margin-top:6px;"><button class="btn secondary" type="submit">Add note</button></div>
+      </form>
+    </details>
+    <details {{ 'open' if flagged }}>
+      <summary>Flag for an admin <span class="muted">— something looks wrong with this item</span></summary>
+      {% if flagged %}<div class="ok-msg">Flagged — an admin will see it on the <a href="/flags">Flags</a> page.</div>{% endif %}
+      <form method="post" action="/records/review/{{ item.id }}/flag" style="margin-top:6px;">
+        <textarea name="note" rows="2" required placeholder="What looks wrong, or what should be looked at?"></textarea>
+        <div style="margin-top:6px;"><button class="btn secondary" type="submit">Flag for review</button>
+          <a href="/flags" style="margin-left:8px; font-size:13px;">View flags</a></div>
+      </form>
+    </details>
   </div>
 </div>
 
-<div class="card">
-  <h3 style="margin-top:0;">Notes <span class="muted">({{ notes|length }})</span></h3>
-  <p class="muted">Free-form notes on this item — kept attached even after it's reprocessed (keyed by
-    the file, not the run). Separate from “Notes to Learn” above, which trains the AI.</p>
-  {% for n in notes %}
-    <div style="border-bottom:1px solid var(--line); padding:6px 0;">
-      <div style="white-space:pre-wrap;">{{ n.note }}</div>
-      <div class="muted" style="font-size:12px;">{{ n.author or 'someone' }}{% if n.created_at %} · {{ n.created_at | us_datetime }}{% endif %}
-        {% if user.role == 'admin' %}
-        <form method="post" action="/review/{{ item.id }}/note/{{ n.id }}/delete" style="display:inline;margin:0 0 0 8px;"
-              onsubmit="return confirm('Delete this internal note? This cannot be undone.');">
-          <button class="btn" style="background:#b91c1c;padding:2px 8px;font-size:12px;" type="submit">Delete</button>
-        </form>
-        {% endif %}
-      </div>
-    </div>
+{# ---- Source document (stays in view) ---- #}
+<div class="card preview rd-doc" style="margin-top:0;">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+    <div class="rd-h" style="margin:0;">Source document</div>
+    {% if preview %}<a class="btn secondary" href="{{ preview }}" target="_blank" style="padding:3px 10px;">Open full size ↗</a>{% endif %}
+  </div>
+  {% if preview %}
+    {% if preview.lower().endswith('.pdf') %}
+      <iframe src="{{ preview }}"></iframe>
+    {% elif preview.lower().endswith('.png') or preview.lower().endswith('.jpg') or preview.lower().endswith('.jpeg') or preview.lower().endswith('.gif') or preview.lower().endswith('.webp') %}
+      <img src="{{ preview }}" alt="source document">
+    {% else %}
+      <a href="{{ preview }}" target="_blank">open document</a>
+    {% endif %}
   {% else %}
-    <p class="muted">No notes yet.</p>
-  {% endfor %}
-  <form method="post" action="/review/{{ item.id }}/note" style="margin-top:10px;">
-    <textarea name="note" rows="2" placeholder="Add a note…" required></textarea>
-    <div style="margin-top:8px;"><button class="btn" type="submit">Add note</button></div>
-  </form>
+    <p class="muted">No source file recorded for this item.</p>
+  {% endif %}
+</div>
 </div>
 
+<script>
+(function () {
+  // Tabs in "Resolve it". A #fix / #answer / #upload / #dismiss link opens that tab.
+  var tabs = document.querySelectorAll('.rd-tabs button'), panels = document.querySelectorAll('.rd-panel');
+  function show(key) {
+    tabs.forEach(function (b) { b.classList.toggle('on', b.dataset.tab === key); });
+    panels.forEach(function (p) { p.hidden = p.dataset.panel !== key; });
+  }
+  tabs.forEach(function (b) { b.addEventListener('click', function () { show(b.dataset.tab); }); });
+  var h = (location.hash || '').slice(1);
+  if (['fix', 'answer', 'upload', 'dismiss'].indexOf(h) !== -1) show(h);
+  // Fix links in "What's wrong": open the right tab and put the cursor in the field.
+  document.querySelectorAll('[data-fix], .rd-fix[data-tab]').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      if (a.dataset.tab) { show(a.dataset.tab); document.getElementById('resolve').scrollIntoView({behavior: 'smooth', block: 'start'}); return; }
+      show('fix');
+      var f = document.querySelector('[data-fixfield="' + a.dataset.fix + '"]');
+      var more = document.getElementById('more-fixes');
+      if (f && more && more.contains(f)) more.open = true;
+      document.getElementById('resolve').scrollIntoView({behavior: 'smooth', block: 'start'});
+      var el = f && f.querySelector('input, select'); if (el) setTimeout(function () { el.focus(); }, 250);
+    });
+  });
+  // The AI helper's "Use in my answer" should show the Answer tab.
+  var useBtn = document.getElementById('ai-use-btn');
+  if (useBtn) useBtn.addEventListener('click', function () { show('answer'); });
+})();
+</script>
 <script>
 (function () {
   var DRAFT_URL = "/review/{{ item.id }}/draft-learning";

@@ -71,20 +71,39 @@ the record alone.</p>
         <tr><td class="rowlabel {{ 'flagged' if amount_mismatch }}">{% if amount_mismatch %}{{ arrow }}{% endif %}Amount</td>
             <td class="amt">{% if amount_mismatch %}{{ qa | diff_against(ra) }}{% else %}{{ qa }}{% endif %}</td>
             <td class="amt">{% if amount_mismatch %}{{ ra | diff_against(qa) }}{% else %}{{ ra }}{% endif %}</td></tr>
-        <tr><td class="rowlabel">Date</td><td>{{ (c.qb_date | us_date) or '—' }}</td>
-            <td>{{ (c.rec_date | us_date) or '—' }}</td></tr>
+        {# Dates that differ are pointed out (2026-10-22) -- display only, never a QB correction. #}
+        {% set qd = (c.qb_date | us_date) or '' %}{% set rd = (c.rec_date | us_date) or '' %}
+        {% set date_mismatch = qd and rd and qd != rd %}
+        <tr><td class="rowlabel {{ 'flagged' if date_mismatch }}">{% if date_mismatch %}{{ arrow }}{% endif %}Date</td>
+            <td>{% if date_mismatch %}{{ qd | diff_against(rd) }}{% else %}{{ qd or '—' }}{% endif %}</td>
+            <td>{% if date_mismatch %}{{ rd | diff_against(qd) }}{% else %}{{ rd or '—' }}{% endif %}</td></tr>
       </tbody>
     </table>
   </div>
   <div style="display:flex; gap:6px; margin-top:8px; flex-wrap:wrap;">
+    {# Same bill, different amounts (2026-10-22): say which side is right. #}
+    {% set amt_differs = c.qb_amount is not none and c.rec_amount is not none and ((c.qb_amount|float) - (c.rec_amount|float))|abs >= 0.005 %}
+    {% if amt_differs %}
+    <form method="post" action="/qb-reconcile/review/{{ c.id }}/confirm" style="margin:0;"
+          onsubmit="return confirm('Same bill, and QuickBooks has the right amount ({{ money(c.qb_amount) }}): mark it entered and change the app to {{ money(c.qb_amount) }}?');">
+      <input type="hidden" name="right" value="qb">
+      <button class="btn ok" type="submit" style="padding:4px 11px; font-size:12px;" title="Match confirmed; the app takes QuickBooks' amount">Match — QuickBooks is right ({{ money(c.qb_amount) }})</button>
+    </form>
+    <form method="post" action="/qb-reconcile/review/{{ c.id }}/confirm" style="margin:0;"
+          onsubmit="return confirm('Same bill, and the bill in the app is right ({{ money(c.rec_amount) }}): mark it entered and list it on QB corrections to fix in QuickBooks?');">
+      <input type="hidden" name="right" value="bill">
+      <button class="btn ok" type="submit" style="padding:4px 11px; font-size:12px;" title="Match confirmed; QuickBooks needs updating (QB corrections)">Match — the app is right ({{ money(c.rec_amount) }})</button>
+    </form>
+    {% else %}
     <form method="post" action="/qb-reconcile/review/{{ c.id }}/confirm" style="margin:0;"
           onsubmit="return confirm('Confirm this is the same document and mark the {{ c.record_type.replace('_',' ') }} as entered in QuickBooks?');">
       <button class="btn ok" type="submit" style="padding:4px 11px; font-size:12px;">Confirm match</button>
     </form>
+    {% endif %}
     <form method="post" action="/qb-reconcile/review/{{ c.id }}/reject" style="margin:0;">
       <button class="btn secondary" type="submit" style="padding:4px 11px; font-size:12px;">Not a match</button>
     </form>
-    <a class="btn secondary" href="/records/{{ c.record_type }}/{{ c.record_id }}"
+    <a class="btn secondary" target="_blank" href="/records/{{ c.record_type }}/{{ c.record_id }}"
        style="padding:4px 11px; font-size:12px;">Open record</a>
   </div>
 </div>

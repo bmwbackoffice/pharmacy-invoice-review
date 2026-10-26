@@ -63,7 +63,7 @@
   {% if loop.first or r.day != runs[loop.index0 - 1].day %}
   <div class="runs-day">{% if r.day == today %}Today{% elif (today - r.day).days == 1 %}Yesterday{% else %}{{ r.started.strftime('%A %m/%d/%Y') }}{% endif %}</div>
   {% endif %}
-  <details class="run run-{{ r.status }}{{ ' quiet' if r.quiet else '' }}">
+  <details class="run run-{{ r.status }}{{ ' quiet' if r.quiet else '' }}"{{ ' open' if loop.first }}>
     <summary title="{{ r.result }}">
       <span class="run-pill">{{ r.label }}</span>
       <span class="run-time">{{ r.time }}</span>

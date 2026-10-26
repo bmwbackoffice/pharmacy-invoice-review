@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+{% block content %}
+<style>
+  .rp-filters { display:flex; gap:6px; flex-wrap:wrap; align-items:center; margin:4px 0 14px; }
+  .rp-filters a.rp-range { padding:5px 12px; border-radius:6px; background:#e5e7eb; color:var(--ink); text-decoration:none; font-size:13px; }
+  .rp-filters a.rp-range.on { background:var(--brand); color:#fff; font-weight:600; }
+  .rp-filters .rp-csv { margin-left:auto; font-size:13px; }
+  .rp-tiles { display:grid; grid-template-columns:repeat(auto-fill, minmax(165px, 1fr)); gap:10px; margin-bottom:16px; }
+  .rp-tile { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px; }
+  .rp-tile .v { font-size:26px; font-weight:700; line-height:1.1; }
+  .rp-tile .l { font-weight:600; margin-top:4px; }
+  .rp-tile .n { font-size:12px; color:var(--muted); margin-top:2px; }
+  .rp-legend { display:flex; gap:4px 14px; flex-wrap:wrap; font-size:12.5px; color:var(--ink); margin:2px 0 6px; }
+  .rp-legend .sw { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; vertical-align:-1px; }
+  .rp-chart { position:relative; }
+  /* The drawing scales with its box, text included: a floor keeps the labels readable on a narrow screen (the
+     chart scrolls sideways there) and a ceiling keeps them from growing on a wide one. */
+  .rp-chart .rp-scroll { overflow-x:auto; }
+  .rp-chart svg { width:100%; min-width:620px; max-width:1100px; height:auto; display:block; }
+  .rp-chart svg:focus { outline:2px solid var(--brand); outline-offset:2px; border-radius:4px; }
+  .rp-chart .grid { stroke:#e1e0d9; stroke-width:1; }
+  .rp-chart .base { stroke:#c3c2b7; stroke-width:1; }
+  .rp-chart .tick { fill:#898781; font-size:13px; font-variant-numeric:tabular-nums; }
+  .rp-chart .col-hit { fill:transparent; cursor:default; }
+  .rp-chart .col-hit.on { fill:rgba(43,108,176,.06); }
+  .rp-tip { position:absolute; pointer-events:none; background:#fff; border:1px solid var(--line); border-radius:6px;
+            box-shadow:0 2px 8px rgba(0,0,0,.10); padding:7px 10px; font-size:12.5px; min-width:150px; display:none; z-index:5; }
+  .rp-tip .d { color:var(--muted); margin-bottom:3px; }
+  .rp-tip .t { font-weight:700; font-size:14px; margin-bottom:4px; }
+  .rp-tip .row { display:flex; align-items:center; gap:6px; line-height:1.55; }
+  .rp-tip .key { width:12px; height:0; border-top:2px solid; }
+  .rp-tip .row b { min-width:26px; text-align:right; font-variant-numeric:tabular-nums; }
+  .rp-wrap { overflow-x:auto; }
+  table.rp-table th, table.rp-table td { white-space:nowrap; }
+  table.rp-table th { position:static; font-size:12.5px; }
+  table.rp-table td.num, table.rp-table th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  table.rp-table th.grp { text-align:center; border-bottom:1px solid var(--line); background:#f3f4f6; }
+  table.rp-table td.sep, table.rp-table th.sep { border-left:1px solid var(--line); }
+  table.rp-table tr.weekend td:first-child { color:var(--muted); }
+  table.rp-table td .z { color:#c3c2b7; }
+  table.rp-table tfoot td { font-weight:700; border-top:2px solid var(--line); background:#fafbfc; }
+  .rp-defs { font-size:12.5px; color:var(--muted); }
+  .rp-defs li { margin:3px 0; }
+</style>
+
+{% macro num(v) -%}{% if v %}{{ '{:,}'.format(v) }}{% else %}<span class="z">0</span>{% endif %}{%- endmacro %}
+{% macro money(v) -%}{% if v %}${{ '{:,.0f}'.format(v) }}{% else %}<span class="z">$0</span>{% endif %}{%- endmacro %}
+{% set t = rep.totals %}
+
+<h2>Daily report</h2>
+<p class="muted" style="margin-top:-6px;">What came in each day and what was done with it: emails received and how the
+  system read them, records saved, items sent to review, bills entered in QuickBooks and duplicates set aside.
+  {{ rep.start | us_date }} to today ({{ rep.days }} days). Today is still in progress.</p>
+
+<div class="rp-filters">
+  <span class="muted">Period:</span>
+  {% for n in choices %}
+    <a class="rp-range{{ ' on' if n == rep.days }}" href="/reports/daily?days={{ n }}">{{ n }} days</a>
+  {% endfor %}
+  <a class="rp-csv" href="/reports/daily.csv?days={{ rep.days }}">Download CSV</a>
+</div>
+
+<div class="rp-tiles">
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.emails) }}</div><div class="l">Emails received</div>
+    <div class="n">{{ '{:,.0f}'.format(t.emails / rep.days) }} a day on average</div></div>
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.bills) }}</div><div class="l">Bills recorded</div>
+    <div class="n">${{ '{:,.0f}'.format(t.bills_amt) }} · {{ '{:,}'.format(t.for_qb) }} for QuickBooks</div></div>
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.payments) }}</div><div class="l">Payments recorded</div>
+    <div class="n">{{ '{:,}'.format(t.credits) }} credit memo{{ '' if t.credits == 1 else 's' }} too</div></div>
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.review) }}</div><div class="l">Sent to review</div>
+    <div class="n">items the runs flagged for a person</div></div>
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.entered) }}</div><div class="l">Entered in QuickBooks</div>
+    <div class="n">${{ '{:,.0f}'.format(t.entered_amt) }} of bills, marked by people</div></div>
+  <div class="rp-tile"><div class="v">{{ '{:,}'.format(t.dups) }}</div><div class="l">Duplicates set aside</div>
+    <div class="n">copies kept out of QuickBooks</div></div>
+</div>
+
+<div class="card">
+  <strong>Emails received per day, by type</strong>
+  <div class="rp-legend" aria-hidden="true">
+    {% for _k, label, color in series %}<span><span class="sw" style="background:{{ color }}"></span>{{ label }}</span>{% endfor %}
+  </div>
+  <div class="rp-chart" id="rp-chart">
+    <div class="rp-scroll">
+    <svg viewBox="0 0 {{ chart.W }} {{ chart.H }}" role="img" tabindex="0"
+         aria-label="Emails received per day by type, {{ rep.days }} days. Use the left and right arrow keys to read each day; the table below has every value.">
+      {% for tk in chart.ticks %}
+        <line class="{{ 'base' if tk.v == 0 else 'grid' }}" x1="{{ chart.left }}" x2="{{ chart.right }}" y1="{{ '%.1f' % tk.y }}" y2="{{ '%.1f' % tk.y }}"></line>
+        <text class="tick" x="{{ chart.left - 6 }}" y="{{ '%.1f' % (tk.y + 4) }}" text-anchor="end">{{ '{:,}'.format(tk.v) }}</text>
+      {% endfor %}
+      {% for c in chart.cols %}
+        {% for s in c.segs %}<path d="{{ s.d }}" fill="{{ s.color }}"></path>{% endfor %}
+        {% if c.label %}<text class="tick" x="{{ '%.1f' % c.cx }}" y="{{ chart.base + 17 }}" text-anchor="middle">{{ c.label }}</text>{% endif %}
+      {% endfor %}
+      {% for c in chart.cols %}
+        <rect class="col-hit" data-i="{{ loop.index0 }}" x="{{ '%.1f' % c.x }}" y="{{ chart.top }}" width="{{ '%.1f' % c.w }}" height="{{ chart.plot_h }}"></rect>
+      {% endfor %}
+    </svg>
+    </div>
+    <div class="rp-tip" id="rp-tip"></div>
+  </div>
+</div>
+
+<div class="card">
+  <strong>Day by day</strong> <span class="muted">newest first · weekend days in gray</span>
+  <div class="rp-wrap" style="margin-top:8px;">
+  <table class="rp-table no-colresize">
+    <thead>
+      <tr>
+        <th rowspan="2">Day</th>
+        <th class="grp sep" colspan="7">Emails received</th>
+        <th class="grp sep" colspan="5">Records saved</th>
+        <th class="num sep" rowspan="2">Sent to<br>review</th>
+        <th class="grp sep" colspan="2">Entered in QuickBooks</th>
+        <th class="num sep" rowspan="2">Duplicates<br>set aside</th>
+      </tr>
+      <tr>
+        <th class="num sep">Total</th>
+        {% for _k, label, _c in series %}<th class="num">{{ label }}</th>{% endfor %}
+        <th class="num sep">Bills</th><th class="num" title="Bills not kept out of QuickBooks (excluded vendors, don't enter)">For QB</th>
+        <th class="num">Bills $</th><th class="num">Credit memos</th><th class="num">Payments</th>
+        <th class="num sep">Bills</th><th class="num">$</th>
+      </tr>
+    </thead>
+    <tbody>
+    {% for r in rep.rows %}
+      <tr class="{{ 'weekend' if r.day.weekday() >= 5 }}">
+        <td>{{ weekdays[r.day.weekday()] }} {{ r.day | us_date }}{% if loop.first %} <span class="muted">(today)</span>{% endif %}</td>
+        <td class="num sep"><strong>{{ num(r.emails) }}</strong></td>
+        {% for k, _label, _c in series %}<td class="num">{{ num(r[k]) }}</td>{% endfor %}
+        <td class="num sep">{{ num(r.bills) }}</td><td class="num">{{ num(r.for_qb) }}</td>
+        <td class="num">{{ money(r.bills_amt) }}</td><td class="num">{{ num(r.credits) }}</td><td class="num">{{ num(r.payments) }}</td>
+        <td class="num sep">{{ num(r.review) }}</td>
+        <td class="num sep">{{ num(r.entered) }}</td><td class="num">{{ money(r.entered_amt) }}</td>
+        <td class="num sep">{{ num(r.dups) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+    <tfoot>
+      <tr>
+        <td>Total</td>
+        <td class="num sep">{{ num(t.emails) }}</td>
+        {% for k, _label, _c in series %}<td class="num">{{ num(t[k]) }}</td>{% endfor %}
+        <td class="num sep">{{ num(t.bills) }}</td><td class="num">{{ num(t.for_qb) }}</td>
+        <td class="num">{{ money(t.bills_amt) }}</td><td class="num">{{ num(t.credits) }}</td><td class="num">{{ num(t.payments) }}</td>
+        <td class="num sep">{{ num(t.review) }}</td>
+        <td class="num sep">{{ num(t.entered) }}</td><td class="num">{{ money(t.entered_amt) }}</td>
+        <td class="num sep">{{ num(t.dups) }}</td>
+      </tr>
+    </tfoot>
+  </table>
+  </div>
+</div>
+
+<div class="card">
+  <strong>By store</strong> <span class="muted">bills for these {{ rep.days }} days; ready to export and last entry are as of now, as on the dashboard</span>
+  <div class="rp-wrap" style="margin-top:8px;">
+  <table class="rp-table no-colresize" style="width:auto;">
+    <thead><tr>
+      <th>Store</th><th class="num sep">Bills recorded</th><th class="num">Bills $</th><th class="num">For QB</th>
+      <th class="num sep">Entered in QB</th><th class="num">$ entered</th>
+      <th class="num sep">Ready to export</th><th>Last entry</th>
+    </tr></thead>
+    <tbody>
+    {% for s in rep.stores %}
+      <tr>
+        <td>{% if s.store %}{{ (s.store | store_label) or s.store }}{% else %}<span class="muted">No store / not in Setup</span>{% endif %}</td>
+        <td class="num sep">{{ num(s.bills) }}</td><td class="num">{{ money(s.bills_amt) }}</td><td class="num">{{ num(s.for_qb) }}</td>
+        <td class="num sep">{{ num(s.entered) }}</td><td class="num">{{ money(s.entered_amt) }}</td>
+        <td class="num sep">{% if s.ready is none %}<span class="muted">—</span>{% elif s.ready %}<a href="/qb?store={{ s.store | urlencode }}">{{ '{:,}'.format(s.ready) }}</a>{% else %}<span class="z">0</span>{% endif %}</td>
+        <td>{{ (s.last_at | us_datetime) if s.last_at else '—' }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</div>
+
+<details class="card rp-defs">
+  <summary><strong style="color:var(--ink);">What the numbers mean</strong></summary>
+  <ul>
+    <li><strong>Emails received</strong>: emails that reached the invoice mailbox that day (Gmail's receive time), plus
+      documents uploaded by hand on their upload day, by how the system read them. <em>Other</em> = spam, unknown,
+      unreadable, or not read yet. One email can hold several records.</li>
+    <li><strong>Bills recorded</strong>: invoice records saved that day, not counting copies set aside as duplicates.
+      <em>For QB</em> leaves out bills kept out of QuickBooks (excluded vendors, "don't enter"). Sales orders count on
+      the day they're recorded as the bill.</li>
+    <li><strong>Payments / credit memos</strong>: records saved that day (payment duplicates left out).</li>
+    <li><strong>Sent to review</strong>: items the automatic runs put in the review queue that day. An item that's
+      answered, re-read and flagged again counts again.</li>
+    <li><strong>Entered in QuickBooks</strong>: invoices and credit memos someone marked entered that day; the $ is
+      the invoices. Automatic marks (a QuickBooks upload matching a bill, automatic settling) aren't counted, as on
+      the dashboard.</li>
+    <li><strong>Duplicates set aside</strong>: invoice and payment copies set aside as duplicates, automatically or by a
+      person. A copy set aside the moment it was saved counts on its save day.</li>
+  </ul>
+</details>
+
+<script>
+(function () {
+  var data = {{ chart.readout | tojson }};
+  var wrap = document.getElementById('rp-chart'), svg = wrap.querySelector('svg'), tip = document.getElementById('rp-tip');
+  var hits = wrap.querySelectorAll('.col-hit'), cur = -1;
+  function show(i) {
+    if (i < 0 || i >= data.length) return;
+    cur = i;
+    hits.forEach(function (h) { h.classList.toggle('on', +h.dataset.i === i); });
+    var d = data[i];
+    tip.textContent = '';
+    var day = document.createElement('div'); day.className = 'd'; day.textContent = d.day; tip.appendChild(day);
+    var tot = document.createElement('div'); tot.className = 't';
+    tot.textContent = d.total.toLocaleString() + (d.total === 1 ? ' email' : ' emails'); tip.appendChild(tot);
+    for (var p = d.parts.length - 1; p >= 0; p--) {          // top of the stack first, as drawn
+      var row = document.createElement('div'); row.className = 'row';
+      var key = document.createElement('span'); key.className = 'key'; key.style.borderTopColor = d.parts[p][1];
+      var val = document.createElement('b'); val.textContent = d.parts[p][2].toLocaleString();
+      var lab = document.createElement('span'); lab.textContent = d.parts[p][0];
+      row.appendChild(key); row.appendChild(val); row.appendChild(lab); tip.appendChild(row);
+    }
+    var box = wrap.getBoundingClientRect(), r = hits[i].getBoundingClientRect();
+    tip.style.display = 'block';
+    var left = r.left - box.left + r.width / 2 + 10;
+    if (left + tip.offsetWidth > box.width) left = r.left - box.left + r.width / 2 - tip.offsetWidth - 10;
+    tip.style.left = Math.max(0, left) + 'px';
+    tip.style.top = '8px';
+  }
+  function hide() { tip.style.display = 'none'; hits.forEach(function (h) { h.classList.remove('on'); }); }
+  hits.forEach(function (h) {
+    h.addEventListener('pointerenter', function () { show(+h.dataset.i); });
+  });
+  svg.addEventListener('pointerleave', hide);
+  svg.addEventListener('focus', function () { show(cur >= 0 ? cur : data.length - 1); });
+  svg.addEventListener('blur', hide);
+  svg.addEventListener('keydown', function (e) {
+    if (e.key === 'ArrowLeft') { show(Math.max(0, cur - 1)); e.preventDefault(); }
+    else if (e.key === 'ArrowRight') { show(Math.min(data.length - 1, cur + 1)); e.preventDefault(); }
+    else if (e.key === 'Escape') { hide(); }
+  });
+})();
+</script>
+{% endblock %}

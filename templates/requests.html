@@ -43,8 +43,16 @@
   <div class="card"><p class="muted" style="margin:0;">No requests yet.</p></div>
 {% endif %}
 
+{% set n_done = requests | selectattr('status', 'equalto', 'done') | list | length %}
+{% if n_done %}
+<style> body:not(.show-done) details.req-done { display:none; } </style>
+<p style="margin:0 0 8px;"><label style="font-weight:400; cursor:pointer;">
+  <input type="checkbox" id="show-done" autocomplete="off" style="width:auto;"
+         onchange="document.body.classList.toggle('show-done', this.checked);"> Show done ({{ n_done }})</label></p>
+{% endif %}
+
 {% for r in requests %}
-<details class="card" style="padding:8px 12px; margin-bottom:8px;">
+<details class="card{{ ' req-done' if r.status == 'done' }}" style="padding:8px 12px; margin-bottom:8px;">
   <summary style="cursor:pointer;">
     <strong>{{ r.title or '(untitled)' }}</strong>
     {% if r.category %}<span class="pill" style="background:#eef2ff;color:#4338ca;">{{ r.category }}</span>{% endif %}

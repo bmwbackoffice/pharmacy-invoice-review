@@ -80,6 +80,8 @@ ALTER TABLE stores ADD COLUMN IF NOT EXISTS display_name TEXT;
 
 -- Per-user UI preferences (e.g. QB-entry column view/order + CSV export layout).
 ALTER TABLE users ADD COLUMN IF NOT EXISTS preferences JSONB DEFAULT '{}';
+-- Read-only users who may still make changes on a few pages (2026-10-21): comma list of WRITABLE_PAGES keys.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS edit_pages TEXT;
 
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS entered_qb_by TEXT;
 ALTER TABLE invoices ADD COLUMN IF NOT EXISTS entered_qb_at TIMESTAMPTZ;
@@ -267,6 +269,18 @@ CREATE OR REPLACE VIEW all_records AS
       FROM pending_sales_orders so LEFT JOIN emails e ON e.filename = coalesce(so.source_email, so.source_file)
      WHERE so.status = 'held';
 
+-- Per-user notifications (2026-10-21): shown on the user's dashboard until dismissed. First use: a change
+-- request's status changed by an admin -> its submitter is told.
+CREATE TABLE IF NOT EXISTS user_notifications (
+    id          SERIAL PRIMARY KEY,
+    username    TEXT NOT NULL,
+    message     TEXT NOT NULL,
+    link        TEXT,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    read_at     TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS ix_user_notifications_unread ON user_notifications (username, read_at);
+
 -- App change/feature requests: same review lifecycle as flags (pending -> dismiss/approve ->
 -- optional read-only investigation -> build -> done), but NOT tied to any accounting record.
 CREATE TABLE IF NOT EXISTS change_requests (
@@ -308,13 +322,9 @@ CREATE TABLE IF NOT EXISTS no_live_copy_confirmed (
 
 def init_web_schema():
     database.init_db()  # ensure base tables exist first
-    conn = connect()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(WEB_DDL)
-        conn.commit()
-    finally:
-        conn.close()
+    # Only when WEB_DDL changed, with a short lock wait (database.apply_schema, 2026-10-26): it replaces the
+    # all_records view and alters invoices / payments, which used to queue behind a classify run at every restart.
+    database.apply_schema("web", WEB_DDL)
 
 
 # --------------------------------------------------------------------------- #
@@ -414,9 +424,47 @@ def list_users(sort=None, direction=None):
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             order = _order_clause(sort, direction, _USER_SORT, "username")
-            cur.execute(f"SELECT id, username, display_name, role, active, created_at "
+            cur.execute(f"SELECT id, username, display_name, role, active, created_at, edit_pages "
                         f"FROM users {order}")
             return cur.fetchall()
+    finally:
+        conn.close()
+
+
+# Pages a read-only user can be allowed to change things on (Users > Edit). key -> (label, path prefixes that
+# the page itself and its buttons post to).
+WRITABLE_PAGES = {
+    "qb_doubles": ("In QuickBooks twice?", ("/qb-reconcile/doubles",)),
+    "qb_corrections": ("QB corrections", ("/qb-corrections",)),
+    "correspondence": ("Correspondence", ("/correspondence",)),
+}
+
+
+def user_edit_pages(user):
+    """The WRITABLE_PAGES keys this read-only user may change things on."""
+    return [k for k in (str((user or {}).get("edit_pages") or "")).split(",") if k.strip() in WRITABLE_PAGES]
+
+
+def user_can_write_path(user, path):
+    """True when a READ-ONLY user is allowed to make changes at this path (other roles: always True)."""
+    if not user or user.get("role") != "viewer":
+        return True
+    return any(path.startswith(pre) for k in user_edit_pages(user) for pre in WRITABLE_PAGES[k.strip()][1])
+
+
+def set_user_edit_pages(user_id, keys, admin_username):
+    val = ",".join(k for k in keys if k in WRITABLE_PAGES) or None
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT edit_pages FROM users WHERE id = %s", (user_id,))
+            row = cur.fetchone()
+            old = row[0] if row else None
+            if (old or None) != val:
+                cur.execute("UPDATE users SET edit_pages = %s WHERE id = %s", (val, user_id))
+                cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                            "VALUES ('users',%s,'edit_pages',%s,%s,%s)", (user_id, old, val, admin_username))
+        conn.commit()
     finally:
         conn.close()
 
@@ -1613,6 +1661,56 @@ def clear_duplicate_flag(record_type, record_id, username):
 # copy going forward", which check_duplicate does for new copies) and nothing called it.)
 
 
+def set_kept_number(record_type, record_id, number, username):
+    """Give the copy kept on Possible duplicates a corrected bill number (2026-10-20, Joel: keep copy 1
+    but with copy 2's number). Only for a copy NOT entered in QuickBooks. Updates the record and its
+    duplicate-ledger row (so later copies match the corrected number) and logs both. Deliberately skips
+    update_record_field's duplicate re-check: the copy that had this number was just set aside as this
+    one's duplicate, so the re-check would flag the kept copy against it. Returns True when changed."""
+    number = (number or "").strip()
+    if record_type not in ("invoice", "payment") or not number:
+        return False
+    table = _TABLE[record_type]
+    col = EDITABLE[record_type]["number"]
+    ledger, lnum, lamt = (("invoice_history", "invoice_number", "invoice_amount") if record_type == "invoice"
+                          else ("payment_history", "reference_number", "amount"))
+    conn = connect()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (record_id,))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError("record not found")
+            if row.get("entered_in_qb"):
+                raise ValueError("This copy is already entered in QuickBooks; its number can't be changed here.")
+            old = row.get(col)
+            if (old or "") == number:
+                conn.rollback()
+                return False
+            cur.execute(f"UPDATE {table} SET {col} = %s, edited_by = %s, edited_at = now() WHERE id = %s",
+                        (number, username, record_id))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES (%s,%s,%s,%s,%s,%s)", (table, record_id, col, old, number,
+                                                       f"{username} (kept on Possible duplicates)"))
+            cur.execute(f"SELECT id, {lnum} AS n FROM {ledger} WHERE source_file = %s "
+                        f"AND lower(coalesce({lnum}, '')) = lower(coalesce(%s, '')) "
+                        f"AND abs(coalesce({lamt}, 0) - coalesce(%s, 0)) < 0.005",
+                        (row.get("email_filename"), old, row.get("amount")))
+            for h in cur.fetchall():
+                cur.execute(f"UPDATE {ledger} SET {lnum} = %s WHERE id = %s", (number, h["id"]))
+                cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                            "VALUES (%s,%s,%s,%s,%s,%s)", (ledger, h["id"], lnum, h["n"], number,
+                                                           f"{username} (kept on Possible duplicates)"))
+        conn.commit()
+        return True
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
 def keep_and_ignore_others(kept_type, kept_id, others, username):
     """Resolve an entire duplicate SET in one action: keep kept_type/kept_id as the
     correct copy (clearing its own duplicate_suspect flag, if it had one — e.g. the
@@ -2264,11 +2362,49 @@ def set_request_status(request_id, status, admin):
     conn = connect()
     try:
         with conn.cursor() as cur:
+            cur.execute("SELECT title, submitted_by, status FROM change_requests WHERE id = %s", (request_id,))
+            before = cur.fetchone()
             cur.execute(
                 "UPDATE change_requests SET status = %s, resolved_by = %s, "
                 "resolved_at = (CASE WHEN %s = 'pending' THEN NULL ELSE now() END) WHERE id = %s",
                 (status, admin, status, request_id))
+            # Tell the submitter (2026-10-21), unless nothing changed or they made the change themselves.
+            if before and before[1] and before[2] != status and before[1] != admin:
+                words = {"approved_for_build": "approved for build", "done": "done ✓",
+                         "dismissed": "dismissed", "pending": "put back to pending"}.get(status, status)
+                cur.execute("INSERT INTO user_notifications (username, message, link) VALUES (%s, %s, %s)",
+                            (before[1], f"Your change request \"{before[0]}\" was marked {words} by {admin}.",
+                             "/requests"))
         conn.commit()
+    finally:
+        conn.close()
+
+
+def list_notifications(username):
+    """Unread notifications for one user, newest first."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, message, link, created_at FROM user_notifications "
+                        "WHERE username = %s AND read_at IS NULL ORDER BY created_at DESC LIMIT 50", (username,))
+            return cur.fetchall()
+    except Exception:
+        return []
+    finally:
+        conn.close()
+
+
+def dismiss_notifications(username, notification_id=None):
+    """Mark one (or, with no id, all) of this user's notifications read."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if notification_id:
+                cur.execute("UPDATE user_notifications SET read_at = now() WHERE id = %s AND username = %s "
+                            "AND read_at IS NULL", (notification_id, username))
+            else:
+                cur.execute("UPDATE user_notifications SET read_at = now() WHERE username = %s AND read_at IS NULL",
+                            (username,))
     finally:
         conn.close()
 
@@ -2301,9 +2437,160 @@ def build_request_prompt(r):
     return "\n".join(lines)
 
 
-def update_record_field(record_type, record_id, ui_field, new_value, username):
+_QB_CORRECTION_FIELDS = ("amount", "number", "date", "vendor", "store", "sales_tax", "ship_charge")
+_QB_FIELD_LABEL = {"amount": "Amount", "number": "Bill #", "date": "Date", "vendor": "Vendor", "store": "Store",
+                   "sales_tax": "Sales tax", "ship_charge": "Shipping"}
+
+
+def _same_value(a, b):
+    if a in (None, "") and b in (None, ""):
+        return True
+    try:
+        return abs(float(a) - float(b)) < 0.005
+    except (TypeError, ValueError):
+        return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+def _note_qb_correction(cur, record_type, record_id, ui_field, row, old, new, username):
+    """Open (or update) the QuickBooks correction for this record + field. Several edits to one field keep
+    ONE open item, from the value QuickBooks has (the first old value) to the latest; editing it back to
+    that value closes the item by itself."""
+    num_col = EDITABLE.get(record_type, {}).get("number")
+    cur.execute("SELECT id, old_value FROM qb_corrections WHERE record_type=%s AND record_id=%s AND field=%s "
+                "AND done_at IS NULL ORDER BY id DESC LIMIT 1", (record_type, record_id, ui_field))
+    open_row = cur.fetchone()
+    new_s = None if new is None else str(new)
+    if open_row:
+        if _same_value(open_row["old_value"], new_s):
+            cur.execute("UPDATE qb_corrections SET done_at = now(), done_by = %s, note = 'changed back -- nothing to do' "
+                        "WHERE id = %s", (username, open_row["id"]))
+        else:
+            cur.execute("UPDATE qb_corrections SET new_value=%s, changed_by=%s, changed_at=now() WHERE id=%s",
+                        (new_s, username, open_row["id"]))
+        return
+    if _same_value(old, new_s):
+        return
+    cur.execute("INSERT INTO qb_corrections (record_type, record_id, field, old_value, new_value, store, vendor, number, "
+                "changed_by) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                (record_type, record_id, ui_field, None if old is None else str(old), new_s,
+                 row.get("store_matched"), row.get("vendor_matched"), row.get(num_col) if num_col else None, username))
+
+
+def list_qb_corrections(show="open"):
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            where = "WHERE done_at IS NULL" if show == "open" else ("WHERE done_at IS NOT NULL" if show == "done" else "")
+            cur.execute(f"SELECT * FROM qb_corrections {where} ORDER BY coalesce(done_at, changed_at) DESC, id DESC LIMIT 500")
+            rows = cur.fetchall()
+        for r in rows:
+            r["field_label"] = _QB_FIELD_LABEL.get(r["field"], r["field"])
+        return rows
+    finally:
+        conn.close()
+
+
+def qb_correction_done(correction_id, username, note=None):
+    """Someone made the change in QuickBooks: the record takes the new value now, and the item closes."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT * FROM qb_corrections WHERE id = %s AND done_at IS NULL", (correction_id,))
+            c = cur.fetchone()
+    finally:
+        conn.close()
+    if not c:
+        return False
+    update_record_field(c["record_type"], c["record_id"], c["field"], c["new_value"] or "",
+                        f"{username} (QB correction done)", qb_confirmed=True)
+    _close_qb_correction(correction_id, username, note)
+    return True
+
+
+def _close_qb_correction(correction_id, username, note=None):
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE qb_corrections SET done_at = now(), done_by = %s, note = coalesce(%s, note) "
+                        "WHERE id = %s AND done_at IS NULL", (username, (note or "").strip() or None, correction_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def resolve_qb_corrections_from_register():
+    """After a QuickBooks export upload (and when the page opens): an open correction whose bill shows the
+    NEW value in an export uploaded after the change (same store, related vendor, date within 10 days, bill #
+    = old or new) is applied to the record and closed ("confirmed by QuickBooks export"). One that still shows
+    the old value stays open with a note. Store / vendor changes are left for "Done in QB". Returns the
+    number closed."""
+    import classify_emails as ce
+    if not ce.VENDOR_STD:
+        ce.VENDOR_STD = ce.load_vendor_standardization()
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT c.*, i.invoice_date, i.amount AS rec_amount, i.invoice_number AS rec_number "
+                        "  FROM qb_corrections c JOIN invoices i ON c.record_type = 'invoice' AND i.id = c.record_id "
+                        " WHERE c.done_at IS NULL AND c.field IN ('amount', 'number', 'date')")
+            items = cur.fetchall()
+            if not items:
+                return 0
+            cur.execute("SELECT qb_store, date_from, date_to, uploaded_at FROM qb_register_coverage")
+            coverage = cur.fetchall()
+            cur.execute("SELECT qb_store, qb_date, qb_num, qb_name, qb_std_vendor, qb_amount FROM qb_register "
+                        "WHERE qb_type ILIKE 'bill'")
+            bills = cur.fetchall()
+    finally:
+        conn.close()
+    closed = 0
+    for c in items:
+        try:
+            d = datetime.datetime.strptime(str(c["invoice_date"] or "")[:10], "%Y-%m-%d").date()
+        except ValueError:
+            d = None
+        newer = [v for v in coverage if ce._norm(v["qb_store"]) == ce._norm(c["store"])
+                 and v["uploaded_at"] and c["changed_at"] and v["uploaded_at"] > c["changed_at"]
+                 and d and v["date_from"] and v["date_to"] and v["date_from"] <= d <= v["date_to"]]
+        if not newer:
+            continue
+        nums = {ce._num_core(x) for x in (c["number"], c["rec_number"], c["new_value"] if c["field"] == "number" else None) if x}
+        cands = [b for b in bills if ce._norm(b["qb_store"]) == ce._norm(c["store"])
+                 and ce._vendors_related(b["qb_name"], c["vendor"] or "")
+                 and (not d or not b["qb_date"] or abs((b["qb_date"] - d).days) <= 10)
+                 and (not nums or ce._num_core(b["qb_num"]) in nums)]
+        def shows_new(b):
+            if c["field"] == "amount":
+                return _same_value(b["qb_amount"], c["new_value"])
+            if c["field"] == "number":
+                return ce._num_core(b["qb_num"]) == ce._num_core(c["new_value"])
+            return b["qb_date"] and str(b["qb_date"]) == str(c["new_value"])[:10]
+        if any(shows_new(b) for b in cands):
+            update_record_field(c["record_type"], c["record_id"], c["field"], c["new_value"] or "",
+                                "QuickBooks export (QB correction confirmed)", qb_confirmed=True)
+            _close_qb_correction(c["id"], "QuickBooks export", "confirmed by a newer QuickBooks export")
+            closed += 1
+    return closed
+
+
+def qb_corrections_open_count():
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT count(*) FROM qb_corrections WHERE done_at IS NULL")
+            return cur.fetchone()[0]
+    finally:
+        conn.close()
+
+
+def update_record_field(record_type, record_id, ui_field, new_value, username, qb_confirmed=False):
     """Update one whitelisted field, log old→new, and (if vendor/number changed)
-    re-evaluate skip_qb_import + Possible Duplicate using the pipeline's rules."""
+    re-evaluate skip_qb_import + Possible Duplicate using the pipeline's rules.
+
+    A record already entered in QuickBooks is NOT changed (2026-10-21, Joel: changing it would break the
+    match with QuickBooks): the edit becomes a pending QB correction instead, and the record takes the new
+    value only once QuickBooks has it -- a newer QuickBooks export shows it, or someone clicks "Done in QB"
+    (qb_confirmed=True). Returns "pending" in that case, else None."""
     import classify_emails as ce  # reuse is_excluded_vendor + check_duplicate
 
     table = _TABLE[record_type]
@@ -2327,6 +2614,10 @@ def update_record_field(record_type, record_id, ui_field, new_value, username):
             if not row:
                 raise ValueError("record not found")
             old = row.get(col)
+            if row.get("entered_in_qb") and ui_field in _QB_CORRECTION_FIELDS and not qb_confirmed:
+                _note_qb_correction(cur, record_type, record_id, ui_field, row, old, value, username)
+                conn.commit()
+                return "pending"
 
             cur.execute(f"UPDATE {table} SET {col} = %s, edited_by = %s, edited_at = now() "
                         f"WHERE id = %s", (value, username, record_id))
@@ -2454,7 +2745,10 @@ def list_all_records(store=None, vendor=None, record_type=None, status=None,
                      entered=None, date_from=None, date_to=None, search=None,
                      sort="date_added", direction="desc", run_id=None, email_filename=None,
                      excluded="include", dup=None, ignored=None, group=None,
-                     amount_min=None, amount_max=None, amount=None):
+                     amount_min=None, amount_max=None, amount=None, page=None, page_size=None):
+    """The rows of all_records matching the filters, sorted. Without page_size: the first 2,000 (a list). With
+    page_size (the Records page, 2026-10-26: it rendered up to 2,000 rows, a 3.6 MB page): (one page of rows,
+    total matching), so every record is reachable a page at a time."""
     # Archived old-system rows (purge_non_email_records.py --archive) are hidden here.
     clauses, params = ["legacy_migrated IS NOT TRUE"], []
     if store:
@@ -2535,6 +2829,20 @@ def list_all_records(store=None, vendor=None, record_type=None, status=None,
                     # Unknown/old group id -> degrade safely to today's exact-match-only behavior.
                     clauses.append("duplicate_group_id = %s"); params.append(group)
             where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+            if page_size:
+                cur.execute(f"SELECT count(*) AS n FROM all_records {where}", params)
+                total = cur.fetchone()["n"]
+                size = max(1, int(page_size))
+                last = max(1, -(-total // size))
+                try:
+                    page = max(1, min(int(page or 1), last))
+                except (TypeError, ValueError):
+                    page = 1
+                # record_type + record_id break ties (many rows share a date), so no row shows on two pages.
+                cur.execute(f"SELECT * FROM all_records {where} "
+                            f"ORDER BY {order} {direction} NULLS LAST, record_type, record_id DESC "
+                            f"LIMIT %s OFFSET %s", params + [size, (page - 1) * size])
+                return cur.fetchall(), total
             cur.execute(f"SELECT * FROM all_records {where} "
                         f"ORDER BY {order} {direction} NULLS LAST LIMIT 2000", params)
             return cur.fetchall()
@@ -2595,6 +2903,20 @@ def vendor_mapping_doubt(vendor_matched, standard_vendor):
         return False                                  # can't tell — don't cry wolf
     listed = tables.get("lookup", {}).get(k(vendor))
     return not (listed and k(listed) == k(std))
+
+
+def qb_twice_notes():
+    """{invoice id: note} for live invoices whose duplicate set is in QuickBooks twice (dup_settle)."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, qb_twice FROM invoices WHERE qb_twice IS NOT NULL "
+                        "AND duplicate_ignored IS NOT TRUE AND ignored_at IS NULL")
+            return {r[0]: r[1] for r in cur.fetchall()}
+    except Exception:
+        return {}
+    finally:
+        conn.close()
 
 
 def list_duplicate_candidates():
@@ -3053,7 +3375,7 @@ def qb_pending_count():
         conn.close()
 
 
-def qb_confirm_candidate(candidate_id, username):
+def qb_confirm_candidate(candidate_id, username, right="bill"):
     """Confirm a doubtful match: mark the linked record entered_in_qb=TRUE (audited) and the
     candidate 'confirmed'. Atomic. Returns True if a pending candidate was acted on."""
     conn = connect()
@@ -3077,6 +3399,31 @@ def qb_confirm_candidate(candidate_id, username):
                  actor))
             cur.execute("UPDATE qb_match_candidates SET status = 'confirmed', decided_by = %s, "
                         "decided_at = now() WHERE id = %s", (username, candidate_id))
+            # Confirmed, but QuickBooks has a different amount than the bill (2026-10-22, Joel): QuickBooks needs
+            # updating -> a QB correction (QuickBooks' amount -> the bill's), closed by Done in QB or a newer export.
+            cur.execute(f"SELECT * FROM {table} WHERE id = %s", (c["record_id"],))
+            rec = cur.fetchone() or {}
+            if right == "qb" and c["record_type"] in ("invoice", "credit_memo") and c.get("qb_amount") is not None \
+                    and rec.get("amount") is not None and not _same_value(rec["amount"], c["qb_amount"]):
+                # QuickBooks has the right amount: the app's record takes it (logged), nothing to fix in QB.
+                cur.execute(f"UPDATE {table} SET amount = %s, edited_by = %s, edited_at = now() WHERE id = %s",
+                            (c["qb_amount"], actor, c["record_id"]))
+                cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                            "VALUES (%s,%s,'amount',%s,%s,%s)",
+                            (table, c["record_id"], str(rec["amount"]), str(c["qb_amount"]),
+                             f"{actor} (QuickBooks has the right amount)"))
+            elif (c["record_type"] in ("invoice", "credit_memo") and rec.get("amount") is not None
+                    and c.get("qb_amount") is not None and not _same_value(rec["amount"], c["qb_amount"])):
+                num_col = EDITABLE.get(c["record_type"], {}).get("number")
+                cur.execute("SELECT 1 FROM qb_corrections WHERE record_type=%s AND record_id=%s AND field='amount' "
+                            "AND done_at IS NULL", (c["record_type"], c["record_id"]))
+                if not cur.fetchone():
+                    cur.execute("INSERT INTO qb_corrections (record_type, record_id, field, old_value, new_value, store, "
+                                "vendor, number, changed_by, note) VALUES (%s,%s,'amount',%s,%s,%s,%s,%s,%s,%s)",
+                                (c["record_type"], c["record_id"], str(c["qb_amount"]), str(rec["amount"]),
+                                 rec.get("store_matched"), rec.get("vendor_matched"),
+                                 rec.get(num_col) if num_col else None, f"{username} via QB match review",
+                                 "QuickBooks has a different amount than the bill (found on QB match review)"))
         conn.commit()
         return True
     except Exception:
@@ -3098,6 +3445,276 @@ def qb_reject_candidate(candidate_id, username):
             ok = cur.rowcount > 0
         conn.commit()
         return ok
+    finally:
+        conn.close()
+
+
+def _qb_bill_key(b):
+    d = b["qb_date"].isoformat() if b.get("qb_date") else ""
+    parts = [str(b.get("qb_store") or ""), d, str(b.get("qb_num") or ""), str(b.get("qb_name") or ""),
+             f"{float(b.get('qb_amount') or 0):.2f}"]
+    if str(b.get("qb_type") or "").strip().lower() == "credit":
+        parts.append("credit")          # bills keep their old keys, so earlier "resolved" marks still apply
+    return "|".join(parts)
+
+
+def qb_double_entries(show="open"):
+    """Bills that may be in QuickBooks twice, from the saved QuickBooks register (every bill of every export
+    upload -- qb_register). A pair = two bills, same store, same amount, invoice dates within 10 days, the
+    same vendor (standard name, or one name inside the other), and the same invoice number -- or numbers
+    one character apart (a misread: added/dropped digit, look-alike swapped), or no number on one of them
+    and the same date. show: 'open' (default), 'dismissed', 'all'. Returns
+    [{key, a, b, why, strength, dismissed}] strongest first, newest first."""
+    import classify_emails as ce
+    if not ce.VENDOR_STD:
+        ce.VENDOR_STD = ce.load_vendor_standardization()
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            # Bills AND credits (2026-10-23); a bill is only ever paired with a bill, a credit with a credit.
+            cur.execute("SELECT qb_store, qb_type, qb_date, qb_num, qb_name, qb_std_vendor, qb_amount FROM qb_register "
+                        "WHERE (qb_type ILIKE 'bill' OR qb_type ILIKE 'credit') "
+                        "  AND qb_amount IS NOT NULL AND abs(qb_amount) >= 0.005")
+            rows_all = cur.fetchall()
+            bills = [b for b in rows_all if str(b["qb_type"]).strip().lower() == "bill"]
+            cur.execute("SELECT pair_key, dismissed_by, dismissed_at, note FROM qb_double_dismissed")
+            dismissed = {r["pair_key"]: r for r in cur.fetchall()}
+    finally:
+        conn.close()
+    groups = {}
+    for b in rows_all:
+        groups.setdefault((str(b["qb_type"]).strip().lower(), round(abs(float(b["qb_amount"])), 2)), []).append(b)
+    out, seen = [], set()
+    for grp in groups.values():
+        for i in range(len(grp)):
+            for j in range(i + 1, len(grp)):
+                a, b = grp[i], grp[j]
+                da, db = a["qb_date"], b["qb_date"]
+                if da and db and abs((da - db).days) > 10:
+                    continue
+                sa, sb = ce._norm(a["qb_std_vendor"]), ce._norm(b["qb_std_vendor"])
+                if not ((sa and sa == sb) or ce._vendors_related(a["qb_name"], b["qb_name"])):
+                    continue
+                na, nb = ce._num_key(a["qb_num"]), ce._num_key(b["qb_num"])
+                if ce._norm(a["qb_store"]) != ce._norm(b["qb_store"]):
+                    # Two stores' QuickBooks files (Joel 2026-10-20): only the SAME bill -- vendor, invoice
+                    # number, date and amount all equal -- since different stores do get look-alike bills.
+                    if not (na and na == nb and da and da == db):
+                        continue
+                    why, strength, kind = (f"same bill in two stores' QuickBooks ({a['qb_store']} and {b['qb_store']}) "
+                                           f"-- same vendor, number, date and amount"), 3, "two_stores"
+                elif na and nb:
+                    if na == nb:
+                        why, strength, kind = "same invoice number", 3, "same_number"
+                    elif ce._one_edit_apart(na, nb):
+                        why, strength, kind = "invoice numbers one character apart (likely a misread)", 2, "misread"
+                    elif da and db and da == db:
+                        # 2026-10-21: one bill read under two unrelated numbers (UNFI INV 93055097 vs its
+                        # coversheet 33625479, both keyed in). Same store/vendor/amount AND same date: check it.
+                        why, strength, kind = "same vendor, amount and date, but different numbers", 1, "same_day"
+                    else:
+                        continue
+                elif da and db and da == db:
+                    why, strength, kind = "same date, no invoice number on " + ("both" if not na and not nb else "one"), 1, "no_number"
+                else:
+                    continue
+                key = " || ".join(sorted([_qb_bill_key(a), _qb_bill_key(b)]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dis = dismissed.get(key)
+                if (show == "open" and dis) or (show == "dismissed" and not dis):
+                    continue
+                first, second = sorted([a, b], key=lambda x: (x["qb_date"] or datetime.date.min, str(x["qb_num"])))
+                out.append({"key": key, "a": first, "b": second, "why": why, "strength": strength,
+                            "kind": kind, "dismissed": dis,
+                            "credit": str(a.get("qb_type") or "").strip().lower() == "credit"})
+    # One document keyed in once as a BILL and once as a CREDIT (2026-10-23, Joel). Stricter than the rules
+    # above: same store, same vendor, same amount (sign ignored), the SAME bill number (present on both) and
+    # the SAME date.
+    by_amt = {}
+    for b in rows_all:
+        by_amt.setdefault(round(abs(float(b["qb_amount"])), 2), []).append(b)
+    for grp in by_amt.values():
+        bl = [x for x in grp if str(x["qb_type"]).strip().lower() == "bill"]
+        cr = [x for x in grp if str(x["qb_type"]).strip().lower() == "credit"]
+        for a in bl:
+            for b in cr:
+                na, nb = ce._num_key(a["qb_num"]), ce._num_key(b["qb_num"])
+                if not (na and na == nb and a["qb_date"] and a["qb_date"] == b["qb_date"]
+                        and ce._norm(a["qb_store"]) == ce._norm(b["qb_store"])):
+                    continue
+                sa, sb = ce._norm(a["qb_std_vendor"]), ce._norm(b["qb_std_vendor"])
+                if not ((sa and sa == sb) or ce._vendors_related(a["qb_name"], b["qb_name"])):
+                    continue
+                key = " || ".join(sorted([_qb_bill_key(a), _qb_bill_key(b)]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dis = dismissed.get(key)
+                if (show == "open" and dis) or (show == "dismissed" and not dis):
+                    continue
+                out.append({"key": key, "a": a, "b": b, "strength": 3, "kind": "bill_credit", "dismissed": dis,
+                            "why": "same document entered once as a bill and once as a credit", "credit": False})
+    # The app's own history (2026-10-21, Joel): copies of one bill (a duplicate set) where TWO OR MORE were
+    # marked entered in QuickBooks -- even if one was set aside later -- were probably keyed in twice. Listed
+    # until a QuickBooks export uploaded AFTER the later entry, covering the bill's date, shows the bill at
+    # most once; then it's settled and drops off by itself.
+    for p in _app_entered_twice(bills, ce):
+        dis = dismissed.get(p["key"])
+        if (show == "open" and dis) or (show == "dismissed" and not dis):
+            continue
+        p["dismissed"] = dis
+        out.append(p)
+    out.sort(key=lambda p: (-p["strength"], -(p["a"]["qb_date"] or datetime.date.min).toordinal()))
+    return out
+
+
+def _qb_same_bill(bill, rec, ce):
+    """A QuickBooks register bill that is this app record's bill: same store, vendor related, amount within
+    $1.00 (a bill keyed as $718.00 for $718.08), date within 10 days, and the number equal, one character off,
+    equal after dropping a tag (R204977-IN), or missing on either side."""
+    if ce._norm(bill["qb_store"]) != ce._norm(rec["qb_store"]):
+        return False
+    try:
+        if abs(float(bill["qb_amount"]) - float(rec["qb_amount"])) > 1.0:
+            return False
+    except (TypeError, ValueError):
+        return False
+    if bill["qb_date"] and rec["qb_date"] and abs((bill["qb_date"] - rec["qb_date"]).days) > 10:
+        return False
+    sb, sr = ce._norm(bill.get("qb_std_vendor")), ce._norm(rec.get("_std"))
+    if not ((sb and sb == sr) or ce._vendors_related(bill["qb_name"], rec["qb_name"])):
+        return False
+    nb, nr = ce._num_key(bill["qb_num"]), ce._num_key(rec["qb_num"])
+    if not nb or not nr:
+        return True
+    return nb == nr or ce._one_edit_apart(nb, nr) or ce._num_core(bill["qb_num"]) == ce._num_core(rec["qb_num"])
+
+
+def _app_entered_twice(bills, ce):
+    """Pairs for the 'twice' page from the app's own marks: in one duplicate group, 2+ invoices marked
+    entered in QB (set-aside copies included). Skipped once a later QuickBooks export of that store covers
+    the bill's date and holds it at most once."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, store_matched, vendor_matched, invoice_number, invoice_date, amount, "
+                        "       entered_qb_by, entered_qb_at, duplicate_ignored, duplicate_group_id "
+                        "  FROM invoices WHERE entered_in_qb IS TRUE AND coalesce(duplicate_group_id, '') <> '' "
+                        "   AND duplicate_group_id IN (SELECT duplicate_group_id FROM invoices WHERE entered_in_qb IS TRUE "
+                        "                               AND coalesce(duplicate_group_id, '') <> '' "
+                        "                             GROUP BY duplicate_group_id HAVING count(*) >= 2) "
+                        " ORDER BY duplicate_group_id, entered_qb_at NULLS FIRST, id")
+            rows = cur.fetchall()
+            cur.execute("SELECT qb_store, date_from, date_to, uploaded_at FROM qb_register_coverage")
+            coverage = cur.fetchall()
+    finally:
+        conn.close()
+    groups = {}
+    for r in rows:
+        groups.setdefault(r["duplicate_group_id"], []).append(r)
+    # Also copies that were never put in one duplicate set (2026-10-21: UNFI Maple $206.45, one bill read
+    # as 93055097 and 33625479, both marked entered, no set): two entered invoices with the same store,
+    # standard vendor, amount and date. Keyed by their ids, so "Not a duplicate" sticks.
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, store_matched, vendor_matched, invoice_number, invoice_date, amount, "
+                        "       entered_qb_by, entered_qb_at, duplicate_ignored, duplicate_group_id "
+                        "  FROM invoices WHERE entered_in_qb IS TRUE AND amount IS NOT NULL AND abs(amount) >= 0.005 "
+                        "   AND coalesce(invoice_date, '') <> '' AND coalesce(store_matched, '') <> ''")
+            pool = {}
+            for r in cur.fetchall():
+                k = (ce._norm(r["store_matched"]), ce._dedupe_vendor_key(r["vendor_matched"] or ""),
+                     round(float(r["amount"]), 2), str(r["invoice_date"])[:10])
+                if k[1]:
+                    pool.setdefault(k, []).append(r)
+    finally:
+        conn.close()
+    grouped_ids = {r["id"] for r in rows}
+    for k, members in pool.items():
+        loose = [m for m in members if m["id"] not in grouped_ids]
+        if len(members) >= 2 and loose:
+            groups["ids:" + ",".join(str(m["id"]) for m in members)] = members
+    out = []
+    for gid, members in groups.items():
+        recs = []
+        for m in members:
+            try:
+                d = datetime.datetime.strptime(str(m["invoice_date"] or "")[:10], "%Y-%m-%d").date()
+            except ValueError:
+                d = None
+            recs.append({"qb_store": m["store_matched"], "qb_name": m["vendor_matched"], "qb_num": m["invoice_number"],
+                         "qb_date": d, "qb_amount": m["amount"], "record_id": m["id"],
+                         "entered_by": m["entered_qb_by"], "entered_at": m["entered_qb_at"],
+                         "set_aside": bool(m["duplicate_ignored"]),
+                         "_std": (ce.VENDOR_STD.get("lookup", {}) or {}).get(ce._norm_vendor_std_key(m["vendor_matched"] or ""))
+                                 if ce.VENDOR_STD else None})
+        # A shared group id alone isn't enough (2026-10-21: a $624.54 Lantev bill and a $1,722.96 Ysf Trading
+        # bill shared one). The two entered copies must look like ONE bill: same store, amount within $1,
+        # dates within 10 days, related vendor.
+        pair = None
+        for i in range(len(recs)):
+            for j in range(i + 1, len(recs)):
+                x, y = recs[i], recs[j]
+                if ce._norm(x["qb_store"]) != ce._norm(y["qb_store"]):
+                    continue
+                try:
+                    if abs(float(x["qb_amount"]) - float(y["qb_amount"])) > 1.0:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                if x["qb_date"] and y["qb_date"] and abs((x["qb_date"] - y["qb_date"]).days) > 10:
+                    continue
+                if not ((x["_std"] and x["_std"] == y["_std"]) or ce._vendors_related(x["qb_name"], y["qb_name"])):
+                    continue
+                pair = (x, y)
+                break
+            if pair:
+                break
+        if not pair:
+            continue
+        a, b = pair
+        recs = [a, b]
+        last_entry = max((r["entered_at"] for r in recs if r["entered_at"]), default=None)
+        # Settled by a newer export? It must be uploaded after the later entry and cover the bill's date.
+        newer = [c for c in coverage if ce._norm(c["qb_store"]) == ce._norm(a["qb_store"])
+                 and (last_entry is None or (c["uploaded_at"] and c["uploaded_at"] > last_entry))
+                 and a["qb_date"] and c["date_from"] and c["date_to"] and c["date_from"] <= a["qb_date"] <= c["date_to"]]
+        in_qb = [bl for bl in bills if _qb_same_bill(bl, a, ce)]
+        if newer and len(in_qb) <= 1:
+            continue                     # the latest export shows it once: resolved by itself
+        if newer:
+            note = f"Newer export shows it {len(in_qb)}×."
+        else:
+            when = last_entry.strftime("%m/%d").lstrip("0") if last_entry else "the 2nd entry"
+            note = f"Clears itself when a {web_db_store_label(a['qb_store'])} export uploaded after {when} shows it once."
+        out.append({"key": f"app|{gid}|" + ",".join(str(r["record_id"]) for r in recs), "a": a, "b": b,
+                    "why": "marked entered in QuickBooks twice in the app", "strength": 3, "kind": "app_marks",
+                    "note": note, "dismissed": None})
+    return out
+
+
+def web_db_store_label(store):
+    try:
+        return store_label(store) or (store or "this store's")
+    except Exception:
+        return store or "this store's"
+
+
+def qb_double_dismiss(pair_key, username, note=None, restore=False):
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if restore:
+                cur.execute("DELETE FROM qb_double_dismissed WHERE pair_key = %s", (pair_key,))
+            else:
+                cur.execute("INSERT INTO qb_double_dismissed (pair_key, note, dismissed_by) VALUES (%s,%s,%s) "
+                            "ON CONFLICT (pair_key) DO NOTHING", (pair_key, (note or "").strip() or None, username))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('qb_double_dismissed', NULL, %s, NULL, %s, %s)",
+                        ("restored" if restore else "not a duplicate", pair_key[:200], username))
     finally:
         conn.close()
 
@@ -3248,6 +3865,280 @@ def last_qb_entry_by_store(gap_minutes=QB_ENTRY_GAP_MINUTES):
     return out
 
 
+# Daily report (2026-10-26, Joel: "how many items are being processed on daily basis and its breakdown, like
+# how many emails, how many of it were invoices, how many payments"). Periods offered on the page.
+REPORT_DAY_CHOICES = (7, 14, 30, 60, 90)
+# How the system read each email -> report column. Anything else (spam, unknown, unreadable, not read yet) is "other".
+REPORT_EMAIL_TYPES = ("invoice", "payment", "statement", "shipment_notice", "correspondence")
+# A person's "mark entered" click, as on the dashboard (last_qb_entry_by_store): QB reconcile matches ("… via …")
+# and "auto-…" marks don't count.
+_PERSON_ENTERED_SQL = ("coalesce(btrim(entered_qb_by), '') <> '' AND entered_qb_by NOT ILIKE '%% via %%' "
+                       "AND entered_qb_by NOT ILIKE 'auto%%'")
+
+
+def daily_report(days=14):
+    """What came in and what was done with it, per day for the last `days` days (today included), for the Daily
+    report page. Per day:
+      emails      emails received (Gmail receive time; a manual upload on its upload day) -- total and by how the
+                  system read them (REPORT_EMAIL_TYPES + "other"). A review document re-read under its own name has
+                  an emails row with no source (save_email_communication): not an email, left out.
+      bills       invoice records saved that day, copies set aside as duplicates left out; for_qb = of those, the
+                  ones not kept out of QuickBooks (excluded vendors, "don't enter"); bills_amt = the bills' total.
+      credits     credit memo records saved that day.  payments = payment records saved, duplicates left out.
+      review      items the classify runs that day sent to the review queue (runs.n_review; an item flagged again
+                  after a re-read counts again).
+      entered     invoices + credit memos a person marked entered in QuickBooks that day (automatic marks left out,
+                  as on the dashboard); entered_amt = the invoices' total.
+      dups        invoices and payments set aside as duplicates that day, automatically or by a person (a copy set
+                  aside when it was saved has no timestamp: its save day).
+    Returns {"days", "start", "rows" (newest first), "totals", "stores"}; stores = per store for the period (bills,
+    bills_amt, for_qb, entered, entered_amt) plus ready to export now and the last entry, as on the dashboard."""
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        days = 14
+    days = max(1, min(days, 120))
+    today = datetime.date.today()
+    start = today - datetime.timedelta(days=days - 1)
+    blank = {"emails": 0, **{t: 0 for t in REPORT_EMAIL_TYPES}, "other": 0, "bills": 0, "for_qb": 0,
+             "bills_amt": 0.0, "credits": 0, "payments": 0, "review": 0, "entered": 0, "entered_amt": 0.0, "dups": 0}
+    by_day = {start + datetime.timedelta(days=i): dict(blank) for i in range(days)}
+
+    def put(d, **vals):
+        row = by_day.get(d)
+        if row is not None:
+            for k, v in vals.items():
+                row[k] += float(v) if isinstance(row[k], float) else int(v or 0)
+
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT date(coalesce(received_at, date_added::timestamptz)), coalesce(email_type, ''), count(*)
+                             FROM emails
+                            WHERE source IS NOT NULL AND coalesce(received_at, date_added::timestamptz) >= %s
+                            GROUP BY 1, 2""", (start,))
+            for d, etype, n in cur.fetchall():
+                put(d, emails=n, **{etype if etype in REPORT_EMAIL_TYPES else "other": n})
+            cur.execute("""SELECT date_added,
+                                  count(*) FILTER (WHERE duplicate_ignored IS NOT TRUE),
+                                  count(*) FILTER (WHERE duplicate_ignored IS NOT TRUE AND skip_qb_import IS NOT TRUE),
+                                  coalesce(sum(amount) FILTER (WHERE duplicate_ignored IS NOT TRUE), 0)
+                             FROM invoices WHERE date_added >= %s GROUP BY 1""", (start,))
+            for d, n, n_qb, amt in cur.fetchall():
+                put(d, bills=n, for_qb=n_qb, bills_amt=amt)
+            cur.execute("SELECT date_added, count(*) FROM credit_memos WHERE date_added >= %s GROUP BY 1", (start,))
+            for d, n in cur.fetchall():
+                put(d, credits=n)
+            cur.execute("""SELECT date_added, count(*) FROM payments
+                            WHERE date_added >= %s AND duplicate_ignored IS NOT TRUE GROUP BY 1""", (start,))
+            for d, n in cur.fetchall():
+                put(d, payments=n)
+            cur.execute("SELECT date(started_at), coalesce(sum(n_review), 0) FROM runs WHERE started_at >= %s GROUP BY 1",
+                        (start,))
+            for d, n in cur.fetchall():
+                put(d, review=n)
+            cur.execute(f"""SELECT date(entered_qb_at), count(*), coalesce(sum(amt), 0) FROM (
+                                SELECT entered_qb_at, entered_qb_by, amount AS amt FROM invoices WHERE entered_in_qb IS TRUE
+                                UNION ALL
+                                SELECT entered_qb_at, entered_qb_by, 0 FROM credit_memos WHERE entered_in_qb IS TRUE) x
+                             WHERE entered_qb_at >= %s AND {_PERSON_ENTERED_SQL} GROUP BY 1""", (start,))
+            for d, n, amt in cur.fetchall():
+                put(d, entered=n, entered_amt=amt)
+            cur.execute("""SELECT date(coalesce(duplicate_ignored_at, date_added::timestamptz)), count(*) FROM (
+                                SELECT duplicate_ignored_at, date_added FROM invoices WHERE duplicate_ignored IS TRUE
+                                UNION ALL
+                                SELECT duplicate_ignored_at, date_added FROM payments WHERE duplicate_ignored IS TRUE) x
+                            WHERE coalesce(duplicate_ignored_at, date_added::timestamptz) >= %s GROUP BY 1""", (start,))
+            for d, n in cur.fetchall():
+                put(d, dups=n)
+            cur.execute(f"""SELECT lower(btrim(coalesce(store_matched, ''))),
+                                   count(*) FILTER (WHERE date_added >= %s AND duplicate_ignored IS NOT TRUE),
+                                   coalesce(sum(amount) FILTER (WHERE date_added >= %s AND duplicate_ignored IS NOT TRUE), 0),
+                                   count(*) FILTER (WHERE date_added >= %s AND duplicate_ignored IS NOT TRUE
+                                                      AND skip_qb_import IS NOT TRUE),
+                                   count(*) FILTER (WHERE entered_in_qb IS TRUE AND entered_qb_at >= %s AND {_PERSON_ENTERED_SQL}),
+                                   coalesce(sum(amount) FILTER (WHERE entered_in_qb IS TRUE AND entered_qb_at >= %s
+                                                                  AND {_PERSON_ENTERED_SQL}), 0)
+                              FROM invoices GROUP BY 1""", (start,) * 5)
+            store_rows = {r[0]: r[1:] for r in cur.fetchall()}
+    finally:
+        conn.close()
+
+    rows = [{"day": d, **vals} for d, vals in sorted(by_day.items(), reverse=True)]
+    totals = {k: sum(r[k] for r in rows) for k in blank}
+    entry = {s["store"].strip().lower(): s for s in last_qb_entry_by_store()}
+    stores = []
+    for name in store_names():
+        key = name.strip().lower()
+        n, amt, n_qb, n_ent, ent_amt = store_rows.pop(key, (0, 0, 0, 0, 0))
+        e = entry.get(key) or {}
+        stores.append({"store": name, "bills": n, "bills_amt": float(amt), "for_qb": n_qb, "entered": n_ent,
+                       "entered_amt": float(ent_amt), "ready": e.get("ready", 0), "last_at": e.get("last_at")})
+    # Bills whose store isn't one of the stores in Setup (unknown, blank): one line, so the column totals add up.
+    rest = [v for v in store_rows.values() if v[0] or v[3]]
+    if rest:
+        stores.append({"store": "", "bills": sum(v[0] for v in rest), "bills_amt": float(sum(v[1] for v in rest)),
+                       "for_qb": sum(v[2] for v in rest), "entered": sum(v[3] for v in rest),
+                       "entered_amt": float(sum(v[4] for v in rest)), "ready": None, "last_at": None})
+    return {"days": days, "start": start, "rows": rows, "totals": totals, "stores": stores}
+
+
+_SALES_TAX_BASE_SQL = """
+    FROM invoices i
+    LEFT JOIN vendor_name_map v ON v.standard_vendor_name = i.standard_vendor
+   WHERE i.sales_tax IS NOT NULL AND i.sales_tax > 0.004
+     AND i.duplicate_ignored IS NOT TRUE AND i.ignored_at IS NULL
+"""
+
+
+def list_sales_tax_bills(show="open", store=None):
+    """Bills (invoices) that carry a sales-tax charge (2026-10-21, Joel). show='open': only vendors NOT
+    marked OK to charge (vendor_name_map.sales_tax_ok); 'ok': only the OK'd vendors; 'all'. Duplicates
+    kept out and manually ignored bills are left out. Returns [{vendor..., bills:[...], total_tax}] by
+    vendor (standard name, else the name as read), most bills first."""
+    clauses, params = [], []
+    # OK'd = the vendor (all stores), the vendor at this bill's store (sales_tax_ok_stores), or the bill itself
+    # (2026-10-23). Decided per bill below, after the vendor name is resolved.
+    if store:
+        clauses.append("i.store_matched = %s"); params.append(store)
+    extra = "".join(" AND " + c for c in clauses)
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"""
+                SELECT i.id, i.store_matched, i.vendor_matched, i.standard_vendor, i.invoice_number,
+                       i.invoice_date, i.amount, i.sales_tax, i.entered_in_qb, i.skip_qb_import,
+                       i.email_filename, i.file_path, v.id AS vendor_map_id, v.sales_tax_ok, v.sales_tax_ok_by, v.sales_tax_ok_at,
+                       i.sales_tax_ok_by AS bill_ok_by, i.sales_tax_ok_at AS bill_ok_at
+                {_SALES_TAX_BASE_SQL}{extra}
+                ORDER BY i.id DESC""", params)
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    # Excluded-vendor bills (skip_qb_import) never get a standard_vendor saved -- the standardization backfill
+    # skips them -- so "Parmed" and "Parmed Pharmaceuticals" showed as two vendors (2026-10-23). Resolve the
+    # standard name from Vendor names (names + aliases) here when the record has none.
+    import classify_emails as ce
+    if not ce.VENDOR_STD:
+        ce.VENDOR_STD = ce.load_vendor_standardization()
+    lookup = (ce.VENDOR_STD or {}).get("lookup") or {}
+    map_ids, ok_info, store_ok = {}, {}, {}
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, standard_vendor_name, sales_tax_ok, sales_tax_ok_by, sales_tax_ok_at FROM vendor_name_map")
+            for v in cur.fetchall():
+                map_ids[v["standard_vendor_name"]] = v["id"]
+                ok_info[v["standard_vendor_name"]] = v
+            cur.execute("SELECT standard_vendor, store, ok_by, ok_at FROM sales_tax_ok_stores")
+            for so in cur.fetchall():
+                store_ok[(so["standard_vendor"], (so["store"] or "").strip().lower())] = so
+    finally:
+        conn.close()
+    resolved_rows = []
+    for r in rows:
+        # Re-resolve when the record has no standard name OR one that's no longer in Vendor names (two Parmed
+        # bills still carried an old standard name 'Parmed' after it was merged into 'Parmed Pharmaceuticals').
+        if r["vendor_matched"] and (not r["standard_vendor"] or (ok_info and r["standard_vendor"] not in ok_info)):
+            k = ce._norm_vendor_std_key(r["vendor_matched"])
+            std = lookup.get(k) or ce._best_fuzzy_vendor_match(k, lookup)[0]   # same matching as the pipeline
+            if not std:
+                # Still nothing: a short form of exactly ONE standard name ('Parmed' -> 'Parmed Pharmaceuticals').
+                rel = [n for n in ok_info if ce._vendors_related(r["vendor_matched"], n)]
+                std = rel[0] if len(rel) == 1 else None
+            if std:
+                info = ok_info.get(std) or {}
+                r["standard_vendor"] = std
+                r["vendor_map_id"] = map_ids.get(std)
+                r["sales_tax_ok"], r["sales_tax_ok_by"], r["sales_tax_ok_at"] = (
+                    info.get("sales_tax_ok"), info.get("sales_tax_ok_by"), info.get("sales_tax_ok_at"))
+        so = store_ok.get((r["standard_vendor"], (r["store_matched"] or "").strip().lower())) if r["standard_vendor"] else None
+        r["store_ok_by"], r["store_ok_at"] = (so["ok_by"], so["ok_at"]) if so else (None, None)
+        is_ok = bool(r.get("sales_tax_ok")) or bool(r.get("bill_ok_at")) or bool(so)
+        if (show == "open" and is_ok) or (show == "ok" and not is_ok):
+            continue
+        resolved_rows.append(r)
+    rows = resolved_rows
+    groups = {}
+    for r in rows:
+        key = r["standard_vendor"] or (r["vendor_matched"] or "(no vendor)")
+        g = groups.setdefault(key, {"vendor": key, "standard_vendor": r["standard_vendor"],
+                                    "in_map": r["vendor_map_id"] is not None, "ok": bool(r["sales_tax_ok"]),
+                                    "ok_by": r["sales_tax_ok_by"], "ok_at": r["sales_tax_ok_at"],
+                                    "bills": [], "total_tax": 0.0})
+        try:
+            r["tax_pct"] = float(r["sales_tax"]) / (float(r["amount"]) - float(r["sales_tax"])) * 100 \
+                if r["amount"] and float(r["amount"]) > float(r["sales_tax"]) else None
+        except (TypeError, ValueError, ZeroDivisionError):
+            r["tax_pct"] = None
+        g["bills"].append(r)
+        g["total_tax"] += float(r["sales_tax"] or 0)
+    for g in groups.values():
+        g["bills"].sort(key=lambda r: (ce._loose_date(r["invoice_date"]) or datetime.date.min, r["id"]), reverse=True)
+    return sorted(groups.values(), key=lambda g: (-len(g["bills"]), g["vendor"].lower()))
+
+
+def sales_tax_open_count():
+    """Same bills as the page's 'open' list (vendor names resolved through aliases, 2026-10-23)."""
+    try:
+        return sum(len(g["bills"]) for g in list_sales_tax_bills("open"))
+    except Exception:
+        return 0
+
+
+def set_store_sales_tax_ok(standard_vendor, store, ok, username):
+    """OK a vendor's sales tax at one store only (or undo it). Logged."""
+    if not standard_vendor or not store:
+        raise ValueError("Pick a store.")
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if ok:
+                cur.execute("INSERT INTO sales_tax_ok_stores (standard_vendor, store, ok_by) VALUES (%s,%s,%s) "
+                            "ON CONFLICT (standard_vendor, store) DO NOTHING", (standard_vendor, store, username))
+            else:
+                cur.execute("DELETE FROM sales_tax_ok_stores WHERE standard_vendor = %s AND store = %s",
+                            (standard_vendor, store))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('sales_tax_ok_stores', NULL, %s, %s, %s, %s)",
+                        (f"{standard_vendor} @ {store}", str(not ok), str(bool(ok)), username))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_bill_sales_tax_ok(invoice_id, ok, username):
+    """OK one bill's sales-tax charge (or undo it), leaving its vendor as is. Logged."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if ok:
+                cur.execute("UPDATE invoices SET sales_tax_ok_by = %s, sales_tax_ok_at = now() WHERE id = %s", (username, invoice_id))
+            else:
+                cur.execute("UPDATE invoices SET sales_tax_ok_by = NULL, sales_tax_ok_at = NULL WHERE id = %s", (invoice_id,))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('invoices',%s,'sales_tax_ok',%s,%s,%s)", (invoice_id, str(not ok), str(bool(ok)), username))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def set_vendor_sales_tax_ok(standard_vendor, ok, username):
+    """Mark a vendor (vendor_name_map row) OK -- or not -- to charge sales tax. Logged."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE vendor_name_map SET sales_tax_ok = %s, sales_tax_ok_by = %s, "
+                        "sales_tax_ok_at = now() WHERE standard_vendor_name = %s RETURNING id",
+                        (bool(ok), username, standard_vendor))
+            row = cur.fetchone()
+            if not row:
+                raise ValueError(f"'{standard_vendor}' isn't in Setup > Vendor names yet -- add it there first")
+            _ref_log(cur, "vendor_name_map", row[0], "sales_tax_ok", str(not ok), str(bool(ok)), username)
+    finally:
+        conn.close()
+
+
 def dashboard_counts():
     """Live counts for the to-do dashboard — one number per 'needs action' queue, computed on
     each call (no caching; these are small COUNTs). Conditions match what each page shows. Also
@@ -3268,6 +4159,9 @@ def dashboard_counts():
             d["review_by"] = [(r[0], r[1]) for r in cur.fetchall()]
             d["statement"] = n("SELECT count(*) FROM statement_lines "
                                "WHERE status IN ('missing', 'amount_mismatch')")
+            # What the missing lines add up to, for the dashboard tile (2026-10-26, Joel).
+            d["statement_missing_amt"] = float(n("SELECT coalesce(sum(amount), 0) FROM statement_lines "
+                                                 "WHERE status = 'missing'"))
             _qb_inv = ("FROM invoices WHERE entered_in_qb IS NOT TRUE AND skip_qb_import IS NOT TRUE "
                        "AND duplicate_ignored IS NOT TRUE AND duplicate_suspect IS NOT TRUE")
             d["qb_invoices"] = n(f"SELECT count(*) {_qb_inv}")
@@ -3284,6 +4178,10 @@ def dashboard_counts():
             d["requests_approved"] = n("SELECT count(*) FROM change_requests WHERE status = 'approved_for_build'")
             d["investigations"] = n("SELECT count(*) FROM investigations WHERE status IN ('running', 'failed')")
             d["sales_orders"] = n("SELECT count(*) FROM pending_sales_orders WHERE status = 'held'")
+            d["corr_open"] = n("SELECT count(*) FROM emails WHERE (email_type = 'correspondence' OR needs_response IS TRUE) "
+                               "AND coalesce(corr_status, 'open') = 'open' AND coalesce(status, '') <> 'fetched'")
+            d["corr_follow_up"] = n("SELECT count(*) FROM emails WHERE (email_type = 'correspondence' OR needs_response IS TRUE) "
+                                    "AND corr_status = 'follow_up'")
             d["failed_emails"] = n("SELECT count(*) FROM emails WHERE status = 'error'")
             # Reconcile: rows that are in the dedup LEDGER (invoice_history / payment_history) but
             # never became a live invoices / payments row — the "extracted but never recorded"
@@ -3351,7 +4249,7 @@ def distinct_values(column):
 # disposition_key -> human label (also the filter dropdown). 'recorded' /
 # 'informational' get a computed suffix in _email_disposition().
 EMAIL_DISPOSITIONS = [
-    ("recorded", "Recorded"), ("in_review", "In review"), ("ignored", "Ignored"),
+    ("recorded", "Recorded"), ("in_review", "In review"), ("ignored", "Dismissed"),
     ("held", "Held (sales order)"), ("informational", "No action / informational"),
     ("never_classified", "Never classified"), ("error", "Error / unreadable"),
 ]
@@ -3435,7 +4333,7 @@ def _email_disposition(r):
     if key == "in_review":
         return "In review"
     if key == "ignored":
-        return "Ignored"
+        return "Dismissed"
     if key == "held":
         return "Held (sales order)"
     if key == "never_classified":
@@ -3609,12 +4507,12 @@ _REF = {
     "vendor_name_map": {"unique": "standard_vendor_name",
                          "cols": ["standard_vendor_name", "exclude_from_qb",
                                   "exclude_from_statement_recon", "trust_line_item_totals",
-                                  "ignore_payment_confirmations",
+                                  "ignore_payment_confirmations", "sales_tax_ok",
                                   "aliases", "name_3m",
                                   "name_madison", "name_maple", "name_refuah",
                                   "name_westgate", "name_bmw", "name_lakewood_rx", "name_carepax"],
                          "bool_cols": {"exclude_from_qb", "exclude_from_statement_recon",
-                                       "trust_line_item_totals", "ignore_payment_confirmations"},
+                                       "trust_line_item_totals", "ignore_payment_confirmations", "sales_tax_ok"},
                          "order": "lower(standard_vendor_name)"},
     "account_name_map": {"unique": "standard_account_name",
                           "cols": ["standard_account_name", "name_3m", "name_madison",
@@ -3638,6 +4536,14 @@ _REF = {
                           "cols": ["reference", "store_matched", "applies_to", "vendors", "note"],
                           "order": "id"},
     # No single UNIQUE key (many rules may share a store/vendor); `class` is required.
+    # Correspondence "always ignore" rules (database.apply_correspondence_rules). No UNIQUE key.
+    "correspondence_rules": {"unique": None, "required": "action",
+                             "cols": ["topic", "sender", "subject_contains", "recipients_contains",
+                                      "outside_recipient_only", "action", "assign_to", "forward_to", "note"],
+                             "bool_cols": {"outside_recipient_only"},
+                             "order": "id"},
+    # People correspondence gets forwarded to (the Correspondence page's pick-list).
+    "forward_contacts": {"unique": "email", "cols": ["name", "email", "note"], "order": "name, email"},
     "class_rules":      {"unique": None, "required": "class",
                          "cols": ["store_matched", "vendor_matched", "account", "class", "note"],
                          "order": "id"},
@@ -3918,23 +4824,40 @@ def vendor_lookup(term):
     term = (term or "").strip()
     if not term:
         return {"term": "", "vendors": [], "accounts": []}
+    # 2026-10-21 (Joel): '&' found nothing. Each column is also compared with '&' read as 'and' and
+    # spaces/punctuation ignored, so 'A&S', 'A & S' and 'A and S' all find each other.
     like = f"%{term}%"
+    nterm = re.sub(r"[^a-z0-9]", "", term.lower().replace("&", "and"))
+    nlike = f"%{nterm}%" if nterm else None
+
+    def _m(col):
+        """(sql, params) -- col matches the term as typed, or in its normalized form."""
+        if not nlike:
+            return f"{col} ILIKE %s", [like]
+        return (f"({col} ILIKE %s OR regexp_replace(replace(lower(coalesce({col}, '')), '&', 'and'), "
+                f"'[^a-z0-9]', '', 'g') LIKE %s)", [like, nlike])
+
+    def _any(cols):
+        parts, params = [], []
+        for c in cols:
+            q, p = _m(c)
+            parts.append(q)
+            params += p
+        return " OR ".join(parts), params
+
     conn = connect()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             # Vendor names (standard name / aliases / any per-store name).
-            name_cols_sql = " OR ".join(f"{c} ILIKE %s" for c, _ in _STORE_NAME_COLS)
-            cur.execute(
-                f"SELECT * FROM vendor_name_map "
-                f"WHERE standard_vendor_name ILIKE %s OR aliases ILIKE %s OR {name_cols_sql} "
-                f"ORDER BY standard_vendor_name",
-                [like, like] + [like] * len(_STORE_NAME_COLS))
+            where, params = _any(["standard_vendor_name", "aliases"] + [c for c, _ in _STORE_NAME_COLS])
+            cur.execute(f"SELECT * FROM vendor_name_map WHERE {where} ORDER BY standard_vendor_name", params)
             name_rows = cur.fetchall()
 
             # Vendor → account assignments (by standard vendor name).
+            where, params = _any(["standard_vendor_name"])
             cur.execute(
                 "SELECT standard_vendor_name, standard_account_name FROM vendor_account_assignment "
-                "WHERE standard_vendor_name ILIKE %s ORDER BY standard_vendor_name", (like,))
+                f"WHERE {where} ORDER BY standard_vendor_name", params)
             assign_rows = cur.fetchall()
             # Full assignment map so a name-map hit can show its account even when the term
             # didn't match the assignment row itself.
@@ -3944,11 +4867,8 @@ def vendor_lookup(term):
                                 for r in cur.fetchall()}
 
             # Account names (the term might be an account spelling, not a vendor).
-            cur.execute(
-                f"SELECT * FROM account_name_map "
-                f"WHERE standard_account_name ILIKE %s OR {name_cols_sql} "
-                f"ORDER BY standard_account_name",
-                [like] + [like] * len(_STORE_NAME_COLS))
+            where, params = _any(["standard_account_name"] + [c for c, _ in _STORE_NAME_COLS])
+            cur.execute(f"SELECT * FROM account_name_map WHERE {where} ORDER BY standard_account_name", params)
             acct_rows = cur.fetchall()
     finally:
         conn.close()
@@ -4158,6 +5078,9 @@ def get_link(code):
 REFERENCE_OPTION_SOURCES = {"stores": store_names,
                             "vendor_names": standard_vendor_names,
                             "account_names": standard_account_names,
+                            "corr_actions": lambda: ["ignore", "forward", "follow_up"],
+                            "active_usernames": lambda: [u["username"] for u in list_users() if u.get("active")],
+                            "corr_topics": lambda: [k for k, _ in database.CORR_TOPICS],
                             # Setup › Store rules "Applies to" (database.STORE_RULE_ONLY / _EXCEPT).
                             "store_rule_kinds": lambda: [database.STORE_RULE_ONLY,
                                                          database.STORE_RULE_EXCEPT]}
@@ -4542,5 +5465,249 @@ def list_invoice_history(vendor=None, invoice_number=None, store=None, date_from
                   LIMIT %s OFFSET %s
             """, params + [page_size, offset])
             return cur.fetchall(), total
+    finally:
+        conn.close()
+
+
+
+# --------------------------------------------------------------------------- #
+# Correspondence triage (2026-10-15). Emails the classifier calls 'correspondence' produce no
+# record, so before this nothing ever surfaced them. Status lives on the emails row:
+# open (NULL) -> follow_up / handled / ignored. "Always ignore" = a correspondence_rules row.
+# --------------------------------------------------------------------------- #
+
+CORR_STATUSES = [("open", "Open"), ("follow_up", "Follow up"), ("handled", "Handled"),
+                 ("ignored", "Dismissed"), ("all", "All")]     # 'ignored' is the stored value; "Dismiss" app-wide (10/26)
+
+
+def list_correspondence(status="open", search=None, limit=50, offset=0, kind=None, assigned=None,
+                        sender=None, topic=None):
+    """(rows, total, counts_by_status). Newest first."""
+    # An email sent back for processing (status 'fetched') waits for the next run -- not shown here.
+    # Pure correspondence AND any other email (invoice, statement...) a person wrote a request in (2026-10-16).
+    clauses, params = ["(e.email_type = 'correspondence' OR e.needs_response IS TRUE)", "coalesce(e.status, '') <> 'fetched'"], []
+    if status and status != "all":
+        clauses.append("coalesce(e.corr_status, 'open') = %s"); params.append(status)
+    if assigned == "-":              # "Unassigned" in the assigned-to filter (2026-10-20)
+        clauses.append("coalesce(e.corr_assigned_to, '') = ''")
+    elif assigned:
+        clauses.append("e.corr_assigned_to = %s"); params.append(assigned)
+    if sender:                       # an address or '@domain' (the page's "Similar" links)
+        clauses.append("lower(coalesce(e.from_address, '')) LIKE %s"); params.append(f"%{sender.lower()}%")
+    if topic:
+        clauses.append("e.topic = %s"); params.append(topic)
+    if kind == "reply":
+        clauses.append("e.needs_response IS TRUE")
+    elif kind == "corr":
+        clauses.append("e.email_type = 'correspondence'")
+    if search:
+        # Every word must appear somewhere (any field, any order): "crowncare refua" finds an email
+        # from Crowncare that mentions Refuah, even though the two words aren't side by side.
+        fields = ("e.subject", "e.from_address", "e.info_vendor", "e.info_store", "e.info_note",
+                  "e.corr_note", "e.response_request", "e.recipients", "e.filename")
+        for word in search.split():
+            clauses.append("(" + " OR ".join(f"{f} ILIKE %s" for f in fields) + ")")
+            params += [f"%{word}%"] * len(fields)
+    where = " AND ".join(clauses)
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(f"SELECT count(*) AS n FROM emails e WHERE {where}", params)
+            total = cur.fetchone()["n"]
+            cur.execute(f"""
+                SELECT e.filename, e.subject, e.from_address, e.received_at, e.date_added,
+                       e.gmail_link, e.info_vendor, e.info_store, e.info_note, e.recipients,
+                       e.email_type, e.needs_response, e.response_request, e.response_requested_by, e.topic,
+                       (SELECT count(*) FROM invoices i WHERE i.email_filename = e.filename)
+                       + (SELECT count(*) FROM credit_memos c WHERE c.email_filename = e.filename)
+                       + (SELECT count(*) FROM payments p WHERE p.email_filename = e.filename) AS n_records,
+                       coalesce(e.corr_status, 'open') AS corr_status, e.corr_note, e.corr_by, e.corr_at,
+                       e.corr_assigned_to,
+                       e.corr_forwarded_to, e.corr_forwarded_at
+                  FROM emails e WHERE {where}
+                 ORDER BY coalesce(e.received_at, e.date_added::timestamptz) DESC NULLS LAST, e.filename
+                 LIMIT %s OFFSET %s""", params + [limit, offset])
+            rows = cur.fetchall()
+            cur.execute("SELECT coalesce(corr_status, 'open') AS s, count(*) AS n FROM emails "
+                        "WHERE (email_type = 'correspondence' OR needs_response IS TRUE) "
+                        "AND coalesce(status, '') <> 'fetched' GROUP BY 1")
+            counts = {r["s"]: r["n"] for r in cur.fetchall()}
+            counts["all"] = sum(counts.values())
+            return rows, total, counts
+    finally:
+        conn.close()
+
+
+_UNSET = object()
+
+
+def correspondence_assignee_counts():
+    """{username or '-' (unassigned): n} over the Follow up tab, for the assigned-to filter."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT coalesce(nullif(corr_assigned_to, ''), '-'), count(*) FROM emails "
+                        " WHERE (email_type = 'correspondence' OR needs_response IS TRUE) "
+                        "   AND coalesce(status, '') <> 'fetched' AND corr_status = 'follow_up' "
+                        " GROUP BY 1")
+            return dict(cur.fetchall())
+    finally:
+        conn.close()
+
+
+def set_correspondence_status(filename, status, note, username, assigned_to=_UNSET):
+    """Set one correspondence email's triage status (open/follow_up/handled/ignored) + note.
+    Logged to edit_log. Re-opening clears who/when. assigned_to (Follow up only, 2026-10-19): a username,
+    or '' / None to unassign; left out = keep whatever it was."""
+    if status not in ("open", "follow_up", "handled", "ignored"):
+        raise ValueError("bad status")
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT coalesce(corr_status,'open'), corr_note FROM emails WHERE filename = %s",
+                        (filename,))
+            row = cur.fetchone()
+            if not row:
+                return
+            note = (note or "").strip() or (row[1] if status != "open" else row[1])
+            if status == "open":
+                cur.execute("UPDATE emails SET corr_status = NULL, corr_by = NULL, corr_at = NULL, "
+                            "corr_note = %s WHERE filename = %s", (note, filename))
+            else:
+                cur.execute("UPDATE emails SET corr_status = %s, corr_note = %s, corr_by = %s, "
+                            "corr_at = now() WHERE filename = %s", (status, note, username, filename))
+            if status == "follow_up" and assigned_to is not _UNSET:
+                cur.execute("UPDATE emails SET corr_assigned_to = %s WHERE filename = %s",
+                            ((assigned_to or "").strip() or None, filename))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('emails', NULL, %s, %s, %s, %s)",
+                        (f"corr_status ({filename})"[:200], row[0],
+                         status + (f" -> {assigned_to}" if status == "follow_up" and assigned_to not in (_UNSET, None, "")
+                                   else ""), username))
+    finally:
+        conn.close()
+
+
+def add_correspondence_rule(sender, subject_contains, note, username, action="ignore", forward_to=None,
+                            recipients_contains=None, outside_recipient_only=False, topic=None,
+                            assign_to=None):
+    """Create a correspondence rule. sender and/or subject_contains (both = both must match).
+    action 'ignore': applied right away to every OPEN correspondence email; returns how many it ignored.
+    action 'forward': forward_to required; only emails arriving from now on are forwarded (by the
+    classify run) -- returns 0."""
+    sender = (sender or "").strip() or None
+    subject_contains = (subject_contains or "").strip() or None
+    recipients_contains = (recipients_contains or "").strip() or None
+    action = action if action in ("ignore", "forward", "follow_up") else "ignore"
+    assign_to = ((assign_to or "").strip() or None) if action == "follow_up" else None
+    forward_to = (forward_to or "").strip() or None
+    topic = (topic or "").strip() or None
+    if topic and topic not in database.CORR_TOPIC_KEYS:
+        raise ValueError("unknown request type")
+    if not sender and not subject_contains and not recipients_contains and not topic:
+        raise ValueError("a rule needs a request type, sender, subject and/or To/CC text")
+    if action == "forward" and not forward_to:
+        raise ValueError("a forward rule needs someone to forward to")
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("INSERT INTO correspondence_rules (topic, sender, subject_contains, recipients_contains, "
+                        "outside_recipient_only, action, assign_to, forward_to, note, created_by) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING id",
+                        (topic, sender, subject_contains, recipients_contains, bool(outside_recipient_only), action,
+                         assign_to,
+                         forward_to if action == "forward" else None,
+                         (note or "").strip() or None, username))
+            rid = cur.fetchone()[0]
+            _ref_log(cur, "correspondence_rules", rid, "action", None, action, username)
+            if action in ("ignore", "follow_up"):
+                return database.apply_correspondence_rules(username, cur=cur)
+            return 0
+    finally:
+        conn.close()
+
+
+def forward_contact_list():
+    """[{name, email, label}] for the Forward pick-lists, by name."""
+    try:
+        rows = list_reference("forward_contacts")
+    except Exception:
+        return []
+    return [{"name": r.get("name") or "", "email": r["email"],
+             "label": (f"{r['name']} <{r['email']}>" if r.get("name") else r["email"])}
+            for r in rows if r.get("email")]
+
+
+
+def requeue_correspondence_as_documents(filename, learning, username):
+    """'Not correspondence -- process the documents' (2026-10-15). Puts the email back in line for the
+    classifier exactly like requeue_by_vendor.py does: moves its stored copy back into test_emails/ and
+    sets emails.status='fetched', so the next fetch/classify run reads it again. If `learning` is given
+    it's added to Learnings first, so that run (and every later one) sees it. The email drops off the
+    Correspondence page meanwhile; if the run still calls it correspondence it comes back as Open, with
+    the note saying it was sent back. Returns where the file was moved from."""
+    import shutil
+    from pathlib import Path
+    base = Path(__file__).parent
+    inbox = base / "test_emails"
+    src = None
+    for d in ("processed_emails", "review_pending"):
+        cand = base / d / filename
+        if cand.is_file():
+            src = cand
+            break
+    if src is None and (inbox / filename).is_file():
+        src = inbox / filename                 # already in the inbox (e.g. pressed twice)
+    if src is None:
+        raise ValueError("the stored copy of this email wasn't found, so it can't be reprocessed "
+                         "-- open it in Gmail and forward it to the invoices inbox instead")
+    if learning and learning.strip():
+        add_learning_web(learning, username)
+    inbox.mkdir(exist_ok=True)
+    if src.parent != inbox:
+        shutil.move(str(src), str(inbox / filename))
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("UPDATE emails SET status = 'fetched', corr_status = NULL, corr_by = NULL, corr_at = NULL, "
+                        "corr_note = %s, updated_at = now() WHERE filename = %s",
+                        (f"Sent back to be processed as documents by {username} "
+                         f"({datetime.date.today().isoformat()})", filename))
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('emails', NULL, %s, 'correspondence', 'requeued for processing', %s)",
+                        (f"requeue ({filename})"[:200], username))
+    finally:
+        conn.close()
+    return src.parent.name
+
+
+
+def list_correspondence_follow_ups():
+    """Follow-up correspondence emails (for My work): filename, subject, from, request/summary, assignee, when."""
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""SELECT filename, subject, from_address, coalesce(response_request, info_note) AS what,
+                                  corr_note, corr_assigned_to, corr_at
+                             FROM emails
+                            WHERE (email_type = 'correspondence' OR needs_response IS TRUE)
+                              AND corr_status = 'follow_up' AND coalesce(status, '') <> 'fetched'
+                            ORDER BY corr_at""")
+            return cur.fetchall()
+    finally:
+        conn.close()
+
+
+
+def correspondence_similarity():
+    """[(from_address, topic, status)] for every email the Correspondence page covers (any status) -- the
+    page counts, per card, how many share its sender / domain / request type (2026-10-19)."""
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT from_address, topic, coalesce(corr_status, 'open') FROM emails "
+                        "WHERE (email_type = 'correspondence' OR needs_response IS TRUE) "
+                        "AND coalesce(status, '') <> 'fetched'")
+            return cur.fetchall()
     finally:
         conn.close()

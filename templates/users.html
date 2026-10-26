@@ -29,7 +29,7 @@
     {% for u in users %}
       {% set sortq = ('&sort=' ~ params.sort if params.sort else '') ~ ('&direction=' ~ params.direction if params.direction else '') %}
       <tr>
-        <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ 'read-only' if u.role == 'viewer' else u.role }}</td>
+        <td>{{ u.username }}</td><td>{{ u.display_name }}</td><td>{{ 'read-only' if u.role == 'viewer' else u.role }}{% if u.role == 'viewer' and u.edit_pages %}<div class="muted" style="font-size:12px;">can change: {% for k in u.edit_pages.split(',') if k in writable_pages %}{{ writable_pages[k][0] }}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}</td>
         <td>{{ 'yes' if u.active else 'no' }}</td>
         <td class="muted">{{ u.created_at | us_date }}</td>
         <td style="white-space:nowrap;">
@@ -58,6 +58,14 @@
                   <option value="0" {{ 'selected' if not u.active }}>no</option>
                 </select></div>
               <div><label>Reset password (leave blank to keep)</label><input name="new_password" type="password" autocomplete="new-password"></div>
+            </div>
+            {% set _ep = (u.edit_pages or '').split(',') %}
+            <div style="margin-top:10px;">
+              <label>Read-only users can still make changes on these pages</label>
+              {% for key, v in writable_pages.items() %}
+                <label style="font-weight:400; display:inline-flex; gap:5px; align-items:center; margin-right:16px; cursor:pointer;">
+                  <input type="checkbox" name="edit_pages" value="{{ key }}" style="width:auto;" {{ 'checked' if key in _ep }}> {{ v[0] }}</label>
+              {% endfor %}
             </div>
             <div style="margin-top:10px;">
               <button class="btn" type="submit">Save changes</button>

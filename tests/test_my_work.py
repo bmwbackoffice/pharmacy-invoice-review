@@ -16,7 +16,8 @@ class Inbox(unittest.TestCase):
 
     def setUp(self):
         names = ("list_open_reviews", "list_open_statement_exceptions", "list_duplicate_candidates",
-                 "qb_list_candidates", "list_flags", "list_change_requests", "dashboard_counts")
+                 "qb_list_candidates", "list_flags", "list_change_requests", "dashboard_counts",
+                 "list_correspondence_follow_ups", "list_qb_corrections")
         self._saved = {n: getattr(web_db, n) for n in names}
         web_db.list_open_reviews = lambda: [
             {"id": 1, "vendor_matched": "Bagel Nosh", "invoice_number": "280611", "amount": 50,
@@ -40,6 +41,10 @@ class Inbox(unittest.TestCase):
         web_db.list_change_requests = lambda **k: [{"status": "pending", "title": "Export to PDF",
                                                     "submitted_by": "amy", "created_at": NOW}]
         web_db.dashboard_counts = lambda: {"qb_invoices": 170, "qb_credits": 9, "payments": 353}
+        # Sources My work gained later (correspondence follow-ups 10/19, QB corrections 10/21): empty here,
+        # so today's live data doesn't leak into the counts.
+        web_db.list_correspondence_follow_ups = lambda *a, **k: []
+        web_db.list_qb_corrections = lambda *a, **k: []
 
     def tearDown(self):
         for n, f in self._saved.items():

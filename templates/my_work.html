@@ -1,10 +1,10 @@
 {% extends "base.html" %}
 {% block content %}
 <style>
-  .mw-row { display:grid; grid-template-columns:96px minmax(0,1fr) 72px auto; gap:4px 12px; align-items:center;
+  .mw-row { display:grid; grid-template-columns:130px minmax(0,1fr) 72px auto; gap:4px 12px; align-items:center;
             padding:9px 12px; border-top:1px solid var(--line); }
   .mw-row:first-of-type { border-top:none; }
-  .mw-kind { font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); }
+  .mw-kind { font-size:11.5px; font-weight:700; text-transform:uppercase; letter-spacing:.04em; color:var(--muted); overflow-wrap:anywhere; }
   .mw-title { font-weight:700; }
   .mw-detail { font-size:12.5px; color:var(--muted); overflow-wrap:anywhere; }
   .mw-age { font-size:12.5px; color:var(--muted); text-align:right; white-space:nowrap; }
