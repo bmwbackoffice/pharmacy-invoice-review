@@ -7194,3 +7194,49 @@ timed-out calls, two 6-page 3M scans retried 44 runs each)
 - "Dismiss" app-wide: Correspondence button / status / tab / rule option / flash say Dismiss (stored value stays
   'ignored', rule action stays 'ignore'); Emails page disposition "Dismissed". IgnoreLabels test passes again.
 - Tests: tests/test_fixes_1026.py (9). Suite 235, all pass.
+
+### Review spec artifact v28 + read-only data checks (2026-10-26, ~15:00)
+- https://claude.ai/artifact/K7GBFxEy1oXC1Mmw5ZggK4 updated in place (v28, 185 features, was 153 on 10/13): new
+  Correspondence area (CO-01..04) and every 10/14-10/26 change; Known gaps rewritten from read-only SQL checks.
+- Bills in QuickBooks twice per the 10/22 export (invoices.qb_twice, first on Possible duplicates): Maxi Health
+  $5,230.84 Refuah (#797203 / #797208), Zahler $1,549.83 Maple (INV/2026/511123 / 51123), Lantev $584.74 Refuah
+  (8610704 / 86I0704).
+- Vita Vocal: QuickBooks (Refuah) has #H002875 $819.00 dated 8/2 AND #002875 $81,900.00 dated 9/2; the app has one
+  invoice (record 1473, $819, entered). The $81,900 bill looks like a second, mistyped entry. (In QB twice? now
+  catches it -- next section.)
+- /no-live-copy on 10/26 (real page, vendor tables loaded): 2 groups counted, both number tags -- Reisman's
+  #R205029-IN and #R204977-IN, whose kept copies are #R205029 and #R204977 (fixed, next section); 10 with a person's
+  mark, 6 confirmed. Herbal Health #2798, Garden of Life #52099183 and Emerson #E29402599 are among the confirmed
+  (Joel, 10/12). NB: an earlier "57 groups" figure came from a read-only TestClient render in which
+  classify_emails._database() ran init_db, failed (read-only), and left the vendor tables empty -- set
+  classify_emails._DB = database first in such renders.
+- Statement lines: the new QuickBooks pass cleared 4 on its first run; 28 still missing, $29,052.60 (Nutri-Supreme
+  $16,909.70, Compudime $10,626, MasterKo $710, Lifeseed #808 $906 = QB $585.36, Bagel Nosh $78, credits Kayco -$25,
+  Lantev -$152.10).
+
+### In QB twice? catches different amounts, one box per double entry; no-live-copy compares numbers (2026-10-26, ~16:30)
+Joel: Vita Vocal "should actually be detected since it's all the same info besides the amount"; "go ahead" on making
+/no-live-copy compare numbers the way the duplicate checks do.
+- web_db.qb_double_entries, new kind **amount_differs** (green "Amount differs"): same store, type and related vendor,
+  amounts differ, and one of: the same bill number with dates within 10 days; a decimal slip (one amount 10 / 100 /
+  1000 times the other, web_db._decimal_slip) with the number equal or a misread apart, dates within 45 days; or
+  amounts one digit apart / two neighbours swapped (_digit_slip) with the number a misread apart, same day. A misread
+  number alone isn't enough: on the register it matched 441 pairs, mostly a vendor's next bill one look-alike digit
+  away (Jams RX REFUH-50536 / 50538, Anda, Masters). The rule matches 9 on today's register: Vita Vocal (decimal
+  slip), Maxi Health #803670 $6,957.40 / $6,682.27 (3M, 10/7), Rockland #35056 $1,254.50 / $1,220.00 (Maple, 10/7),
+  PAS Packaging, Frier & Levitt, B Visible, Natures Cure (same #, same day), Lantev 93G4241 / 9304241 $718.00 / $718.08
+  and Lantev 92H0348 / 92H03408 $1,071.27 / $1,071.57 (one digit, same day). Candidates come from three buckets
+  (same number / same amount digits / same day, per store and type), with each bill's number key computed once.
+  0.73 s against 0.52 s before on today's register (the dashboard calls it).
+- One box per double entry: an "entered twice in the app" pair whose two records are the two bills of a QuickBooks
+  pair (_pair_matches_records -> _qb_same_bill) isn't listed on its own any more; the QuickBooks pair carries the
+  app's record links and the note "Both copies are marked entered in the app." 7 of the 8 purple boxes folded in
+  (Maxi Health, Zahler, Lantev x2, Marine Park, Wallace O'Farrell, UNFI); Boiron Westgate stays (QuickBooks shows it
+  once). Pairs are now filtered by show after this, so a resolved QuickBooks pair still hides its app pair.
+- Page: 114 to check after a restart (was 112: +9 Amount differs, -7 folded). Amount cells are marked red when they
+  differ (also on app pairs within $1).
+- web_db.no_live_copy_groups: numbers keyed by classify_emails._num_key (punctuation ignored), and a group isn't
+  listed when the bill has a live / entered / kept-out copy of the same vendor and amount whose number is a misread
+  apart (_one_edit_apart) or has the same _num_core (R205029-IN = R205029). Confirmations made under the old key
+  (number as written) still match. Real page: 0 counted (was 2), 4 with a person's mark (was 10), 6 confirmed.
+- Tests: tests/test_fixes_1026b.py (8). Suite 243, all pass. Needs a web-app restart (notice.py first).

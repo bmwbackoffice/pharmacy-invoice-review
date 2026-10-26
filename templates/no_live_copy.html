@@ -53,6 +53,9 @@
   and none is otherwise kept out of QuickBooks — so the bill never shows for entry. It happens when each copy is
   marked a duplicate of another. <b>Restore</b> the copy to enter (check its store), or, if the bill really shouldn't
   be entered, <b>Confirmed — leave as duplicates</b>.</p>
+<p class="muted">Bill numbers are compared the way the duplicate checks compare them: punctuation doesn't count, and a copy
+  of the same vendor and amount kept under a number read one character differently, or with a tag like <code>-IN</code>
+  added or dropped, is the bill's live copy.</p>
 
 {% if not needs %}
   <div class="card"><p class="muted" style="margin:0;">Nothing to check — every duplicate group has a live copy, or a person marked or confirmed it. ✓</p></div>

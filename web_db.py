@@ -3205,7 +3205,11 @@ def no_live_copy_groups():
     was later ignored too (Lantev #9GH5739, Garden of Life #52099183) -- found 2026-10-12.
     Each group: {record_type, vendor, number, vendor_key, number_key, copies, by_person, confirmed}.
     by_person = some copy was ignored by a person (probably deliberate); confirmed = a person checked
-    it on /no-live-copy (no_live_copy_confirmed). Newest groups first. Read-only."""
+    it on /no-live-copy (no_live_copy_confirmed). Newest groups first. Read-only.
+    Numbers are compared the way the duplicate checks compare them (2026-10-26, Joel): without punctuation, and
+    a group isn't listed when the bill has a copy that's live, entered or kept out of QuickBooks under a number a
+    misread apart or the same once a tag is dropped (_num_core), for the same vendor and amount. Before, the page
+    listed Reisman's #R205029-IN and #R204977-IN, whose kept copies are #R205029 and #R204977."""
     import classify_emails as ce
     vkey = _duplicate_vendor_keyer()
     conn = connect()
@@ -3231,20 +3235,35 @@ def no_live_copy_groups():
         conn.close()
     groups = {}
     for r in rows:
-        k = (r["record_type"], vkey(r["vendor_matched"]), ce._norm(r["number"]))
+        k = (r["record_type"], vkey(r["vendor_matched"]), ce._num_key(r["number"]))
         if k[1] and k[2]:
             groups.setdefault(k, []).append(r)
+    settled = {}                         # (type, vendor key) -> copies that are live, entered or kept out of QB
+    for k, copies in groups.items():
+        settled.setdefault(k[:2], []).extend(
+            c for c in copies if not c["duplicate_ignored"] or c["entered_in_qb"] or c["skip_qb_import"])
+
+    def has_twin(k, copies):
+        """The bill has a settled copy under a near number: a misread apart, or the same once a tag is dropped."""
+        return any(ce._amounts_equal(c["amount"], o["amount"])
+                   and (ce._one_edit_apart(k[2], ce._num_key(o["number"]))
+                        or ce._num_core(c["number"]) == ce._num_core(o["number"]))
+                   for c in copies for o in settled.get(k[:2], []))
+
     out = []
     for k, copies in groups.items():
         if not all(c["duplicate_ignored"] for c in copies) \
-                or any(c["entered_in_qb"] or c["skip_qb_import"] for c in copies):
+                or any(c["entered_in_qb"] or c["skip_qb_import"] for c in copies) or has_twin(k, copies):
             continue
         copies.sort(key=lambda c: c["id"])
-        out.append({"record_type": k[0], "vendor_key": k[1], "number_key": k[2],
+        # Confirmations made before numbers were compared without punctuation are keyed by the number as written.
+        conf = confirmed.get(k) or next((confirmed[(k[0], k[1], ce._norm(c["number"]))] for c in copies
+                                         if (k[0], k[1], ce._norm(c["number"])) in confirmed), None)
+        out.append({"record_type": k[0], "vendor_key": k[1], "number_key": conf["number_key"] if conf else k[2],
                     "vendor": copies[-1]["vendor_matched"], "number": copies[-1]["number"],
                     "copies": copies,
                     "by_person": any(_ignored_by_person(c["duplicate_ignored_by"]) for c in copies),
-                    "confirmed": confirmed.get(k)})
+                    "confirmed": conf})
     out.sort(key=lambda g: -g["copies"][-1]["id"])
     return out
 
@@ -3458,13 +3477,36 @@ def _qb_bill_key(b):
     return "|".join(parts)
 
 
+def _amount_digits(amount):
+    """An amount's digits without trailing zeros ($819.00 and $81,900.00 -> '819'): amounts that differ only by
+    where the decimal point sits share it."""
+    return str(round(abs(float(amount)) * 100)).rstrip("0") or "0"
+
+
+def _decimal_slip(x, y):
+    """10, 100 or 1000 when one amount is the other with the decimal point moved, else None."""
+    lo, hi = sorted([abs(float(x)), abs(float(y))])
+    return next((10 ** k for k in (1, 2, 3) if lo and abs(lo * 10 ** k - hi) < 0.006), None)
+
+
+def _digit_slip(x, y):
+    """True when two amounts differ in one digit, or by two neighbouring digits swapped ($1,071.27 / $1,071.57)."""
+    a, b = f"{abs(float(x)):.2f}", f"{abs(float(y)):.2f}"
+    if len(a) != len(b):
+        return False
+    diff = [i for i in range(len(a)) if a[i] != b[i]]
+    return len(diff) == 1 or (len(diff) == 2 and diff[1] == diff[0] + 1
+                              and a[diff[0]] == b[diff[1]] and a[diff[1]] == b[diff[0]])
+
+
 def qb_double_entries(show="open"):
     """Bills that may be in QuickBooks twice, from the saved QuickBooks register (every bill of every export
     upload -- qb_register). A pair = two bills, same store, same amount, invoice dates within 10 days, the
     same vendor (standard name, or one name inside the other), and the same invoice number -- or numbers
     one character apart (a misread: added/dropped digit, look-alike swapped), or no number on one of them
-    and the same date. show: 'open' (default), 'dismissed', 'all'. Returns
-    [{key, a, b, why, strength, dismissed}] strongest first, newest first."""
+    and the same date. Since 2026-10-26 also the same bill with two different amounts (kind amount_differs),
+    and a pair the app marked entered twice shows once, on its QuickBooks pair. show: 'open' (default),
+    'dismissed', 'all'. Returns [{key, a, b, why, strength, dismissed}] strongest first, newest first."""
     import classify_emails as ce
     if not ce.VENDOR_STD:
         ce.VENDOR_STD = ce.load_vendor_standardization()
@@ -3522,12 +3564,9 @@ def qb_double_entries(show="open"):
                 if key in seen:
                     continue
                 seen.add(key)
-                dis = dismissed.get(key)
-                if (show == "open" and dis) or (show == "dismissed" and not dis):
-                    continue
                 first, second = sorted([a, b], key=lambda x: (x["qb_date"] or datetime.date.min, str(x["qb_num"])))
                 out.append({"key": key, "a": first, "b": second, "why": why, "strength": strength,
-                            "kind": kind, "dismissed": dis,
+                            "kind": kind, "dismissed": dismissed.get(key),
                             "credit": str(a.get("qb_type") or "").strip().lower() == "credit"})
     # One document keyed in once as a BILL and once as a CREDIT (2026-10-23, Joel). Stricter than the rules
     # above: same store, same vendor, same amount (sign ignored), the SAME bill number (present on both) and
@@ -3551,23 +3590,90 @@ def qb_double_entries(show="open"):
                 if key in seen:
                     continue
                 seen.add(key)
-                dis = dismissed.get(key)
-                if (show == "open" and dis) or (show == "dismissed" and not dis):
-                    continue
-                out.append({"key": key, "a": a, "b": b, "strength": 3, "kind": "bill_credit", "dismissed": dis,
+                out.append({"key": key, "a": a, "b": b, "strength": 3, "kind": "bill_credit",
+                            "dismissed": dismissed.get(key),
                             "why": "same document entered once as a bill and once as a credit", "credit": False})
+    # The same bill with two different amounts (2026-10-26, Joel: "it's all the same info besides the amount.
+    # That's a red flag in itself"): Vita Vocal H002875 $819.00 on 8/2 and 002875 $81,900.00 on 9/2, both in
+    # Refuah's QuickBooks. A number a misread apart isn't enough on its own here -- a vendor's next bill is often
+    # one look-alike digit away (Jams RX REFUH-50536 / 50538) -- so besides the same store, type and vendor a
+    # pair needs one of: the same bill number and dates within 10 days (a revised bill entered twice, or an
+    # amount mistyped); a decimal slip, one amount 10, 100 or 1000 times the other, with the number equal or a
+    # misread apart and dates within 45 days; or amounts one digit apart, the number a misread apart, same date.
+    # Candidates come from three small buckets (same number / same digits / same day), never the whole store.
+    buckets, num_of = {}, {}
+    for b in rows_all:
+        nk = num_of[id(b)] = ce._num_key(b["qb_num"])
+        if not nk:
+            continue
+        t, st = str(b["qb_type"]).strip().lower(), ce._norm(b["qb_store"])
+        buckets.setdefault(("num", t, st, nk), []).append(b)
+        buckets.setdefault(("digits", t, st, _amount_digits(b["qb_amount"])), []).append(b)
+        if b["qb_date"]:
+            buckets.setdefault(("day", t, st, b["qb_date"]), []).append(b)
+    for grp in buckets.values():
+        for i in range(len(grp)):
+            for j in range(i + 1, len(grp)):
+                a, b = grp[i], grp[j]
+                na, nb = num_of[id(a)], num_of[id(b)]
+                if not (na == nb or ce._one_edit_apart(na, nb)):
+                    continue
+                x, y = abs(float(a["qb_amount"])), abs(float(b["qb_amount"]))
+                if abs(x - y) < 0.005 or not (a["qb_date"] and b["qb_date"]):
+                    continue                     # same amount: the checks above
+                sa, sb = ce._norm(a["qb_std_vendor"]), ce._norm(b["qb_std_vendor"])
+                if not ((sa and sa == sb) or ce._vendors_related(a["qb_name"], b["qb_name"])):
+                    continue
+                days, factor = abs((a["qb_date"] - b["qb_date"]).days), _decimal_slip(x, y)
+                if factor and days <= 45:
+                    note = f"One amount is {factor:,} times the other: a misplaced decimal point?"
+                elif na == nb and days <= 10:
+                    note = "Same bill #, different amounts: a revised bill entered twice, or an amount mistyped?"
+                elif days == 0 and _digit_slip(x, y):
+                    note = "Amounts one digit apart on the same day: a typo?"
+                else:
+                    continue
+                key = " || ".join(sorted([_qb_bill_key(a), _qb_bill_key(b)]))
+                if key in seen:
+                    continue
+                seen.add(key)
+                first, second = sorted([a, b], key=lambda r: (r["qb_date"], str(r["qb_num"])))
+                out.append({"key": key, "a": first, "b": second, "why": "same bill, different amounts",
+                            "strength": 2, "kind": "amount_differs", "note": note, "dismissed": dismissed.get(key),
+                            "credit": str(a.get("qb_type") or "").strip().lower() == "credit"})
     # The app's own history (2026-10-21, Joel): copies of one bill (a duplicate set) where TWO OR MORE were
     # marked entered in QuickBooks -- even if one was set aside later -- were probably keyed in twice. Listed
     # until a QuickBooks export uploaded AFTER the later entry, covering the bill's date, shows the bill at
-    # most once; then it's settled and drops off by itself.
+    # most once; then it's settled and drops off by itself. When the export itself shows the two bills (a pair
+    # above), they're shown once, on that pair, with the app's records (2026-10-26: Maxi Health, Zahler and
+    # Lantev each had two boxes, one to resolve on each).
+    qb_pairs = list(out)
     for p in _app_entered_twice(bills, ce):
-        dis = dismissed.get(p["key"])
-        if (show == "open" and dis) or (show == "dismissed" and not dis):
+        qb_pair = next((q for q in qb_pairs if _pair_matches_records(q, p, ce)), None)
+        if qb_pair is None:
+            p["dismissed"] = dismissed.get(p["key"])
+            out.append(p)
             continue
-        p["dismissed"] = dis
-        out.append(p)
+        qa, qb = qb_pair["a"], qb_pair["b"]
+        if "record_id" in qa:
+            continue                     # already carries another app pair's records
+        ra, rb = (p["a"], p["b"]) if _qb_same_bill(qa, p["a"], ce) and _qb_same_bill(qb, p["b"], ce) else (p["b"], p["a"])
+        extra = ("record_id", "entered_by", "entered_at", "set_aside")
+        qb_pair["a"] = dict(qa, **{k: ra[k] for k in extra})
+        qb_pair["b"] = dict(qb, **{k: rb[k] for k in extra})
+        qb_pair["note"] = " ".join(n for n in (qb_pair.get("note"), "Both copies are marked entered in the app.") if n)
+    out = [p for p in out if show == "all" or (show == "open") == (not p["dismissed"])]
     out.sort(key=lambda p: (-p["strength"], -(p["a"]["qb_date"] or datetime.date.min).toordinal()))
     return out
+
+
+def _pair_matches_records(pair, app_pair, ce):
+    """A QuickBooks pair whose two bills are the two app records of an 'entered twice' pair, either way round."""
+    if pair.get("credit") or pair["kind"] == "bill_credit":
+        return False                      # the app's pairs are invoices
+    qa, qb, ra, rb = pair["a"], pair["b"], app_pair["a"], app_pair["b"]
+    return ((_qb_same_bill(qa, ra, ce) and _qb_same_bill(qb, rb, ce))
+            or (_qb_same_bill(qa, rb, ce) and _qb_same_bill(qb, ra, ce)))
 
 
 def _qb_same_bill(bill, rec, ce):

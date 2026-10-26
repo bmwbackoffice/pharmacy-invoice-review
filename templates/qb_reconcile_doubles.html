@@ -8,6 +8,7 @@
   ('no_number',   'No number',               'Same store · same date, no bill #',     '#475569', '#f8fafc'),
   ('same_day',    'Same day, other #',       'Same store · same date and amount, different bill #', '#0f766e', '#f0fdfa'),
   ('bill_credit', 'Bill and credit',         'Same store · same bill # and date, once as a bill, once as a credit', '#be185d', '#fdf2f8'),
+  ('amount_differs', 'Amount differs',       'Same store · same bill, different amounts', '#4d7c0f', '#f7fee7'),
   ('app_marks',   'Marked entered twice',    'App · marked entered twice', '#7c3aed', '#f5f3ff'),
 ] %}
 {% set KMAP = {} %}{% for k in KINDS %}{% set _ = KMAP.update({k[0]: k}) %}{% endfor %}
@@ -33,7 +34,9 @@
 
 <h2>Bills and credits that may be in QuickBooks twice <span class="muted">({{ total }})</span></h2>
 <p class="muted" style="max-width:1100px;">Also listed: copies of one bill that were <strong>both marked entered</strong> in the app
-(purple) — they stay until a QuickBooks export uploaded after the second entry shows the bill only once.</p>
+(purple) — they stay until a QuickBooks export uploaded after the second entry shows the bill only once. When the export
+itself shows both bills, the pair is listed once, with the app's records. <strong>Amount differs</strong> (green): the same
+bill entered twice with two different amounts — a revised bill, or an amount mistyped (a misplaced decimal point, a wrong digit).</p>
 <p class="muted" style="max-width:1100px;">From the QuickBooks exports uploaded on <a href="/qb-reconcile">QB reconcile</a>
 (each upload replaces that store's bills for the dates it covers). Each box is <strong>one pair of bills</strong>;
 <span style="background:#fee2e2;color:#991b1b;font-weight:700;padding:0 3px;border-radius:3px;">red</span> marks what differs between them.
@@ -70,6 +73,7 @@ If it really is twice, delete one bill in QuickBooks and upload a new export —
   {% set d_store = (a.qb_store or '') != (b.qb_store or '') %}
   {% set d_vendor = (a.qb_name or '') != (b.qb_name or '') %}
   {% set d_date = a.qb_date != b.qb_date %}
+  {% set d_amount = (((a.qb_amount or 0)|float|abs) - ((b.qb_amount or 0)|float|abs))|abs >= 0.005 %}
   <div class="dbl" style="--kc:{{ k[3] }}; --kb:{{ k[4] }};">
     <table>
       <colgroup><col style="width:190px"><col><col style="width:22%"><col><col style="width:9%"><col style="width:9%"><col style="width:270px"></colgroup>
@@ -84,7 +88,7 @@ If it really is twice, delete one bill in QuickBooks and upload a new export —
         <td class="{{ 'diff' if d_vendor }}" title="{{ x.qb_name or '' }}">{{ x.qb_name or '—' }}</td>
         <td>{% if x.qb_num and y.qb_num and x.qb_num != y.qb_num %}{{ x.qb_num | diff_against(y.qb_num) }}{% else %}{{ x.qb_num or '—' }}{% endif %}</td>
         <td class="{{ 'diff' if d_date }}">{{ (x.qb_date | us_date) or '—' }}</td>
-        <td>{{ money(x.qb_amount) }}{% if p.kind == 'bill_credit' %} <span class="muted" style="font-size:11px;">({{ (x.qb_type or '')|lower }})</span>{% endif %}{% if x.record_id %}<div class="muted" style="font-size:11px;" title="entered by {{ x.entered_by or '?' }}{% if x.entered_at %} on {{ x.entered_at | us_datetime }}{% endif %}">
+        <td class="{{ 'diff' if d_amount }}">{{ money(x.qb_amount) }}{% if p.kind == 'bill_credit' %} <span class="muted" style="font-size:11px;">({{ (x.qb_type or '')|lower }})</span>{% endif %}{% if x.record_id %}<div class="muted" style="font-size:11px;" title="entered by {{ x.entered_by or '?' }}{% if x.entered_at %} on {{ x.entered_at | us_datetime }}{% endif %}">
           <a href="/records/invoice/{{ x.record_id }}">rec {{ x.record_id }}</a>{% if x.set_aside %} · set aside{% endif %}{% if x.entered_by %} · {{ x.entered_by }}{% endif %}</div>{% endif %}</td>
         {% if loop.first %}
         <td class="act" rowspan="2">
