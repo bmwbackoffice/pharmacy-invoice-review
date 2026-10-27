@@ -201,6 +201,19 @@ def _diff_against(value, other):
 
 templates.env.filters["diff_against"] = _diff_against
 
+
+def _soft_breaks(value):
+    """`value` escaped, with a line-break chance after : / , . and & (2026-10-27): long QuickBooks names such as
+    'Administration:Insurance:63300' or 'CUSTOMIZEDSTICKERS.COM' wrap there instead of widening a Setup column.
+    Words themselves never break."""
+    from markupsafe import Markup, escape
+    if value is None:
+        return ""
+    return Markup(re.sub(r"([:/,.]|&amp;)(?=[A-Za-z0-9(])", r"\1<wbr>", str(escape(str(value)))))
+
+
+templates.env.filters["soft_breaks"] = _soft_breaks
+
 # Read-only static mounts for inline file previews.
 for name in ("invoice_files", "payment_files", "review_pending"):
     d = BASE_DIR / name
@@ -3388,6 +3401,10 @@ REFERENCE_PAGES = {
                  "bank: those emails are read but no payment is recorded and nothing goes to review. "
                  "Both apply to documents read after you tick them, matched on this "
                  "vendor's exact spellings, so add any spelling the emails use."),
+        # 2026-10-27 (Joel: not all columns fit): the five checkboxes show as one Settings column, and a store
+        # spelling that IS the standard name shows as "same".
+        "group_checkboxes": "Settings",
+        "same_as": "standard_vendor_name",
         "columns": [
             {"name": "standard_vendor_name", "label": "Standard vendor", "type": "text", "required": True},
             {"name": "exclude_from_qb", "label": "Exclude from QB", "type": "checkbox"},
@@ -3409,6 +3426,7 @@ REFERENCE_PAGES = {
     "account_name_map": {
         "title": "Account names",
         "help": "Standardized QuickBooks account name plus each entity's own spelling of it.",
+        "same_as": "standard_account_name",
         "columns": [
             {"name": "standard_account_name", "label": "Standard account", "type": "text", "required": True},
             {"name": "name_3m", "label": "3M", "type": "text"},

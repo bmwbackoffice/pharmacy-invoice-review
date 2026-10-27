@@ -7288,3 +7288,30 @@ in QuickBooks that the app doesn't reflect.
 - Tests: tests/test_twice_report.py (13; rolled back, live counts checked before/after). Suite 256, all pass.
   Needs a web-app restart (notice.py first).
 - Spec artifact v30 (186 features): new QB-20; QB-16 store filter; data model, audit and known gaps updated.
+
+### Setup › Vendor names fits the window, light borders, filter by a checkbox (2026-10-27)
+Joel: "Not all columns fit on one page. Maybe make it fit. Also ... borders, maybe light ones, for easier reading.
+Finally, we should be able to filter. For example, I want to see all excluded from QuickBooks."
+- Before: 2,213 px wide at a 1920 window (page 1,800), mostly the 8 store columns (min 120 px each) and the 5 checkbox
+  columns (74-90 px each). Now 1,762 px at 1920, 1,437 at 1536 and 1,307 at 1366 (page 1,311): fits down to about a
+  1366 window. Rows are a bit shorter than before (median 30 px, was 33).
+- templates/reference.html (all Setup tables):
+  - No minimum widths except 120 px for the aliases column, where narrower made rows very tall. Words still never
+    break; long names wrap at spaces and after : / , . & (new filter `soft_breaks` in review_app: "Administration:
+    Insurance:63300", "CUSTOMIZEDSTICKERS.COM").
+  - 13 px text, 4/6 px padding, and light borders between cells (separate borders, so they stay on the sticky
+    header).
+  - Last change on one line (name cut to 50 px, full history in the tooltip).
+  - Delete shows only while a row is being edited; view mode has just Edit.
+- **Settings column** (page option `group_checkboxes`, Vendor names only): the 5 checkboxes show as one column of
+  labels for the ticked ones (Exclude from QB red, stmt recon amber, sales tax green, trust totals blue); Edit puts
+  the 5 boxes there with their labels. The form posts the same fields as before.
+- **"same"** (page option `same_as`, Vendor names and Account names): a store spelling that IS the standard name
+  shows as a grey "same" (the spelling in the tooltip and in Edit), so the ones that differ stand out. 960 of 1,252
+  filled store cells on Vendor names. Account names now needs 953 px (was 1,838).
+- **Filter by a checkbox**: "Show only:" buttons per checkbox column with counts (Vendor names: Exclude from QB 29,
+  Exclude from stmt recon 2, Trust line-item totals 0, Ignore payment confirmations 2, OK to charge sales tax 18;
+  Stores: Back office 2; Correspondence rules: Only if sent outside). One at a time; click again for all. Works with
+  the Filter box and is remembered for the browser tab like it. Rows carry data-flags; an in-place save updates
+  them, the counts, the labels and "same".
+- Tests: tests/test_setup_vendor_table.py (5). Suite 261, all pass. Needs a web-app restart (notice.py first).

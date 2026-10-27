@@ -139,34 +139,77 @@
 </div>
 
 {% set _recheck_page = table in ('vendor_name_map', 'vendor_account_assignment') %}
+{# 2026-10-27 (Joel): fit the page, light borders, and filter by a checkbox (e.g. everything excluded from QB).
+   A page with group_checkboxes shows its checkboxes as one column of labels; same_as shows a store spelling that
+   is the standard name as "same". #}
+{% set cb_cols = page.columns | selectattr('type', 'equalto', 'checkbox') | list %}
+{% set flag_names = (cb_cols | map(attribute='name') | list) if (page.group_checkboxes and cb_cols|length > 1) else [] %}
+{% set first_flag = flag_names[0] if flag_names else none %}
 <div id="recheckMsg" class="ok-msg" style="display:none;"></div>
-<div style="display:flex; gap:10px; align-items:center; margin-bottom:10px;">
-  <input id="refFilter" placeholder="Filter..." style="width:300px;" autocomplete="off">
+<div class="ref-filters">
+  <input id="refFilter" placeholder="Filter..." style="width:260px;" autocomplete="off">
+  {% if cb_cols %}
+    <span class="muted" style="font-size:12.5px;">Show only:</span>
+    {% for c in cb_cols %}<button type="button" class="fchip" data-flag="{{ c.name }}" aria-pressed="false">{{ c.label }} <span class="n"></span></button>{% endfor %}
+  {% endif %}
   <span id="refCount" class="muted" style="font-size:12.5px;"></span>
+  {% if page.same_as %}<span class="muted" style="font-size:12.5px;"><span class="rv-same">same</span> = that store's spelling is the standard name.</span>{% endif %}
 </div>
 <style>
   tr.ref-hide { display:none; }
   .ref-saved { font-size:12px; margin-left:6px; } .ref-saved.ok { color:#137547; } .ref-saved.err { color:#b91c1c; }
   tr.ref-dirty td, tr.ref-editing td { background:#fffbeb; }
   .rv { white-space:pre-line; } .rv-cb { color:#137547; font-weight:700; }
+  .rv-same { color:#9ca3af; font-style:italic; }
   tr.ref-editing .rv { display:none; }
-  /* Readable columns (2026-10-20): words never break mid-word; text columns keep a usable width;
-     checkbox columns stay narrow. No sideways-scroll box: it broke the sticky header (2026-10-20). */
-  table.reftbl th, table.reftbl td { overflow-wrap:normal !important; word-break:normal !important; hyphens:none; }
-  table.reftbl th { vertical-align:bottom; line-height:1.25; }
-  table.reftbl td { vertical-align:top; }
-  table.reftbl .c-text, table.reftbl .c-select { min-width:120px; }
-  table.reftbl .c-textarea { min-width:170px; }
-  table.reftbl th.c-checkbox { min-width:74px; max-width:90px; font-size:12px; white-space:normal; text-align:center; }
+  .ref-filters { display:flex; gap:6px 8px; align-items:center; flex-wrap:wrap; margin-bottom:10px; }
+  .fchip { padding:3px 10px; border-radius:999px; border:1px solid var(--line, #e5e7eb); background:#fff; color:inherit;
+           font-size:12.5px; cursor:pointer; }
+  .fchip.on { background:#334155; border-color:#334155; color:#fff; }
+  .fchip .n { opacity:.75; }
+  /* Readable columns (2026-10-20): words never break mid-word. No sideways-scroll box: it broke the sticky header.
+     2026-10-27: no minimum widths, so the table fits the window; long names wrap at spaces and after : / , . &
+     (soft_breaks); light borders between cells (separate borders, which stay on the sticky header). */
+  table.reftbl { border-collapse:separate; border-spacing:0; }
+  table.reftbl th, table.reftbl td { overflow-wrap:normal !important; word-break:normal !important; hyphens:none;
+                                     padding:4px 6px; border-bottom:1px solid var(--line, #e5e7eb);
+                                     border-right:1px solid var(--line, #e5e7eb); }
+  table.reftbl tr > :last-child { border-right:0; }
+  table.reftbl th { vertical-align:bottom; line-height:1.25; font-size:12px; border-bottom-color:#cbd5e1; }
+  table.reftbl td { vertical-align:top; font-size:13px; }
+  table.reftbl th.c-checkbox { max-width:84px; white-space:normal; text-align:center; }
+  table.reftbl .c-textarea { min-width:120px; }   /* aliases one per line: narrower made rows very tall */
   table.reftbl td.c-checkbox { text-align:center; }
-  table.reftbl td .re-live:not([type=checkbox]) { width:100%; box-sizing:border-box; }
+  table.reftbl td .re-live:not([type=checkbox]):not(label) { width:100%; box-sizing:border-box; font-size:13px; }
+  tr.ref-editing td.c-text, tr.ref-editing td.c-select { min-width:110px; }
+  tr.ref-editing td.c-textarea { min-width:150px; }
+  table.reftbl .rv-flag { display:block; width:fit-content; margin:1px 0 2px; padding:0 6px; border-radius:4px; font-size:11px;
+                          font-weight:600; line-height:1.7; background:#eef2f7; color:#334155; }
+  table.reftbl .rv-flag:empty { display:none; }
+  table.reftbl .rv-flag.f-exclude_from_qb { background:#fee2e2; color:#991b1b; }
+  table.reftbl .rv-flag.f-exclude_from_statement_recon { background:#fef3c7; color:#92400e; }
+  table.reftbl .rv-flag.f-sales_tax_ok { background:#dcfce7; color:#166534; }
+  table.reftbl .rv-flag.f-trust_line_item_totals { background:#dbeafe; color:#1e40af; }
+  table.reftbl label.flag-edit { display:block; font-weight:400; font-size:12px; margin:0 0 2px; white-space:normal; }
+  table.reftbl td.c-meta { font-size:11.5px; white-space:nowrap; }
+  table.reftbl td.c-meta .who { display:inline-block; max-width:50px; overflow:hidden; text-overflow:ellipsis; vertical-align:bottom; }
+  table.reftbl td.c-act { white-space:nowrap; }
+  table.reftbl td.c-act form { display:block !important; margin:0; }
+  table.reftbl td.c-act .btn { display:block; width:100%; padding:2px 8px !important; font-size:12px; margin:0 0 3px; }
+  table.reftbl td.c-act .admin-only { font-size:11px; white-space:normal; }
+  table.reftbl tr:not(.ref-editing) .ref-del { display:none !important; }
+  table.reftbl td.c-act .ref-saved { display:block; margin:0; white-space:normal; }
+  table.reftbl td.c-act .ref-saved:empty { display:none; }
 </style>
 
 <div class="card" style="padding:0;">
   <table class="reftbl no-colresize">
     <thead><tr>
-      {% for c in page.columns %}<th class="c-{{ c.type }}">{{ c.label }}</th>{% endfor %}
-      <th style="width:1%;">Last change</th><th style="width:1%;"></th>
+      {% for c in page.columns %}
+        {% if c.name == first_flag %}<th class="c-flags">{{ page.group_checkboxes }}</th>
+        {% elif c.name not in flag_names %}<th class="c-{{ c.type }}">{{ c.label }}</th>{% endif %}
+      {% endfor %}
+      <th class="c-meta" style="width:1%;">Last change</th><th class="c-act" style="width:1%;"></th>
     </tr></thead>
     <tbody>
     {% for it in items %}
@@ -177,33 +220,45 @@
          aren't dependably in the row's innerText). #}
       {% set searchbits = [] %}
       {% for c in page.columns %}{% set _ = searchbits.append((it[c.name] or '')|string) %}{% endfor %}
-      <tr data-search="{{ (searchbits | join(' ')) | lower }}">
+      {% set ticked = [] %}
+      {% for c in cb_cols if it[c.name] %}{% set _ = ticked.append(c.name) %}{% endfor %}
+      <tr data-search="{{ (searchbits | join(' ')) | lower }}" data-flags="{{ ticked | join(' ') }}">
         {# 2026-10-20: rows render as plain text; a row's inputs live in an inert <template> and are
            only put on the page when you click Edit (660 rows x 14 live inputs made the page crawl). #}
         {% for c in page.columns %}
           {% set v = it[c.name] %}
-          <td class="c-{{ c.type }}">
-            <span class="rv{{ ' rv-cb' if c.type == 'checkbox' }}">{% if c.type == 'checkbox' %}{{ '✓' if v }}{% else %}{{ v if v is not none else '' }}{% endif %}</span>
+          {% if c.name == first_flag %}
+          <td class="c-flags">
+            {% for f in cb_cols %}{% if it[f.name] %}<span class="rv rv-flag f-{{ f.name }}" data-col="{{ f.name }}">{{ f.label }}</span>{% endif %}<template data-col="{{ f.name }}"><label class="flag-edit"><input type="checkbox" name="{{ f.name }}" value="1" form="ref-{{ it.id }}" style="width:auto;" {{ 'checked' if it[f.name] }}> {{ f.label }}</label></template>{% endfor %}
+          </td>
+          {% elif c.name not in flag_names %}
+          {% set store_col = page.same_as and c.name.startswith('name_') %}
+          {% set same = store_col and v and v == it[page.same_as] %}
+          <td class="c-{{ c.type }}"{% if store_col %} data-same="1"{% endif %}>
+            <span class="rv{{ ' rv-cb' if c.type == 'checkbox' }}{{ ' rv-same' if same }}"{% if same %} title="{{ v }}"{% endif %}>{% if c.type == 'checkbox' %}{{ '✓' if v }}{% elif same %}same{% else %}{{ v | soft_breaks }}{% endif %}</span>
             <template>{% if c.type == 'checkbox' %}<input type="checkbox" name="{{ c.name }}" value="1" form="ref-{{ it.id }}"
                      style="width:auto;" {{ 'checked' if v }}>{% elif c.type == 'textarea' %}<textarea name="{{ c.name }}" rows="2" form="ref-{{ it.id }}">{{ v or '' }}</textarea>{% elif c.type == 'select' %}{% if page.use_datalist %}{{ ref_datalist_input(c.name, v, c.options_from, 'ref-' ~ it.id, c.required) }}{% else %}{{ ref_select(c.name, v, (options|default({})).get(c.options_from, []), 'ref-' ~ it.id, c.required) }}{% endif %}{% else %}<input name="{{ c.name }}" value="{{ v or '' }}" form="ref-{{ it.id }}">{% endif %}</template>
           </td>
+          {% endif %}
         {% endfor %}
-        {# One short line (last change); the full history is in the tooltip -- 4 audit lines made every row tall. #}
+        {# One short line: who (shortened) and the date; the full history is in the tooltip. #}
         {% set _full %}{% if it.created_by %}created {{ it.created_by }}{% if it.created_at %} {{ it.created_at | us_date }}{% endif %}{% endif %}{% if it.edited_by %} · edited {{ it.edited_by }}{% if it.edited_at %} {{ it.edited_at | us_datetime }}{% endif %}{% endif %}{% endset %}
-        <td class="muted" style="font-size:12px; white-space:nowrap;" title="{{ _full|trim }}">
-          {% if it.edited_by %}{{ (it.edited_by|string)[:18] }}{% if it.edited_at %} · {{ it.edited_at | us_date }}{% endif %}{% elif it.created_by %}{{ (it.created_by|string)[:18] }}{% if it.created_at %} · {{ it.created_at | us_date }}{% endif %}{% endif %}
+        <td class="c-meta muted" title="{{ _full|trim }}">
+          {% if it.edited_by %}<span class="who">{{ it.edited_by }}</span>{% if it.edited_at %} · {{ it.edited_at | us_date }}{% endif %}{% elif it.created_by %}<span class="who">{{ it.created_by }}</span>{% if it.created_at %} · {{ it.created_at | us_date }}{% endif %}{% endif %}
         </td>
-        <td style="white-space:nowrap;">
+        <td class="c-act">
           <form id="ref-{{ it.id }}" method="post" action="/reference/{{ table }}/{{ it.id }}/edit" style="display:inline;"></form>
-          <button class="btn secondary ref-edit" type="button" style="padding:4px 10px;">Edit</button>
-          <button class="btn ref-save" type="submit" form="ref-{{ it.id }}" style="padding:4px 10px; display:none;">Save</button>
-          <button class="btn secondary ref-cancel" type="button" style="padding:4px 10px; display:none;">Cancel</button><span class="ref-saved"></span>
+          <button class="btn secondary ref-edit" type="button">Edit</button>
+          <button class="btn ref-save" type="submit" form="ref-{{ it.id }}" style="display:none;">Save</button>
+          <button class="btn secondary ref-cancel" type="button" style="display:none;">Cancel</button>
+          {# Delete shows while the row is being edited (2026-10-27): two buttons stacked made every row tall. #}
           {% if user.role == 'admin' %}
-          <form method="post" action="/reference/{{ table }}/{{ it.id }}/delete" style="display:inline;"
+          <form class="ref-del" method="post" action="/reference/{{ table }}/{{ it.id }}/delete" style="display:inline;"
                 onsubmit="return confirm('Delete this entry? The pipeline will stop using it on the next run.');">
-            <button class="btn" style="background:#b91c1c;padding:4px 10px;" type="submit">Delete</button>
+            <button class="btn" style="background:#b91c1c;" type="submit">Delete</button>
           </form>
-          {% else %}<span class="muted">admin only</span>{% endif %}
+          {% else %}<span class="muted admin-only ref-del">Delete: admin only</span>{% endif %}
+          <span class="ref-saved"></span>
         </td>
       </tr>
     {% else %}
@@ -225,21 +280,42 @@
   var keys = rows.map(function (tr) { return tr.dataset.search || ''; });
   var nkeys = keys.map(norm);
   var KEY = 'refFilter:{{ table }}', t = null;
+  // Show only the rows with one checkbox ticked (2026-10-27, Joel: "I want to see all excluded from QuickBooks").
+  var FKEY = 'refFlag:{{ table }}', flag = '';
+  var chips = Array.prototype.slice.call(document.querySelectorAll('.fchip'));
+  function hasFlag(tr, f) { return (' ' + (tr.dataset.flags || '') + ' ').indexOf(' ' + f + ' ') !== -1; }
+  function showChips() {
+    chips.forEach(function (b) {
+      var n = 0;
+      rows.forEach(function (tr) { if (hasFlag(tr, b.dataset.flag)) n++; });
+      b.querySelector('.n').textContent = '(' + n + ')';
+      b.classList.toggle('on', b.dataset.flag === flag);
+      b.setAttribute('aria-pressed', b.dataset.flag === flag ? 'true' : 'false');
+    });
+  }
   function apply() {
     var q = box.value.trim().toLowerCase(), nq = norm(q), shown = 0;
     var parent = tbody.parentNode, next = tbody.nextSibling;
     parent.removeChild(tbody);
     for (var i = 0; i < rows.length; i++) {
-      var hit = !q || keys[i].indexOf(q) !== -1 || (nq && nkeys[i].indexOf(nq) !== -1);
+      var hit = (!q || keys[i].indexOf(q) !== -1 || (nq && nkeys[i].indexOf(nq) !== -1)) && (!flag || hasFlag(rows[i], flag));
       rows[i].classList.toggle('ref-hide', !hit);
       if (hit) shown++;
     }
     parent.insertBefore(tbody, next);
-    count.textContent = q ? (shown + ' of ' + rows.length + ' shown') : (rows.length + ' rows');
-    try { sessionStorage.setItem(KEY, box.value); } catch (e) {}
+    count.textContent = (q || flag) ? (shown + ' of ' + rows.length + ' shown') : (rows.length + ' rows');
+    try { sessionStorage.setItem(KEY, box.value); sessionStorage.setItem(FKEY, flag); } catch (e) {}
   }
   box.addEventListener('input', function () { clearTimeout(t); t = setTimeout(apply, 180); });
-  try { var saved = sessionStorage.getItem(KEY); if (saved) box.value = saved; } catch (e) {}
+  chips.forEach(function (b) {
+    b.addEventListener('click', function () { flag = flag === b.dataset.flag ? '' : b.dataset.flag; showChips(); apply(); });
+  });
+  try {
+    var saved = sessionStorage.getItem(KEY); if (saved) box.value = saved;
+    var savedFlag = sessionStorage.getItem(FKEY) || '';
+    if (chips.some(function (b) { return b.dataset.flag === savedFlag; })) flag = savedFlag;
+  } catch (e) {}
+  showChips();
   apply();
 
   // Edit a row: put its inputs (kept in inert <template>s) on the page; Cancel takes them off again.
@@ -265,16 +341,27 @@
     tr.querySelector('.ref-cancel').style.display = 'none';
   }
   // After a save: show the new values as text and make them the template's values for the next Edit.
+  // A Settings cell holds one template per checkbox, each with its own label (data-col).
+  var SAME_AS = {{ (page.same_as or '') | tojson }};
   function commit(tr) {
-    var bits = [];
+    var bits = [], flags = [], vals = {};
     tr.querySelectorAll('td > template').forEach(function (tpl) {
-      var el = tpl.previousElementSibling, span = tpl.parentNode.querySelector('.rv');
-      if (!el || !el.classList.contains('re-live')) return;
-      var tel = tpl.content.firstElementChild;
+      var live = tpl.previousElementSibling;
+      if (!live || !live.classList.contains('re-live')) return;
+      var el = live.matches('input, select, textarea') ? live : live.querySelector('input, select, textarea');
+      var span = tpl.dataset.col ? tpl.parentNode.querySelector('.rv[data-col="' + tpl.dataset.col + '"]')
+                                 : tpl.parentNode.querySelector('.rv');
+      if (!span && tpl.dataset.col) {           // a setting ticked now that wasn't: its label goes where the box was
+        span = document.createElement('span');
+        span.className = 'rv rv-flag f-' + tpl.dataset.col; span.dataset.col = tpl.dataset.col;
+        live.parentNode.insertBefore(span, live);
+      }
+      var tel = tpl.content.querySelector('input, select, textarea');
+      if (!el || !span) return;
       if (el.type === 'checkbox') {
-        span.textContent = el.checked ? '✓' : '';
+        span.textContent = el.checked ? ((live === el ? '' : live.textContent.trim()) || '✓') : '';
         if (tel) { if (el.checked) tel.setAttribute('checked', ''); else tel.removeAttribute('checked'); }
-        if (el.checked) bits.push('true');
+        if (el.checked) { bits.push('true'); flags.push(el.name); }
       } else if (el.tagName === 'SELECT') {
         span.textContent = el.value;
         if (tel) Array.prototype.forEach.call(tel.options, function (o) { if (o.value === el.value) o.setAttribute('selected', ''); else o.removeAttribute('selected'); });
@@ -284,9 +371,18 @@
         if (tel) { if (tel.tagName === 'TEXTAREA') tel.textContent = el.value; else tel.setAttribute('value', el.value); }
         bits.push(el.value);
       }
+      vals[el.name] = el.value;
     });
-    var i = rows.indexOf(tr); if (i !== -1) keys[i] = bits.join(' ').toLowerCase();
+    // A store spelling that is the standard name shows as "same".
+    if (SAME_AS) tr.querySelectorAll('td[data-same] .rv').forEach(function (span) {
+      var v = span.textContent, same = v.trim() !== '' && v === (vals[SAME_AS] || '');
+      span.classList.toggle('rv-same', same);
+      if (same) { span.title = v; span.textContent = 'same'; } else span.removeAttribute('title');
+    });
+    var i = rows.indexOf(tr); if (i !== -1) { keys[i] = bits.join(' ').toLowerCase(); nkeys[i] = norm(keys[i]); }
     tr.dataset.search = bits.join(' ').toLowerCase();
+    tr.dataset.flags = flags.join(' ');
+    showChips();
   }
   tbody.addEventListener('click', function (e) {
     var tr = e.target.closest('tr[data-search]'); if (!tr) return;
