@@ -7240,3 +7240,51 @@ Joel: Vita Vocal "should actually be detected since it's all the same info besid
   apart (_one_edit_apart) or has the same _num_core (R205029-IN = R205029). Confirmations made under the old key
   (number as written) still match. Real page: 0 counted (was 2), 4 with a person's mark (was 10), 6 confirmed.
 - Tests: tests/test_fixes_1026b.py (8). Suite 243, all pass. Needs a web-app restart (notice.py first).
+
+### In QB twice?: store filter, which bill the app says to keep, and the report-back (2026-10-26, ~18:00)
+Joel: "add filters per store so the employee who works on a specific store can find all related"; "if we have the
+record and there are discrepancies (for example, two stores, same bill), the system should say which one should be
+the correct one", with a dropdown to report back whether it was, or the app needs correcting; for a misread number,
+report which one was used in QuickBooks "and the app should update accordingly"; the same for any discrepancy fixed
+in QuickBooks that the app doesn't reflect.
+- **Store filter**: a Store row of chips with counts; a pair in two stores' QuickBooks shows under both. Remembered per
+  person like QB entry's store (user pref `twice_store`; a store in the URL, "" = all, is kept). Kind chips count
+  within the store, store chips within the kind.
+- **The app's records** (web_db.qb_double_attach, page only; the dashboard count doesn't pay for it): each bill's
+  invoices (credit memos for credits) via `_twice_links` = _qb_same_bill, and both numbers present or the same date.
+  A missing number within 10 days isn't enough: it linked Monsey View's #1600728 of 9/3 to a no-number $320.00 bill of
+  9/10. Each record gets the bill it agrees with on the fields where the two bills differ (store / # / date /
+  amount / bill-or-credit); a tie goes to the bill with its number. Set-aside and ignored copies show but don't
+  count. An excluded vendor's bill (Parmed, not entered from the app) counts: its store still says which is right.
+- **Which to keep**: when the app's live records all agree with one bill, that row gets a green "✓ keep" and the other
+  "delete", with one line in the kind box ("The app's record matches the one in Refuah: keep it and delete the one in
+  Maple (NY)."). When the app's record sides with the other bill on a field, the line says to change it too (Lantev
+  Refuah: "matches #93G4241 but has $718.08: keep #93G4241, change its amount to $718.08, and delete #9304241").
+  Otherwise it says what the app has: "Not in the app.", "The app has both: check which one is right.", "The app
+  has it once", "The app's copy is set aside / ignored".
+- **Report back** (replaces the "Resolved because..." list): "Kept A, deleted B" / "Kept B, deleted A" (named by what
+  differs: "#797203", "the one in Maple", "$819.00", "the credit", "the 8/27/26 one"), the suggested one first and
+  marked "✓ as the app has it"; with a fix, also "Kept #93G4241, changed its amount to $718.08, deleted #9304241";
+  identical bills: "Deleted the extra one in QuickBooks"; app-only (purple) pairs: "QuickBooks has #X only". Each kept
+  choice ends with what the app will do, e.g. "(the app: changes rec 2667 to #26515)", "(the app: sets aside rec 231)",
+  "(the app: moves rec 1510 to Maple (NY))". Then "Not a duplicate: two real bills", "Corrected a bill in QuickBooks",
+  "Other", and a note.
+- **The app follows QuickBooks** (web_db.qb_double_report -> _twice_plan / _twice_apply): its live copy of the kept bill
+  (else one agreeing with neither, else the deleted bill's) takes the kept bill's store / # / date / amount where the
+  two differed. One transaction covers the record, its duplicate-ledger row for store and number, edit_log ("<user>
+  via In QB twice? (QuickBooks kept ...)"), and any open QB correction asking for that same value, which closes. No
+  duplicate re-check: it would flag the kept copy against the copy set aside next. Live invoices agreeing with the
+  deleted bill are set aside (keep_and_ignore_others), and the pair's qb_twice note on Possible duplicates clears. A
+  kept bill with no # or date never blanks the app's. A bill / credit mix-up is only reported ("change it by hand").
+  The pair is resolved first, once (a second report or a race changes nothing); if applying fails it's put back.
+  A pair gone from the register since the page loaded only records the answer. "Put back" doesn't undo app changes.
+- qb_double_dismissed + `outcome`, `app_changes` (database.MIGRATIONS; already applied to the live database by a
+  scheduled run's init_db). The Resolved tab shows "the app ..." after the note. Without the columns the changes go
+  into the note.
+- On today's register: 111 open pairs, 50 with app records, 16 with a keep/delete suggestion, 1 with a fix (Lantev
+  Refuah); 61 "Not in the app", 19 "The app has both" (Maxi Health #797203/#797208, Zahler, Marine Park, Wallace
+  O'Farrell, UNFI 93821785 / INV#93821785, Lantev 598927 / 8LB0321 ...), 14 "The app has it once" (Blupax ...).
+  Attaching takes 0.09 s.
+- Tests: tests/test_twice_report.py (13; rolled back, live counts checked before/after). Suite 256, all pass.
+  Needs a web-app restart (notice.py first).
+- Spec artifact v30 (186 features): new QB-20; QB-16 store filter; data model, audit and known gaps updated.

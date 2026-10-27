@@ -2384,20 +2384,45 @@ def qb_reconcile_unmatched(request: Request, status: str = "pending"):
 
 
 @app.get("/qb-reconcile/doubles", response_class=HTMLResponse)
-def qb_reconcile_doubles(request: Request, show: str = "open", kind: str = ""):
-    """Bills that may be in QuickBooks twice, found in the uploaded QuickBooks exports (2026-10-20)."""
+def qb_reconcile_doubles(request: Request, show: str = "open", kind: str = "", store: str = ""):
+    """Bills that may be in QuickBooks twice, found in the uploaded QuickBooks exports (2026-10-20). Store filter
+    (2026-10-26, Joel: "so the employee who works on a specific store can find all related"): a pair in two stores'
+    QuickBooks is under both; the choice is remembered like QB entry's (a store in the URL, "" = all, is kept)."""
     user = current_user(request)
     if not user:
         return _login_redirect()
     show = show if show in ("open", "dismissed", "all") else "open"
+    if "store" in request.query_params:
+        web_db.set_user_pref(user["id"], "twice_store", store)
+    else:
+        store = web_db.get_user_prefs(user["id"]).get("twice_store") or ""
     pairs = web_db.qb_double_entries(show)
-    kinds = {}
+
+    def in_store(p):
+        return not store or store in (p["a"].get("qb_store"), p["b"].get("qb_store"))
+
+    kinds, stores = {}, {}
     for p in pairs:
-        kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
-    if kind:
-        pairs = [p for p in pairs if p["kind"] == kind]
-    return render(request, "qb_reconcile_doubles.html", user, pairs=pairs, show=show, kind=kind,
-                  kinds=kinds, total=sum(kinds.values()))
+        if in_store(p):
+            kinds[p["kind"]] = kinds.get(p["kind"], 0) + 1
+        if not kind or p["kind"] == kind:
+            for s in {p["a"].get("qb_store"), p["b"].get("qb_store")} - {None, ""}:
+                stores[s] = stores.get(s, 0) + 1
+    if store and store not in stores:
+        stores[store] = 0                                   # a remembered store with nothing left still shows as picked
+    shown = web_db.qb_double_attach([p for p in pairs if in_store(p) and (not kind or p["kind"] == kind)])
+    return render(request, "qb_reconcile_doubles.html", user, pairs=shown, show=show, kind=kind,
+                  kinds=kinds, total=sum(kinds.values()), store=store,
+                  stores=sorted(stores.items(), key=lambda kv: (web_db.store_label(kv[0]) or "").lower()),
+                  stores_total=sum(1 for p in pairs if not kind or p["kind"] == kind))
+
+
+def _without_flash(url):
+    """The URL without an earlier ?flash=... (one page reported on several times in a row)."""
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    return urlunsplit(parts._replace(query=urlencode([(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+                                                      if k != "flash"])))
 
 
 @app.post("/qb-reconcile/doubles/dismiss")
@@ -2407,12 +2432,29 @@ async def qb_reconcile_doubles_dismiss(request: Request):
         return _login_redirect()
     form = await request.form()
     key = form.get("pair_key") or ""
+    back = _without_flash(request.headers.get("referer") or "/qb-reconcile/doubles")
+    if key and form.get("outcome") and form.get("restore") != "1":
+        # The report-back (2026-10-26): what QuickBooks kept; the app follows it.
+        try:
+            res = await run_in_threadpool(web_db.qb_double_report, key, form.get("outcome"), user["username"],
+                                          form.get("note"))
+        except ValueError as e:
+            return _redirect_with_flash(back, str(e))
+        if res["already"]:
+            who = res["already"].get("dismissed_by") if isinstance(res["already"], dict) else None
+            return _redirect_with_flash(back, f"Already resolved{' by ' + who if who else ''}; nothing changed.")
+        msg = f"Saved: {res['answer']}."
+        if res["changes"]:
+            msg += " The app " + "; ".join(res["changes"]) + "."
+        elif not res["found"]:
+            msg += " That pair isn't in the latest QuickBooks export any more, so nothing changed in the app."
+        return _redirect_with_flash(back, msg)
     if key:
         # A reason from the list (2026-10-21) plus the optional note, stored together.
         reason, note = (form.get("reason") or "").strip(), (form.get("note") or "").strip()
         full = f"{reason}: {note}" if reason and note else (reason or note)
         web_db.qb_double_dismiss(key, user["username"], full, restore=form.get("restore") == "1")
-    return RedirectResponse(request.headers.get("referer") or "/qb-reconcile/doubles", status_code=302)
+    return RedirectResponse(back, status_code=302)
 
 
 @app.post("/qb-reconcile/unmatched/{unmatched_id}/dismiss")

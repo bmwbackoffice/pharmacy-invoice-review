@@ -567,6 +567,10 @@ CREATE TABLE IF NOT EXISTS qb_double_dismissed (
     dismissed_by  TEXT,
     dismissed_at  TIMESTAMPTZ DEFAULT now()
 );
+-- The report-back on a pair (2026-10-26, Joel): what QuickBooks kept ('kept_a', 'kept_b', 'two_real'...) and what
+-- the app changed to follow it (web_db.qb_double_report).
+ALTER TABLE qb_double_dismissed ADD COLUMN IF NOT EXISTS outcome TEXT;
+ALTER TABLE qb_double_dismissed ADD COLUMN IF NOT EXISTS app_changes TEXT;
 -- A duplicate set whose bill is in QuickBooks twice (dup_settle): the note shown on the Duplicates page.
 ALTER TABLE invoices      ADD COLUMN IF NOT EXISTS qb_twice TEXT;
 ALTER TABLE emails        ADD COLUMN IF NOT EXISTS from_address TEXT;

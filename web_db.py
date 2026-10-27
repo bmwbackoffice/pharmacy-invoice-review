@@ -3519,7 +3519,7 @@ def qb_double_entries(show="open"):
                         "  AND qb_amount IS NOT NULL AND abs(qb_amount) >= 0.005")
             rows_all = cur.fetchall()
             bills = [b for b in rows_all if str(b["qb_type"]).strip().lower() == "bill"]
-            cur.execute("SELECT pair_key, dismissed_by, dismissed_at, note FROM qb_double_dismissed")
+            cur.execute("SELECT * FROM qb_double_dismissed")     # with outcome / app_changes once they exist
             dismissed = {r["pair_key"]: r for r in cur.fetchall()}
     finally:
         conn.close()
@@ -3823,6 +3823,480 @@ def qb_double_dismiss(pair_key, username, note=None, restore=False):
                         ("restored" if restore else "not a duplicate", pair_key[:200], username))
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------- #
+# In QB twice?: the app's own copy of each pair's bill, which bill to keep, and the report-back (2026-10-26,
+# Joel: "if we have the record and there are discrepancies ... the system should say which one should be the
+# correct one", and the person reports what QuickBooks kept "so the app updates accordingly").
+# --------------------------------------------------------------------------- #
+
+# Answers that change nothing in the app. The 'kept' ones (kept_a, kept_b, kept_a_fixed, kept_b_fixed) are worded
+# per pair (_twice_options).
+TWICE_ANSWERS = {"two_real": "Not a duplicate: two real bills",
+                 "corrected": "Corrected a bill in QuickBooks",
+                 "other": "Other"}
+_TWICE_KEPT = ("kept_a", "kept_b", "kept_a_fixed", "kept_b_fixed")
+_TWICE_FIELD_WORD = {"store": "store", "number": "bill #", "date": "date", "amount": "amount"}
+
+
+def _twice_value(x, field, ce):
+    """A bill's value for one compared field, normalized. The app's records are given the same shape."""
+    if field == "store":
+        return ce._norm(x.get("qb_store"))
+    if field == "number":
+        return ce._num_key(x.get("qb_num"))
+    if field == "date":
+        return x.get("qb_date")
+    if field == "amount":
+        try:
+            return round(abs(float(x.get("qb_amount"))), 2)
+        except (TypeError, ValueError):
+            return None
+    return "credit" if str(x.get("qb_type") or "").strip().lower() == "credit" else "bill"
+
+
+def _twice_diff(a, b, ce):
+    """The fields a pair's two bills differ in."""
+    return [f for f in ("store", "number", "date", "amount", "type")
+            if _twice_value(a, f, ce) != _twice_value(b, f, ce)]
+
+
+def _twice_side(rec, a, b, diff, ce):
+    """'a' or 'b': the bill this app record agrees with on the fields where the two bills differ. A tie goes to
+    the bill with the record's number (Lantev #93G4241 $718.08 against 9304241 $718.08 and 93G4241 $718.00).
+    None when that can't tell them apart."""
+    sa = sum(_twice_value(rec, f, ce) == _twice_value(a, f, ce) for f in diff)
+    sb = sum(_twice_value(rec, f, ce) == _twice_value(b, f, ce) for f in diff)
+    if sa != sb:
+        return "a" if sa > sb else "b"
+    if "number" in diff:
+        core, ca, cb = (ce._num_core(x.get("qb_num") or "") for x in (rec, a, b))
+        if core and core == ca != cb:
+            return "a"
+        if core and core == cb != ca:
+            return "b"
+    return None
+
+
+def _twice_same(field, x, y, ce):
+    if field == "number":
+        return ce._num_key(x) == ce._num_key(y)
+    if field == "date":
+        return str(x or "")[:10] == str(y or "")[:10]
+    if field == "store":
+        return ce._norm(x) == ce._norm(y)
+    return _same_value(x, y)
+
+
+def _twice_money(v):
+    try:
+        return f"${abs(float(v)):,.2f}"
+    except (TypeError, ValueError):
+        return "no amount"
+
+
+def _twice_day(d):
+    return f"{d.month}/{d.day}/{d:%y}" if d else "no date"
+
+
+def _twice_show(field, value):
+    """A field's value the way the page shows it."""
+    if field == "store":
+        return store_label(value) or "no store"
+    if field == "number":
+        return f"#{value}" if str(value or "").strip() else "no #"
+    if field == "date":
+        return _twice_day(value)
+    return _twice_money(value)
+
+
+def _twice_raw(x, field):
+    return {"store": x.get("qb_store"), "number": x.get("qb_num"), "date": x.get("qb_date"),
+            "amount": x.get("qb_amount")}.get(field)
+
+
+def _twice_links(bill, rec, ce):
+    """An app record is this bill's: _qb_same_bill, and both have a number (which it already requires to be close)
+    or the dates are equal. A missing number alone isn't enough: Monsey View #1600728 of 9/3 would be the $320.00
+    no-number bill of 9/10."""
+    if not _qb_same_bill(bill, rec, ce):
+        return False
+    if ce._num_key(bill.get("qb_num")) and ce._num_key(rec.get("qb_num")):
+        return True
+    return bool(bill.get("qb_date") and bill["qb_date"] == rec.get("qb_date"))
+
+
+def _twice_label(x, diff, ce):
+    """How the page names one bill of a pair, by what tells it from the other: '#797203', 'the one in Maple',
+    '#H002875 $819.00', 'the credit', 'the 8/27/26 one'."""
+    parts = []
+    if "type" in diff:
+        parts.append("the credit" if _twice_value(x, "type", ce) == "credit" else "the bill")
+    if "store" in diff:
+        parts.append(f"the one in {store_label(x.get('qb_store')) or 'no store'}")
+    if "number" in diff:
+        parts.append(f"#{x['qb_num']}" if str(x.get("qb_num") or "").strip() else "the one with no #")
+    if "amount" in diff:
+        parts.append(_twice_money(x.get("qb_amount")))
+    if "date" in diff and not parts:
+        parts.append(f"the {_twice_day(x.get('qb_date'))} one")
+    return " ".join(parts) or "one"
+
+
+def qb_double_attach(pairs):
+    """What the In QB twice? page and the report-back need on top of qb_double_entries' pairs (2026-10-26):
+      records -- the app's records of the two bills (invoices for bills, credit memos for credits, matched like
+                 _qb_same_bill), each with `side` (the bill it agrees with where the two differ, or None) and
+                 `live` (not set aside or ignored; an excluded vendor's bill counts);
+      diff    -- the fields the two bills differ in;
+      suggest -- 'a' / 'b': the bill the app's live records agree with, the one to keep (None: not in the app,
+                 the app has both, or it can't tell);
+      fix     -- fields where the app sides with the other bill: the kept one needs them changed in QuickBooks;
+      advice  -- one line saying so;  options -- the report-back choices (_twice_options).
+    Changes the pairs in place and returns them."""
+    import classify_emails as ce
+    if not pairs:
+        return pairs
+    if not ce.VENDOR_STD:
+        ce.VENDOR_STD = ce.load_vendor_standardization()
+    lookup = (ce.VENDOR_STD or {}).get("lookup", {}) or {}
+    want = sorted({round(abs(float(x["qb_amount"]))) + k for p in pairs for x in (p["a"], p["b"])
+                   if x.get("qb_amount") is not None for k in (-1, 0, 1)}) or [-1]
+    conn = connect()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                "SELECT 'invoice' AS record_type, id, store_matched, vendor_matched, standard_vendor, "
+                "       invoice_number AS number, invoice_date AS rdate, amount, entered_in_qb, entered_qb_by, "
+                "       entered_qb_at, duplicate_ignored, ignored_at, skip_qb_import "
+                "  FROM invoices WHERE amount IS NOT NULL AND round(abs(amount)) = ANY(%s) "
+                "UNION ALL "
+                "SELECT 'credit_memo', id, store_matched, vendor_matched, standard_vendor, credit_memo_number, "
+                "       credit_memo_date, amount, entered_in_qb, entered_qb_by, entered_qb_at, FALSE, ignored_at, "
+                "       skip_qb_import "
+                "  FROM credit_memos WHERE amount IS NOT NULL AND round(abs(amount)) = ANY(%s)", (want, want))
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    by_id, buckets = {}, {}
+    for r in rows:
+        rec = {"record_type": r["record_type"], "record_id": r["id"],
+               "qb_type": "Credit" if r["record_type"] == "credit_memo" else "Bill",
+               "qb_store": r["store_matched"], "qb_name": r["vendor_matched"], "qb_num": r["number"],
+               "qb_date": ce._loose_date(r["rdate"]), "qb_amount": abs(float(r["amount"])),
+               "_std": r["standard_vendor"] or lookup.get(ce._norm_vendor_std_key(r["vendor_matched"] or "")),
+               "entered": bool(r["entered_in_qb"]), "entered_by": r["entered_qb_by"], "entered_at": r["entered_qb_at"],
+               "set_aside": bool(r["duplicate_ignored"]), "ignored": bool(r["ignored_at"]),
+               # an excluded vendor's bill (Parmed) isn't entered from the app, but its store / # still say which is right
+               "excluded": bool(r["skip_qb_import"]) and not r["ignored_at"]}
+        rec["live"] = not (rec["set_aside"] or rec["ignored"])
+        by_id[(rec["record_type"], rec["record_id"])] = rec
+        buckets.setdefault((rec["qb_type"].lower(), round(rec["qb_amount"])), []).append(rec)
+    for p in pairs:
+        a, b = p["a"], p["b"]
+        p["diff"] = diff = _twice_diff(a, b, ce)
+        found = []
+        if p["kind"] == "app_marks":                  # the pair is the app's own two records
+            for x, side in ((a, "a"), (b, "b")):
+                rec = by_id.get(("invoice", x.get("record_id")))
+                if rec:
+                    found.append(dict(rec, side=side))
+        else:
+            seen = set()
+            for x in (a, b):
+                bill = dict(x, qb_amount=abs(float(x["qb_amount"])))
+                n = round(bill["qb_amount"])
+                for rec in [r for k in (n - 1, n, n + 1) for r in buckets.get((_twice_value(x, "type", ce), k), ())]:
+                    rid = (rec["record_type"], rec["record_id"])
+                    if rid not in seen and _twice_links(bill, rec, ce):
+                        seen.add(rid)
+                        found.append(dict(rec, side=_twice_side(rec, a, b, diff, ce)))
+        found.sort(key=lambda r: (not r["live"], not r["entered"], r["record_id"]))
+        p["records"] = found
+        live = [r for r in found if r["live"]]
+        sides = {r["side"] for r in live} - {None}
+        s = sides.pop() if diff and len(sides) == 1 else None
+        p["suggest"], p["fix"] = s, []
+        if s:
+            o = "b" if s == "a" else "a"
+            ref = next(r for r in live if r["side"] == s)
+            p["fix"] = [f for f in diff if f != "type"
+                        and _twice_value(ref, f, ce) != _twice_value(p[s], f, ce)
+                        and _twice_value(ref, f, ce) == _twice_value(p[o], f, ce)]
+        p["advice"] = _twice_advice(p, ce)
+        p["options"] = _twice_options(p, ce)
+    return pairs
+
+
+def _twice_fix_texts(p, ce):
+    """For a suggestion with a fix: ('$718.08', 'its amount to $718.08', '#93G4241', '#9304241') -- what the app's
+    record has where it sides with the other bill, and the two bills named by the other fields."""
+    ref = next(r for r in p["records"] if r["live"] and r["side"] == p["suggest"])
+    has = ", ".join(_twice_show(f, _twice_raw(ref, f)) for f in p["fix"])
+    to = " and ".join(f"its {_TWICE_FIELD_WORD[f]} to {_twice_show(f, _twice_raw(ref, f))}" for f in p["fix"])
+    rest = [f for f in p["diff"] if f not in p["fix"]] or p["diff"]
+    o = "b" if p["suggest"] == "a" else "a"
+    return has, to, _twice_label(p[p["suggest"]], rest, ce), _twice_label(p[o], rest, ce)
+
+
+def _twice_advice(p, ce):
+    """One line: what the app has of this bill, and which bill to keep."""
+    recs, diff, s = p["records"], p["diff"], p["suggest"]
+    live = [r for r in recs if r["live"]]
+    if not recs:
+        return "Not in the app."
+    if s:
+        o = "b" if s == "a" else "a"
+        ls, lo = _twice_label(p[s], diff, ce), _twice_label(p[o], diff, ce)
+        if p["kind"] == "app_marks":
+            return f"The app kept {ls} and set the other copy aside. If QuickBooks has both, delete {lo}."
+        if p["fix"]:
+            has, to, ls, lo = _twice_fix_texts(p, ce)
+            return f"The app's record matches {ls} but has {has}: keep {ls}, change {to}, and delete {lo}."
+        return f"The app's record matches {ls}: keep it and delete {lo}."
+    if p["kind"] == "app_marks":
+        return "Both copies are live in the app: check QuickBooks, then report which one it has."
+    if not live:
+        what = ("set aside" if all(r["set_aside"] for r in recs) else
+                "ignored" if not any(r["set_aside"] for r in recs) else "set aside or ignored")
+        return f"The app's {'copy is' if len(recs) == 1 else 'copies are'} {what}."
+    if not diff:
+        return ("The app has it once: delete one of the two in QuickBooks." if len(live) == 1
+                else f"The app has it {len(live)} times too.")
+    if {"a", "b"} <= {r["side"] for r in live}:
+        return "The app has both: check which one is right."
+    return "The app's record doesn't match either one exactly."
+
+
+def _twice_plan(p, side, ce, fixed=False):
+    """What the app changes when QuickBooks kept bill `side` ('a' / 'b') of a pair: the app follows QuickBooks.
+    Its live copy of the bill (one agreeing with the kept bill, else one agreeing with neither, else the deleted
+    bill's) takes the kept bill's store / # / date / amount where the two bills differed, except the `fix` fields
+    when `fixed` (the kept bill was changed in QuickBooks to the app's values). Live invoices agreeing with the
+    deleted bill are set aside as its copies. Returns (keeper or None, steps): ("set", rec, field, value),
+    ("aside", rec), or ("type", rec) for a bill / credit mix-up, which is left to a person."""
+    other, kept = ("b" if side == "a" else "a"), p[side]
+    live = [r for r in p.get("records") or () if r["live"]]
+    pool = ([r for r in live if r["side"] == side] or [r for r in live if r["side"] is None]
+            or [r for r in live if r["side"] == other])
+    if not pool:
+        return None, []
+    keeper = pool[0]
+    steps = [("aside", r) for r in live if r is not keeper and r["side"] == other and r["record_type"] == "invoice"]
+    if _twice_value(keeper, "type", ce) != _twice_value(kept, "type", ce):
+        return keeper, steps + [("type", keeper)]
+    skip = set(p.get("fix") or ()) if fixed else set()
+    for f in p["diff"]:
+        if f == "type" or f in skip or _twice_value(kept, f, ce) in (None, ""):
+            continue                     # a kept bill with no # (or date) leaves the app's alone
+        if _twice_value(keeper, f, ce) != _twice_value(kept, f, ce):
+            steps.append(("set", keeper, f, _twice_raw(kept, f)))
+    return keeper, steps
+
+
+def _twice_steps_text(steps, done=False):
+    """A plan in words: 'sets aside rec 1240; changes rec 1234 to #797208; moves rec 1510 to Maple' (done: 'set
+    aside ...; changed ...; moved ...')."""
+    parts, changes = [], {}
+    for st in steps:
+        if st[0] == "aside":
+            parts.append(f"{'set' if done else 'sets'} aside rec {st[1]['record_id']}")
+        elif st[0] == "type":
+            kind = "credit" if st[1]["record_type"] == "credit_memo" else "bill"
+            parts.append(f"rec {st[1]['record_id']} is a {kind} in the app (change it by hand)")
+        elif st[0] == "set" and st[2] == "store":
+            parts.append(f"{'moved' if done else 'moves'} rec {st[1]['record_id']} to {_twice_show('store', st[3])}")
+        elif st[0] == "set":
+            changes.setdefault(st[1]["record_id"], []).append(_twice_show(st[2], st[3]))
+    parts += [f"{'changed' if done else 'changes'} rec {rid} to {', '.join(v)}" for rid, v in changes.items()]
+    return "; ".join(parts)
+
+
+def _twice_options(p, ce):
+    """The report-back choices: [{"value", "answer" (saved), "label" (shown: the answer plus what the app will
+    change, or that it's what the app has)}], the app's pick first."""
+    diff, s = p["diff"], p["suggest"]
+    app_only = p["kind"] == "app_marks"
+    opts = []
+
+    def add(value, answer, side, fixed=False):
+        text = _twice_steps_text(_twice_plan(p, side, ce, fixed=fixed)[1])
+        tail = (f" (the app: {text})" if text
+                else " ✓ as the app has it" if side == s and (fixed or not p["fix"]) else "")
+        opts.append({"value": value, "answer": answer, "label": answer + tail})
+
+    if not diff:
+        add("kept_a", "QuickBooks has it once" if app_only else "Deleted the extra one in QuickBooks", "a")
+    else:
+        lab = {k: _twice_label(p[k], diff, ce) for k in ("a", "b")}
+        if s and p["fix"]:
+            _has, to, ls, lo = _twice_fix_texts(p, ce)
+            add(f"kept_{s}_fixed", f"Kept {ls}, changed {to}, deleted {lo}", s, fixed=True)
+        for side in ((s, "b" if s == "a" else "a") if s else ("a", "b")):
+            o = "b" if side == "a" else "a"
+            add(f"kept_{side}", f"QuickBooks has {lab[side]} only" if app_only else f"Kept {lab[side]}, deleted {lab[o]}",
+                side)
+    for value, answer in TWICE_ANSWERS.items():
+        opts.append({"value": value, "answer": answer,
+                     "label": answer + ("" if value == "two_real" else " (say what in the note)")})
+    return opts
+
+
+def _twice_report_columns(cur):
+    """True once qb_double_dismissed has outcome / app_changes (the schema update reaches each database at its
+    next start)."""
+    cur.execute("SELECT count(*) FROM information_schema.columns WHERE table_name = 'qb_double_dismissed' "
+                "AND column_name IN ('outcome', 'app_changes')")
+    return cur.fetchone()[0] == 2
+
+
+def _twice_save(pair_key, outcome, answer, note, username):
+    """Mark a pair resolved with a report-back answer. False when it already was (someone was faster)."""
+    text = f"{answer}: {note}" if note else answer
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if _twice_report_columns(cur):
+                cur.execute("INSERT INTO qb_double_dismissed (pair_key, note, dismissed_by, outcome) VALUES (%s,%s,%s,%s) "
+                            "ON CONFLICT (pair_key) DO NOTHING", (pair_key, text, username, outcome))
+            else:
+                cur.execute("INSERT INTO qb_double_dismissed (pair_key, note, dismissed_by) VALUES (%s,%s,%s) "
+                            "ON CONFLICT (pair_key) DO NOTHING", (pair_key, text, username))
+            if not cur.rowcount:
+                return False
+            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                        "VALUES ('qb_double_dismissed', NULL, 'resolved', %s, %s, %s)", (pair_key[:200], text, username))
+        conn.commit()
+        return True
+    finally:
+        conn.close()
+
+
+def _twice_save_changes(pair_key, text):
+    conn = connect()
+    try:
+        with conn.cursor() as cur:
+            if _twice_report_columns(cur):
+                cur.execute("UPDATE qb_double_dismissed SET app_changes = %s WHERE pair_key = %s", (text, pair_key))
+            else:
+                cur.execute("UPDATE qb_double_dismissed SET note = note || %s WHERE pair_key = %s",
+                            (f" [the app: {text}]", pair_key))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _twice_apply(pair, side, fixed, username, ce):
+    """Carry out _twice_plan for a 'kept' answer. The kept copy's changes are one transaction: the record, its
+    duplicate-ledger row for store / # (as an edit on the record page and set_kept_number do), edit_log, and an
+    open QB correction asking QuickBooks for that very value closes. No duplicate re-check: it would flag the kept
+    copy against the copy set aside next. Then the deleted bill's copies are set aside (keep_and_ignore_others),
+    and the pair's 'entered twice' note on Possible duplicates goes. Returns what changed, in words."""
+    keeper, steps = _twice_plan(pair, side, ce, fixed=fixed)
+    actor = f"{username} via In QB twice?"
+    why = f"{actor} (QuickBooks kept {_twice_label(pair[side], pair['diff'], ce)})"
+    sets = [st for st in steps if st[0] == "set"]
+    if sets:
+        rtype, rid = keeper["record_type"], keeper["record_id"]
+        table, cols = _TABLE[rtype], EDITABLE[rtype]
+        conn = connect()
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(f"SELECT * FROM {table} WHERE id = %s FOR UPDATE", (rid,))
+                row = cur.fetchone()
+                if not row:
+                    raise ValueError(f"rec {rid} is gone; reload the page.")
+                ledger = []
+                if rtype == "invoice":
+                    cur.execute("SELECT id, invoice_number, store_matched FROM invoice_history WHERE source_file = %s "
+                                "AND lower(coalesce(invoice_number, '')) = lower(coalesce(%s, '')) "
+                                "AND abs(coalesce(invoice_amount, 0) - coalesce(%s, 0)) < 0.005",
+                                (row.get("email_filename"), row.get("invoice_number"), row.get("amount")))
+                    ledger = cur.fetchall()
+                for _step, _rec, f, value in sets:
+                    col, old = cols[f], row.get(cols[f])
+                    if f == "amount":
+                        new = round(abs(float(value)), 2) * (-1 if old is not None and float(old) < 0 else 1)
+                    elif f == "date":
+                        new = value.isoformat() if value else None
+                    else:
+                        new = value
+                    cur.execute(f"UPDATE {table} SET {col} = %s, edited_by = %s, edited_at = now() WHERE id = %s",
+                                (new, actor, rid))
+                    cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, changed_by) "
+                                "VALUES (%s,%s,%s,%s,%s,%s)",
+                                (table, rid, col, None if old is None else str(old), None if new is None else str(new), why))
+                    lcol = {"number": "invoice_number", "store": "store_matched"}.get(f)
+                    for h in (ledger if lcol else ()):
+                        if (h[lcol] or "") != (new or ""):
+                            cur.execute(f"UPDATE invoice_history SET {lcol} = %s WHERE id = %s", (new, h["id"]))
+                            cur.execute("INSERT INTO edit_log (table_name, record_id, field, old_value, new_value, "
+                                        "changed_by) VALUES ('invoice_history',%s,%s,%s,%s,%s)",
+                                        (h["id"], lcol, h[lcol], new, why))
+                    cur.execute("SELECT id, new_value FROM qb_corrections WHERE record_type = %s AND record_id = %s "
+                                "AND field = %s AND done_at IS NULL", (rtype, rid, f))
+                    for c in cur.fetchall():
+                        if _twice_same(f, c["new_value"], new, ce):
+                            cur.execute("UPDATE qb_corrections SET done_at = now(), done_by = %s, note = %s WHERE id = %s",
+                                        (username, "QuickBooks has it (reported on In QB twice?)", c["id"]))
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+    asides = [st[1] for st in steps if st[0] == "aside"]
+    if asides:
+        keep_and_ignore_others(keeper["record_type"], keeper["record_id"],
+                               [("invoice", r["record_id"]) for r in asides], actor)
+    ids = [r["record_id"] for r in pair.get("records") or () if r["record_type"] == "invoice"]
+    if ids:
+        conn = connect()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("UPDATE invoices SET qb_twice = NULL WHERE id = ANY(%s) AND qb_twice IS NOT NULL", (ids,))
+            conn.commit()
+        finally:
+            conn.close()
+    text = _twice_steps_text(steps, done=True)
+    return [text] if text else []
+
+
+def qb_double_report(pair_key, answer, username, note=None):
+    """The report-back on an In QB twice? pair (2026-10-26, Joel: "the user should report back so the app updates
+    accordingly"): what QuickBooks kept. Marks the pair resolved with that answer, once (a second report of a
+    resolved pair changes nothing), and a 'kept' answer makes the app follow QuickBooks (_twice_plan). A pair no
+    longer in the saved register (a newer export) only gets the answer. Returns {"answer", "changes": [text],
+    "found": bool, "already": True / the earlier resolution when it was resolved before}."""
+    import classify_emails as ce
+    if answer not in TWICE_ANSWERS and answer not in _TWICE_KEPT:
+        raise ValueError("Pick what QuickBooks has now.")
+    note = (note or "").strip() or None
+    pair = next((p for p in qb_double_entries("all") if p["key"] == pair_key), None)
+    if pair is None:
+        text = TWICE_ANSWERS.get(answer) or "Extra bill deleted in QuickBooks"
+        saved = _twice_save(pair_key, answer, text, note, username)
+        return {"answer": text, "changes": [], "found": False, "already": None if saved else True}
+    if pair.get("dismissed"):
+        return {"answer": None, "changes": [], "found": True, "already": pair["dismissed"]}
+    qb_double_attach([pair])
+    opt = next((o for o in pair["options"] if o["value"] == answer), None)
+    if opt is None:
+        raise ValueError("That choice no longer fits this pair; reload the page.")
+    if not _twice_save(pair_key, answer, opt["answer"], note, username):
+        return {"answer": opt["answer"], "changes": [], "found": True, "already": True}
+    changes = []
+    if answer in _TWICE_KEPT:
+        try:
+            changes = _twice_apply(pair, answer[5], answer.endswith("_fixed"), username, ce)
+        except Exception:
+            qb_double_dismiss(pair_key, username, restore=True)      # back on the list: it wasn't carried out
+            raise
+        if changes:
+            _twice_save_changes(pair_key, "; ".join(changes))
+    return {"answer": opt["answer"], "changes": changes, "found": True, "already": None}
 
 
 def qb_list_unmatched(status="pending"):

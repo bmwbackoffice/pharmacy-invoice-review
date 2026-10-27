@@ -20,50 +20,64 @@
   .dbl td { padding:3px 10px; border:0; font-size:13px; line-height:1.35; white-space:nowrap;
             overflow:hidden; text-overflow:ellipsis; }
   .dbl td.kind { background:var(--kb) !important; width:190px; vertical-align:middle; white-space:normal; }
-  .dbl td.act { width:270px; text-align:right; vertical-align:middle; }
+  .dbl td.act { width:290px; vertical-align:middle; }
+  .dbl td.app { font-size:12px; white-space:normal; }
   .dbl td.diff { color:#991b1b; font-weight:700; background:#fee2e2 !important; }
   .dbl-badge { display:inline-block; color:#fff; background:var(--kc); border-radius:999px; padding:1px 8px;
                font-size:11px; font-weight:600; }
   .dbl .diffchar { color:#dc2626; font-weight:700; background:#fee2e2; border-radius:2px; padding:0 1px; }
-  .dbl-cols { display:grid; grid-template-columns:190px 1fr 1.4fr 1fr .8fr .8fr 270px; padding:0 10px 2px;
-              font-size:11px; color:var(--muted, #6b7280); text-transform:uppercase; letter-spacing:.04em; }
+  .dbl .advice { font-size:11px; margin-top:3px; white-space:normal; color:#1f2937; }
+  .dbl .keep { display:inline-block; border-radius:999px; padding:0 7px; font-size:11px; font-weight:700;
+               color:#fff; background:#15803d; }
+  .dbl .del { display:inline-block; border-radius:999px; padding:0 7px; font-size:11px; font-weight:700;
+              color:#b91c1c; background:#fff; border:1px solid #fca5a5; }
+  .dbl td.act select { width:100%; font-size:12px; padding:2px 4px; }
   .kchip { display:inline-block; padding:4px 10px; border-radius:999px; border:1px solid var(--line, #e5e7eb);
            font-size:13px; text-decoration:none; color:inherit; background:#fff; }
   .kchip.on { background:var(--kc); color:#fff; border-color:var(--kc); }
 </style>
 
-<h2>Bills and credits that may be in QuickBooks twice <span class="muted">({{ total }})</span></h2>
-<p class="muted" style="max-width:1100px;">Also listed: copies of one bill that were <strong>both marked entered</strong> in the app
-(purple) — they stay until a QuickBooks export uploaded after the second entry shows the bill only once. When the export
-itself shows both bills, the pair is listed once, with the app's records. <strong>Amount differs</strong> (green): the same
-bill entered twice with two different amounts — a revised bill, or an amount mistyped (a misplaced decimal point, a wrong digit).</p>
+<h2>Bills and credits that may be in QuickBooks twice <span class="muted">({{ total }}{% if store %} in {{ store | store_label }}{% endif %})</span></h2>
 <p class="muted" style="max-width:1100px;">From the QuickBooks exports uploaded on <a href="/qb-reconcile">QB reconcile</a>
 (each upload replaces that store's bills for the dates it covers). Each box is <strong>one pair of bills</strong>;
 <span style="background:#fee2e2;color:#991b1b;font-weight:700;padding:0 3px;border-radius:3px;">red</span> marks what differs between them.
-If it really is twice, delete one bill in QuickBooks and upload a new export — the box goes away. Once it's handled, pick why and click
-<strong>Mark resolved</strong>.</p>
+<strong>Amount differs</strong> (green): the same bill entered twice with two different amounts. <strong>Marked entered twice</strong>
+(purple): copies of one bill that were both marked entered in the app; they stay until a QuickBooks export uploaded after the second
+entry shows the bill only once.</p>
+<p class="muted" style="max-width:1100px;">When the app has the bill, <span class="keep" style="display:inline-block;border-radius:999px;padding:0 7px;font-size:11px;font-weight:700;color:#fff;background:#15803d;">✓ keep</span>
+marks the bill that matches the app's record. Fix QuickBooks, then <strong>report back</strong> what QuickBooks has now, and the app follows it:
+the app's copy of a deleted bill is set aside, and its record takes the kept bill's store, number, date or amount where the two differed.
+Each choice says what the app will change.</p>
 
 <div class="card" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
   {% for key, label in [('open','To check'),('dismissed','Resolved'),('all','All')] %}
-    <a class="btn {{ '' if show==key else 'secondary' }}" href="/qb-reconcile/doubles?show={{ key }}">{{ label }}</a>
+    <a class="btn {{ '' if show==key else 'secondary' }}" href="/qb-reconcile/doubles?{{ {'show': key, 'kind': kind, 'store': store} | urlencode }}">{{ label }}</a>
   {% endfor %}
   <span style="width:14px;"></span>
-  <a class="kchip {{ 'on' if not kind }}" style="--kc:#334155;" href="/qb-reconcile/doubles?show={{ show }}">All kinds ({{ total }})</a>
+  <a class="kchip {{ 'on' if not kind }}" style="--kc:#334155;" href="/qb-reconcile/doubles?{{ {'show': show, 'kind': '', 'store': store} | urlencode }}">All kinds ({{ total }})</a>
   {% for k in KINDS %}{% if kinds.get(k[0]) %}
-    <a class="kchip {{ 'on' if kind == k[0] }}" style="--kc:{{ k[3] }};" href="/qb-reconcile/doubles?show={{ show }}&kind={{ k[0] }}">{{ k[1] }} ({{ kinds[k[0]] }})</a>
+    <a class="kchip {{ 'on' if kind == k[0] }}" style="--kc:{{ k[3] }};" href="/qb-reconcile/doubles?{{ {'show': show, 'kind': k[0], 'store': store} | urlencode }}">{{ k[1] }} ({{ kinds[k[0]] }})</a>
   {% endif %}{% endfor %}
+</div>
+<div class="card" style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+  <span class="muted" style="font-size:13px;">Store:</span>
+  <a class="kchip {{ 'on' if not store }}" style="--kc:#334155;" href="/qb-reconcile/doubles?{{ {'show': show, 'kind': kind, 'store': ''} | urlencode }}">All stores ({{ stores_total }})</a>
+  {% for s, n in stores %}
+    <a class="kchip {{ 'on' if store == s }}" style="--kc:#334155;" href="/qb-reconcile/doubles?{{ {'show': show, 'kind': kind, 'store': s} | urlencode }}">{{ s | store_label }} ({{ n }})</a>
+  {% endfor %}
+  <span class="muted" style="font-size:12px;">A bill in two stores' QuickBooks shows under both. The page remembers your store.</span>
 </div>
 
 {% if not pairs %}
-  <div class="card muted">{% if show == 'open' %}Nothing to check.{% else %}None.{% endif %}
+  <div class="card muted">{% if show == 'open' %}Nothing to check{% else %}None{% endif %}{% if store %} in {{ store | store_label }}{% endif %}.
   Only bills from the QuickBooks exports loaded into the app are checked.</div>
 {% endif %}
 
 {% if pairs %}
 <table style="width:100%; table-layout:fixed; margin:0 0 2px; border:0; background:transparent;">
-  <colgroup><col style="width:195px"><col><col style="width:22%"><col><col style="width:9%"><col style="width:9%"><col style="width:275px"></colgroup>
+  <colgroup><col style="width:195px"><col><col style="width:19%"><col><col style="width:8%"><col style="width:9%"><col style="width:11%"><col style="width:295px"></colgroup>
   <tr style="background:transparent;"><td></td>
-    {% for h in ['Store','Vendor (as in QuickBooks)','Bill #','Date','Amount'] %}<td class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.04em; padding:2px 10px; border:0;">{{ h }}</td>{% endfor %}
+    {% for h in ['Store','Vendor (as in QuickBooks)','Bill #','Date','Amount','In the app'] %}<td class="muted" style="font-size:11px; text-transform:uppercase; letter-spacing:.04em; padding:2px 10px; border:0;">{{ h }}</td>{% endfor %}
     <td></td></tr>
 </table>
 {% endif %}
@@ -74,40 +88,44 @@ If it really is twice, delete one bill in QuickBooks and upload a new export —
   {% set d_vendor = (a.qb_name or '') != (b.qb_name or '') %}
   {% set d_date = a.qb_date != b.qb_date %}
   {% set d_amount = (((a.qb_amount or 0)|float|abs) - ((b.qb_amount or 0)|float|abs))|abs >= 0.005 %}
+  {% set loose = (p.records or []) | selectattr('side', 'none') | list %}
   <div class="dbl" style="--kc:{{ k[3] }}; --kb:{{ k[4] }};">
     <table>
-      <colgroup><col style="width:190px"><col><col style="width:22%"><col><col style="width:9%"><col style="width:9%"><col style="width:270px"></colgroup>
+      <colgroup><col style="width:190px"><col><col style="width:19%"><col><col style="width:8%"><col style="width:9%"><col style="width:11%"><col style="width:290px"></colgroup>
       {% for x, y in ((a, b), (b, a)) %}
+      {% set side = 'a' if loop.first else 'b' %}
       <tr>
         {% if loop.first %}
         <td class="kind" rowspan="2">{% if p.credit %}<span class="dbl-badge" style="background:#0e7490; margin-bottom:3px;">Credit</span><br>{% endif %}<span class="dbl-badge">{{ k[2] }}</span>
           {% if p.note %}<div class="muted" style="font-size:11px; margin-top:3px; white-space:normal;">{{ p.note }}</div>{% endif %}
-          {% if p.dismissed %}<div class="muted" style="font-size:11px; margin-top:2px;">resolved — {{ p.dismissed.dismissed_by }}, {{ p.dismissed.dismissed_at | us_date }}{% if p.dismissed.note %}: {{ p.dismissed.note }}{% endif %}</div>{% endif %}</td>
+          {% if p.advice and not p.dismissed %}<div class="advice">{{ p.advice }}</div>{% endif %}
+          {% if loose %}<div class="muted" style="font-size:11px; margin-top:2px; white-space:normal;">In the app:
+            {% for r in loose %}<a href="/records/{{ r.record_type }}/{{ r.record_id }}" target="_blank">rec {{ r.record_id }}</a>{% if r.set_aside %} (set aside){% elif r.ignored %} (ignored){% elif r.excluded %} (excluded vendor){% endif %}{{ ', ' if not loop.last }}{% endfor %}</div>{% endif %}
+          {% if p.dismissed %}<div class="muted" style="font-size:11px; margin-top:2px; white-space:normal;">resolved — {{ p.dismissed.dismissed_by }}, {{ p.dismissed.dismissed_at | us_date }}{% if p.dismissed.note %}: {{ p.dismissed.note }}{% endif %}{% if p.dismissed.app_changes %} · the app {{ p.dismissed.app_changes }}{% endif %}</div>{% endif %}</td>
         {% endif %}
         <td class="{{ 'diff' if d_store }}">{{ (x.qb_store | store_label) or '—' }}</td>
         <td class="{{ 'diff' if d_vendor }}" title="{{ x.qb_name or '' }}">{{ x.qb_name or '—' }}</td>
         <td>{% if x.qb_num and y.qb_num and x.qb_num != y.qb_num %}{{ x.qb_num | diff_against(y.qb_num) }}{% else %}{{ x.qb_num or '—' }}{% endif %}</td>
         <td class="{{ 'diff' if d_date }}">{{ (x.qb_date | us_date) or '—' }}</td>
-        <td class="{{ 'diff' if d_amount }}">{{ money(x.qb_amount) }}{% if p.kind == 'bill_credit' %} <span class="muted" style="font-size:11px;">({{ (x.qb_type or '')|lower }})</span>{% endif %}{% if x.record_id %}<div class="muted" style="font-size:11px;" title="entered by {{ x.entered_by or '?' }}{% if x.entered_at %} on {{ x.entered_at | us_datetime }}{% endif %}">
-          <a href="/records/invoice/{{ x.record_id }}">rec {{ x.record_id }}</a>{% if x.set_aside %} · set aside{% endif %}{% if x.entered_by %} · {{ x.entered_by }}{% endif %}</div>{% endif %}</td>
+        <td class="{{ 'diff' if d_amount }}">{{ money(x.qb_amount) }}{% if p.kind == 'bill_credit' %} <span class="muted" style="font-size:11px;">({{ (x.qb_type or '')|lower }})</span>{% endif %}</td>
+        <td class="app">{% if not p.dismissed %}{% if p.suggest == side %}<span class="keep" title="Matches the app's record">✓ keep</span> {% elif p.suggest %}<span class="del" title="The app's record matches the other one">delete</span> {% endif %}{% endif %}
+          {% for r in (p.records or []) if r.side == side %}<a href="/records/{{ r.record_type }}/{{ r.record_id }}" target="_blank" title="{% if r.entered %}entered{% if r.entered_by %} by {{ r.entered_by }}{% endif %}{% if r.entered_at %} on {{ r.entered_at | us_datetime }}{% endif %}{% else %}not marked entered{% endif %}">rec {{ r.record_id }}</a>{% if r.set_aside %} <span class="muted">(set aside)</span>{% elif r.ignored %} <span class="muted">(ignored)</span>{% elif r.excluded %} <span class="muted">(excluded vendor)</span>{% endif %}{{ ', ' if not loop.last }}{% endfor %}</td>
         {% if loop.first %}
         <td class="act" rowspan="2">
-          <form method="post" action="/qb-reconcile/doubles/dismiss" style="margin:0; display:inline-flex; gap:4px;">
+          <form method="post" action="/qb-reconcile/doubles/dismiss" style="margin:0;">
             <input type="hidden" name="pair_key" value="{{ p.key }}">
             {% if p.dismissed %}
               <input type="hidden" name="restore" value="1">
-              <button class="btn secondary" type="submit" style="padding:2px 9px; font-size:12px;">Put back</button>
+              <button class="btn secondary" type="submit" style="padding:2px 9px; font-size:12px;" title="Puts the pair back on the list. What the app changed stays (each record's history has it).">Put back</button>
             {% else %}
-              <select name="reason" required style="font-size:12px; padding:2px 4px; max-width:150px;" title="Why it's resolved">
-                <option value="">Resolved because…</option>
-                <option>Extra bill deleted in QuickBooks</option>
-                <option>Bill corrected in QuickBooks</option>
-                <option>Not a duplicate: two real bills</option>
-                <option>Only in QuickBooks once (checked)</option>
-                <option>Other</option>
+              <select name="outcome" required title="What QuickBooks has now">
+                <option value="">Report back: what's in QuickBooks now?</option>
+                {% for o in p.options %}<option value="{{ o.value }}">{{ o.label }}</option>{% endfor %}
               </select>
-              <input type="text" name="note" placeholder="note (optional)" style="width:95px; padding:2px 6px; font-size:12px;">
-              <button class="btn secondary" type="submit" style="padding:2px 9px; font-size:12px;">Mark resolved</button>
+              <div style="display:flex; gap:4px; margin-top:3px;">
+                <input type="text" name="note" placeholder="note (optional)" style="flex:1; min-width:0; padding:2px 6px; font-size:12px;">
+                <button class="btn secondary" type="submit" style="padding:2px 9px; font-size:12px;">Save</button>
+              </div>
             {% endif %}
           </form>
         </td>
