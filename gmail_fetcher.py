@@ -46,6 +46,11 @@ FETCHED_LABEL = "InvoicesFetched"
 # it keeps the pipeline from dredging up old already-handled invoices that would
 # look "new" and risk a double QuickBooks entry. Override with GMAIL_QUERY.
 DEFAULT_QUERY = "in:inbox newer_than:30d -category:promotions -category:social"
+# ...but a Promotions-tab email that is plainly a bill IS fetched (2026-10-29: Mars Med Supply's Shopify
+# "Invoice #D2872" landed in Promotions and was never read). Searched separately and merged in; promotional
+# blasts that still slip through are typed "none" by the classifier.
+PROMO_BILLS_QUERY = ('in:inbox newer_than:30d category:promotions '
+                     'subject:(invoice OR receipt OR statement OR "credit memo" OR "payment received" OR bill)')
 # Per-run cap only (each fetched email = one downstream classification API call).
 # Fetched emails are labeled, so runs self-pace — rerun to grab the next batch.
 # This is the TOTAL across pages; fetch() paginates (Gmail returns <=500 per page).
@@ -149,6 +154,16 @@ def fetch(query=None):
         page_token = resp.get("nextPageToken")
         if not page_token:
             break
+    # Promotions-tab bills (only with the default search; a custom GMAIL_QUERY is used as given).
+    if not query and not os.environ.get("GMAIL_QUERY") and len(messages) < MAX_RESULTS:
+        seen = {m["id"] for m in messages}
+        resp = service.users().messages().list(
+            userId="me", q=f"({PROMO_BILLS_QUERY}) -label:{FETCHED_LABEL}",
+            maxResults=min(100, MAX_RESULTS - len(messages))).execute()
+        extra = [m for m in resp.get("messages", []) if m["id"] not in seen]
+        if extra:
+            print(f"  + {len(extra)} bill-like email(s) from the Promotions tab")
+            messages.extend(extra)
     if not messages:
         print("No new messages matched.")
         return []

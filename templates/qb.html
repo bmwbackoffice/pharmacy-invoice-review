@@ -225,10 +225,12 @@
     <div class="qbactionbox">
       <div class="qbtier">
         <span class="qbtierlabel">Status</span>
-        <a class="btn {{ '' if not needs_action else 'secondary' }}" href="/qb?needs_action=&{{ exportq }}{{ act_extra }}">All</a>
+        <a class="btn {{ '' if needs_action=='no' else 'secondary' }}" href="/qb?needs_action=no&{{ exportq }}{{ act_for_complete }}" title="Vendor and account set -- ready to enter / export">Ready to enter</a>
         <a class="btn {{ '' if needs_action=='yes' else 'secondary' }}" href="/qb?needs_action=yes&{{ exportq }}{{ act_for_needs }}">Needs action</a>
-        <a class="btn {{ '' if needs_action=='no' else 'secondary' }}" href="/qb?needs_action=no&{{ exportq }}{{ act_for_complete }}">Complete</a>
+        <a class="btn {{ '' if not needs_action else 'secondary' }}" href="/qb?needs_action=&{{ exportq }}{{ act_extra }}">All</a>
       </div>
+      {# Only when "Needs action" or "All" is chosen -- a Complete list has nothing to fix (2026-10-29). #}
+      {% if needs_action != 'no' %}
       <div class="qbtier fix">
         <span class="qbtierlabel">Which fix</span>
         <a class="btn {{ '' if not action else 'secondary' }}" href="/qb?action=&{{ exportq }}{{ na_extra }}">Any</a>
@@ -236,6 +238,7 @@
         <a class="btn {{ '' if action=='assign_account' else 'secondary' }}" href="/qb?action=assign_account&{{ exportq }}{{ na_for_blank }}" title="Blank account, vendor already standardized">Assign account</a>
         <a class="btn {{ '' if action=='none' else 'secondary' }}" href="/qb?action=none&{{ exportq }}{{ na_for_filled }}" title="Account already set — just needs the entry checkbox">No issue</a>
       </div>
+      {% endif %}
     </div>
     <div class="qbactions">
       <a class="btn ok" href="/qb/export.xlsx?{{ exportq }}{{ na_extra }}{{ act_extra }}"

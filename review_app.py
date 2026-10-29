@@ -452,6 +452,8 @@ def dashboard(request: Request):
         # The daily queues.
         {"label": "Review queue", "count": d["review"], "href": "/review",
          "note": f"{d['review']} awaiting an answer", "breakdown": d["review_by"]},
+        {"label": "QB setup needed", "count": setup, "href": "/qb?needs_action=yes&store=&action=",
+         "note": "bills waiting for a vendor or QuickBooks account in Setup (Add vendor / Assign account)"},
         {"label": "QB entry", "count": d["qb_invoices"] + d["qb_credits"], "href": "/qb",
          "note": (f"{d['qb_invoices']} invoices"
                   + (f" ({setup} need vendor/account setup)" if setup else "")
@@ -3608,6 +3610,7 @@ def reference_page(request: Request, table: str, error: str = "", prefill: str =
     suggestions = (web_db.suggest_vendor_matches(prefill)
                    if (table == "vendor_name_map" and prefill) else None)
     return render(request, "reference.html", user, table=table, page=page,
+                  account_names=web_db.standard_account_names() if table == "vendor_name_map" else [],
                   items=web_db.list_reference(table), options=_reference_options(page),
                   error=error, prefill=prefill, resolved=resolved, stmt_resolved=stmt_resolved,
                   show_vendor_lookup=show_vendor_lookup, vlookup=vlookup, lookup=lookup,
@@ -3736,6 +3739,21 @@ async def reference_add(request: Request, table: str):
         web_db.add_reference(table, values, user["username"])
     except ValueError as e:
         return RedirectResponse(f"/reference/{table}?error={quote(str(e))}", status_code=302)
+    # A new vendor's QuickBooks account, picked on the same form (2026-10-29) -> Vendor -> account.
+    acct = (form.get("new_vendor_account") or "").strip()
+    if table == "vendor_name_map" and acct:
+        names = {a.strip().lower(): a for a in web_db.standard_account_names()}
+        if acct.lower() not in names:
+            return RedirectResponse("/reference/vendor_name_map?error=" + quote(
+                f"Vendor added, but '{acct}' isn't in Account names, so no account was set. "
+                f"Pick one from the list on Vendor -> account."), status_code=302)
+        try:
+            web_db.add_reference("vendor_account_assignment",
+                                 {"standard_vendor_name": (values.get("standard_vendor_name") or "").strip(),
+                                  "standard_account_name": names[acct.lower()]}, user["username"])
+        except ValueError as e:
+            return RedirectResponse(f"/reference/vendor_name_map?error={quote('Vendor added, but the account was not set: ' + str(e))}",
+                                    status_code=302)
     return _reference_saved_redirect(table, user["username"])
 
 

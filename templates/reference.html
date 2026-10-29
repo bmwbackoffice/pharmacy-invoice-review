@@ -112,6 +112,14 @@
         {% endif %}
       </div>
     {% endfor %}
+    {# Adding a vendor: pick its QuickBooks account in the same step (2026-10-29) -> Vendor -> account. #}
+    {% if table == 'vendor_name_map' %}
+      <div>
+        <label>QuickBooks account</label>
+        <input name="new_vendor_account" list="add-acct-list" autocomplete="off" placeholder="start typing an account…">
+        <datalist id="add-acct-list">{% for a in account_names %}<option value="{{ a }}">{% endfor %}</datalist>
+      </div>
+    {% endif %}
     </div>
     <div style="margin-top:10px;"><button class="btn" type="submit">Add</button>
     {% if table in ('vendor_name_map', 'account_name_map') %}

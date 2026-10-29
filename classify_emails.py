@@ -1442,8 +1442,11 @@ def apply_vendor_standardization(rec):
         if standard:
             note = f"Vendor standardized via fuzzy match ({score:.0f}%): '{raw_display}' -> '{standard}'."
             _append_text(rec, "notes", note)
+    # 2026-10-29 (Joel): a missing vendor / account mapping no longer sends the record to the Review queue.
+    # It's recorded, and QB entry lists it under Needs action (Add vendor / Assign account) -- the reason
+    # sentence is still noted. Every other review reason still flags as before.
     if not standard:
-        rec["needs_human_review"] = True
+        rec["vendor_setup_needed"] = True
         note = (f"No standardized vendor mapping found for '{raw_display}'. Add it to "
                 "the Vendor Names reference list (Setup), then reprocess.")
         _append_text(rec, "review_reason", note)
@@ -1451,7 +1454,7 @@ def apply_vendor_standardization(rec):
     rec["standard_vendor"] = standard
     account = VENDOR_STD["vendor_account"].get(standard)
     if not account:
-        rec["needs_human_review"] = True
+        rec["vendor_setup_needed"] = True
         note = (f"'{standard}' has no QuickBooks account assigned yet. Add it to the "
                 "Vendor Accounts reference list (Setup), then reprocess.")
         _append_text(rec, "review_reason", note)
@@ -1530,7 +1533,7 @@ def apply_vendor_standardization_gate(rec):
     probe = {"vendor_matched": rec.get("vendor_matched"), "vendor_name_raw": rec.get("vendor_name_raw"),
              "store_matched": rec.get("store_matched")}
     apply_vendor_standardization(probe)
-    if not probe.get("needs_human_review"):
+    if not probe.get("needs_human_review"):     # (a missing mapping no longer flags -- 2026-10-29)
         return
     if is_excluded_vendor(rec.get("vendor_matched")):
         return
@@ -1620,7 +1623,8 @@ def reapply_vendor_standardization_backfill():
                     base_reason = _strip_vendor_std_reasons(row.get("review_reason"))
                     apply_reason = rec.get("review_reason")
                     new_reason = " ".join(x for x in (base_reason, apply_reason) if x).strip() or None
-                    new_needs = bool(new_reason)
+                    # A vendor/account sentence alone no longer means review (QB entry's Needs action covers it).
+                    new_needs = bool(base_reason) and bool(row.get("needs_review"))
                     # Preserve any fuzzy-match audit note apply() produced (rec['notes'] holds
                     # only the fresh note, since rec started empty) by appending to the row's.
                     fuzzy_note = rec.get("notes")
@@ -1704,8 +1708,20 @@ def resolve_vendor_review_items(actor="auto (vendor now in Vendor names)", dry_r
             for row in cur.fetchall():
                 rec = {"vendor_matched": row.get("vendor_matched"), "store_matched": row.get("store_matched")}
                 apply_vendor_standardization(rec)
-                if not rec.get("standard_vendor"):
-                    continue                       # still not in the list
+                if not rec.get("standard_vendor") or not rec.get("qb_account"):
+                    # Still missing a vendor / account, and that's ALL that's wrong: since 2026-10-29 such a
+                    # record belongs on QB entry (Needs action), not in review -- record it.
+                    if not _strip_vendor_std_reasons(row.get("question")) and (row.get("vendor_matched") or "").strip():
+                        if dry_run:
+                            out["answered"].append(row["id"])
+                            continue
+                        cur.execute("UPDATE review_queue SET answer = %s, reviewed_by = %s, reviewed_at = now() "
+                                    "WHERE id = %s AND coalesce(answer, '') = ''",
+                                    ("Only the vendor / QuickBooks account setup is missing -- record it normally; "
+                                     "it will show on QB entry under Needs action.", actor, row["id"]))
+                        out["answered"].append(row["id"])
+                    if not rec.get("standard_vendor"):
+                        continue                   # still not in the list
                 rest = _strip_vendor_std_reasons(row.get("question"))
                 still = rec.get("review_reason")   # "no QB account" sentence, when that's the gap now
                 new_q = " ".join(x for x in (rest, still) if x).strip()

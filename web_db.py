@@ -1439,10 +1439,12 @@ def list_qb_ready(entered="no", run_id=None, email_filename=None, store=None,
                 outer_clauses.append("q.record_type = %s"); outer_params.append(record_type)
             # "Needs action" = rows still showing the add-vendor/assign-account pill (no QB
             # account resolved); "Complete" = the inverse. Same condition that decides the pill.
+            # Blank ('') counts as no account, like the pill and the dashboard count (2026-10-29: the
+            # "QB setup needed" tile said 26 while Needs action listed none -- their accounts were '').
             if needs_action == "yes":
-                outer_clauses.append("q.qb_account IS NULL")
+                outer_clauses.append("COALESCE(btrim(q.qb_account), '') = ''")
             elif needs_action == "no":
-                outer_clauses.append("q.qb_account IS NOT NULL")
+                outer_clauses.append("COALESCE(btrim(q.qb_account), '') <> ''")
             # Finer split of "needs action" by WHICH fix the Account-cell pill asks for — the
             # SAME conditions qb.html uses to choose the pill (blank qb_account/standard_vendor
             # treated as '' so an empty string counts as unset, matching the template's `not`).
@@ -5296,6 +5298,17 @@ def _store_name_pairs(row):
     return out
 
 
+_VENDOR_FILLER_WORDS = {"the", "and", "inc", "llc", "co", "corp", "company", "ltd", "of", "usa", "us", "group",
+                        "pharmacy", "pharma", "pharmaceuticals", "pharmaceutical", "distributors", "distributor",
+                        "distributing", "distribution", "supply", "supplies", "products", "services", "service",
+                        "wholesale", "international", "enterprises", "trading", "health", "medical", "labs"}
+
+
+def _vendor_words(key):
+    """The meaningful words of a normalized vendor name (3+ letters, not filler like 'the', 'inc', 'pharma')."""
+    return {w for w in re.split(r"[^a-z0-9]+", (key or "").lower()) if len(w) >= 3 and w not in _VENDOR_FILLER_WORDS}
+
+
 def suggest_vendor_matches(raw, limit=5, floor=60):
     """Fuzzy candidates for a raw (unmatched) vendor spelling against existing vendor_name_map
     entries — scored against the standard name, EVERY alias, AND every per-store spelling column,
@@ -5329,7 +5342,12 @@ def suggest_vendor_matches(raw, limit=5, floor=60):
                 spellings.append((f"{label} spelling", v))
         best, best_on = 0.0, None
         for label, sp in spellings:
-            sc = _score(raw_key, ce._norm_vendor_std_key(sp))
+            key = ce._norm_vendor_std_key(sp)
+            sc = _score(raw_key, key)
+            # 2026-10-29: letter-level similarity alone made "The Hire Mark" a 64% match for "THE HEALA".
+            # Below 85%, a suggestion also needs a real word in common (3+ letters, not a filler word).
+            if sc < 85 and not (_vendor_words(raw_key) & _vendor_words(key)):
+                continue
             if sc > best:
                 best, best_on = sc, (label, sp)
         if best >= floor:

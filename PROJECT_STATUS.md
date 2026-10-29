@@ -7315,3 +7315,44 @@ Finally, we should be able to filter. For example, I want to see all excluded fr
   the Filter box and is remembered for the browser tab like it. Rows carry data-flags; an in-place save updates
   them, the counts, the labels and "same".
 - Tests: tests/test_setup_vendor_table.py (5). Suite 261, all pass. Needs a web-app restart (notice.py first).
+
+### Garden of Life orders on 3M's card were Refuah's, until 8/25 (2026-10-27, data fix, no code change)
+Joel, answering the side chat on #52080970: "we used the Refuah account to place orders for both 3M & Refuah, we
+added the 3M card to their account ... refer to the attached to determine which ones were for 3M, the rest are for
+refuah - till 8/25 when we removed the 3M card from being the default. from after that date, we should look at
+payment methods, delivery address, etc. as usual."
+- The attachment: 3M's card (ending 8400) Garden of Life charges, 34 from 1/9 to 8/17/2026. Marked 3M: $918.56 (3/5),
+  $1,583.60 (3/30), $1,766.15 (6/18). Each of the other 31 is a bill in Refuah's QuickBooks export with a credit for the
+  same amount, which is how Refuah books an order 3M's card paid (Refuah has 31 Garden of Life credits in all).
+- The app (its Garden of Life records start 8/5): 16 copies under 3M moved to Refuah with web_db.update_record_field,
+  each with a bracketed note saying why, logged as "claude (asked by joel)" (scratchpad gol_3m_card_fix.py):
+  - #52080970 $152.83 (rec 3005) and #52081242 $246.88 (rec 705; set-aside 4322, 706). 3005 and 705 are entered in
+    QuickBooks; they moved with qb_confirmed because Refuah's QuickBooks has each bill, so no QB correction opened.
+  - #52099183 $438.40, billed 8/27 on card 8400: ships to Refuah, its file is named Refuah, and only Refuah's
+    QuickBooks has it (recs 1404, 1083, 1834, 4308, all set aside).
+  - Their payments 272, 1565, 97, 98, 141, 173, 125, 1564 (no payment is entered in QuickBooks from the app).
+  - The duplicate ledgers followed (invoice_history 3 rows, payment_history 6).
+- Setup › Cards: card 8400's note explains the exception. The AI doesn't see card notes; a reviewer of the card/address
+  conflict does. After 8/25 nothing changed: every later Garden of Life bill is under the store whose card paid it
+  (3M's own #5211092 and #5218466 on 8400 from 3M's scanner, Refuah's on 2957, Maple's on 1203).
+- In QB twice? now says keep Refuah's and delete 3M's on #52080970 and #52081242.
+- QuickBooks, for Joel:
+  - delete #52080970 and #52081242 from 3M's QuickBooks, then report both on In QB twice?;
+  - 3M's #51818503 $742.54 (1/9) is a Refuah order too. Refuah's export has it as #51856029 (also the number of its
+    2/6 $1,305.33 bill), with the credit, plus a $0.00 #51818503;
+  - the three 3M orders aren't a bill in any store's export (the export holds bills and credits only).
+
+## 2026-10-29 Add-vendor suggestions
+- suggest_vendor_matches: below 85% similarity a candidate also needs a meaningful word in common (3+ letters, not filler like the/inc/pharma/health) -- "The Hire Mark" was offered "THE HEALA" at 64% on letter similarity alone.
+
+## 2026-10-29 Promotions-tab bills
+- gmail_fetcher: besides the default search (which skips Promotions/Social), also fetches Promotions-tab inbox emails whose subject says invoice / receipt / statement / credit memo / payment received / bill (PROMO_BILLS_QUERY, merged, max 100 per run). Mars Med Supply Shopify "Invoice #D2872" (10/21) was never fetched.
+
+## 2026-10-29 Add vendor + QB account in one step
+- Vendor names "Add" form has a QuickBooks account field (datalist of Account names); on Add it also creates the Vendor -> account row (must be a listed account), before the background recheck runs -- so a review item / QB record resolves fully in one save.
+
+## 2026-10-29 Missing vendor/account -> QB entry, not Review
+- apply_vendor_standardization no longer sets needs_human_review for a missing vendor mapping or account: it sets vendor_setup_needed and keeps the reason sentence; the record is recorded and QB entry shows it under Needs action (Add vendor / Assign account). Other reasons still flag. Backfill: needs_review only when other reasons remain.
+- resolve_vendor_review_items (Phase 0 of every run): unanswered items whose ONLY reason is the vendor/account sentence are answered "record it normally" so they move to QB entry.
+- Dashboard tile "QB setup needed" (-> /qb?needs_action=yes). QB entry: the Which-fix row shows only for Needs action / All.
+- QB entry needs_action filter now treats a blank qb_account as missing (tile counted 26 with qb_account = '', list showed none).
