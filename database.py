@@ -686,6 +686,10 @@ ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS exclude_from_statement_reco
 -- added up from the line items is accepted instead of sent to review. Off for every vendor until
 -- someone ticks it in Setup › Vendor names (2026-10-08). A missing/zero amount is still flagged.
 ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS trust_line_item_totals BOOLEAN NOT NULL DEFAULT FALSE;
+-- Add item memo (2026-10-30, Joel): for vendors ticked here, the QuickBooks memo starts with a short
+-- description of what was bought (e.g. 'Classic Click Pen'), read by the AI into invoices.item_memo.
+ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS add_item_memo BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE invoices ADD COLUMN IF NOT EXISTS item_memo TEXT;
 -- Sales tax OK (2026-10-21, Joel): this vendor is allowed to charge sales tax -> its bills drop off the
 -- Sales tax page (Records > Sales tax).
 ALTER TABLE vendor_name_map ADD COLUMN IF NOT EXISTS sales_tax_ok BOOLEAN NOT NULL DEFAULT FALSE;
@@ -1812,8 +1816,8 @@ def _insert_invoice(cur, row):
             store_raw, store_matched, store_confidence, invoice_number, invoice_date,
             amount, ship_charge, sales_tax, duplicate_suspect, duplicate_reason,
             duplicate_ignored, duplicate_of, duplicate_group_id, notes, card_last4, class,
-            standard_vendor, standard_account, qb_vendor, qb_account, total_source)
-        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            standard_vendor, standard_account, qb_vendor, qb_account, total_source, item_memo)
+        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
         """,
         (row.get("Filename"), _date(row.get("Date Added")), row.get("File Path"),
          row.get("Gmail Link"), row.get("Email Type"), row.get("Confidence"),
@@ -1827,7 +1831,8 @@ def _insert_invoice(cur, row):
          row.get("Duplicate Of"), row.get("Duplicate Group"), row.get("Notes"),
          row.get("Card Last4"), row.get("Class"),
          row.get("Standard Vendor"), row.get("Standard Account"),
-         row.get("QB Vendor"), row.get("QB Account"), row.get("Total Source") or None),
+         row.get("QB Vendor"), row.get("QB Account"), row.get("Total Source") or None,
+         (row.get("Item Memo") or "").strip() or None),
     )
 
 

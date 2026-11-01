@@ -533,6 +533,7 @@ Classify the email and return ONLY a valid JSON object — no commentary, no mar
       "is_payment_reminder": "true ONLY if this is a payment-reminder / past-due / dunning notice about an EARLIER invoice, not a fresh bill (see the payment-reminder instruction above); false for a normal invoice — default false",
       "is_duplicate_suspect": false,
       "duplicate_reason": null,
+      "item_memo": "SHORT label of what was bought, for the QuickBooks memo: the product name(s) as printed on the line items, in the document's own wording but WITHOUT colors, sizes, quantities, logos, imprint or other details (e.g. 'Classic Click Pen purple with white trim, Madison Logo' -> 'Classic Click Pen'; 'Lab Coat Color: Teal Blue Sizes 3 x 38' -> 'Lab Coat'; '4 x 3 Sticky notes 50 sheets' -> '4 x 3 Sticky notes'). Leave out set-up charges, ink/color changes, reorder or surcharge lines, shipping, tax and fees. Several DIFFERENT products: join them with ' - ' (e.g. 'Classic Click Pen - Canvas Shoulder Tote Bags'); more than three: the first three then ' - ...' (e.g. 'Jackets - Shirts - Hats - ...'). The same product in several colors/versions is ONE product. Max about 60 characters. null if no line items are shown.",
       "notes": "anything unusual worth flagging"
     }
   ],
@@ -3161,6 +3162,17 @@ def save_review_files(source_path, text, attachments, classification, html_body=
         if path:
             saved.append(path)
     return saved
+
+
+def _clean_item_memo(v):
+    """The AI's short item label for the QuickBooks memo (2026-10-30): one line, no '<<|>>' (the memo's
+    own separator), at most 80 characters. Non-strings and 'null'-like answers -> ''."""
+    if not isinstance(v, str):
+        return ""
+    v = " ".join(v.replace("<<|>>", " ").split()).strip(" -")
+    if v.lower() in ("null", "none", "n/a"):
+        return ""
+    return v if len(v) <= 80 else v[:77].rstrip() + "..."
 
 
 def _create_message(client, *, model, max_tokens, system, messages, timeout):
@@ -6304,6 +6316,7 @@ def build_result_rows(results):
                 "Card Last4": inv.get("card_last4") or "",
                 "Class": inv.get("class") or "",
                 "Total Source": _total_source(inv),
+                "Item Memo": _clean_item_memo(inv.get("item_memo")),
                 "Standard Vendor": inv.get("standard_vendor") or "",
                 "Standard Account": inv.get("standard_account") or "",
                 "QB Vendor": inv.get("qb_vendor") or "",

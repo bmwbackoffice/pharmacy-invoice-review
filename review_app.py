@@ -1812,12 +1812,17 @@ QB_DATA_ATTR = {"Vendor": "vendor", "Account": "account", "Store": "store", "Inv
                 "Date": "date", "Amount": "amount", "Sales Tax": "tax", "Shipping": "ship",
                 "Class": "class", "Possible Duplicate": "dup", "File Link": "file",
                 "Gmail Link": "gmail", "Memo": "memo"}
-def _qb_memo(short_file, short_gmail):
+def _qb_memo(short_file, short_gmail, item_memo=""):
     """One combined, paste-ready memo string. The doc link comes first with no label
     (it's the primary link); the email link is prefixed 'E:' to distinguish it, with a wide
     '<<|>>' separator so the two read apart in QuickBooks (Joel, 2026-10-14). A missing
     half is dropped; neither -> ''. e.g. 'http://host/l/AAA      <<|>>      E:   http://host/l/BBB'."""
+    # 2026-10-30 (Joel): for vendors ticked "Add item memo" (Setup > Vendor names) a short item label
+    # comes FIRST, then the same separator, then the two links as before:
+    # 'Classic Click Pen      <<|>>      http://host/l/AAA      <<|>>      E:   http://host/l/BBB'.
     parts = []
+    if item_memo:
+        parts.append(item_memo)
     if short_file:
         parts.append(short_file)
     if short_gmail:
@@ -1874,7 +1879,7 @@ def _qb_cell_value(col, r, absfn, shorten=None):
         sf = shorten(rel, "file") if (shorten and rel) else absfn(rel)
         g = r.get("gmail_link") or ""
         sg = shorten(g, "email") if (shorten and g) else g
-        return _qb_memo(sf, sg)
+        return _qb_memo(sf, sg, r.get("item_memo") or "")
     return ""
 
 
@@ -1971,7 +1976,7 @@ def qb_list(request: Request, entered: str = "no", run: str = "", email: str = "
         r["short_gmail"] = smap.get(gu, "")
         r["short_records"] = smap.get(ru, "")
         # Combined one-cell memo from the SAME batched short links (no extra queries).
-        r["memo"] = _qb_memo(r["short_file"], r["short_gmail"])
+        r["memo"] = _qb_memo(r["short_file"], r["short_gmail"], r.get("item_memo") or "")
     view_columns = _sanitize_qb_columns(prefs.get("qb_view_columns"))
     # Copy Selected and Export both use the ONE unified QB-entry layout, same for every user (the
     # on-screen view is display-only and no longer changes what's copied/exported).
@@ -3402,7 +3407,10 @@ REFERENCE_PAGES = {
                  "payment-received / AutoPay emails you don't enter because you see them in the "
                  "bank: those emails are read but no payment is recorded and nothing goes to review. "
                  "Both apply to documents read after you tick them, matched on this "
-                 "vendor's exact spellings, so add any spelling the emails use."),
+                 "vendor's exact spellings, so add any spelling the emails use. "
+                 "“Add item memo” starts this vendor's QuickBooks memo with a short description "
+                 "of what was bought (e.g. Classic Click Pen), read from the bill's line items, "
+                 "before the document and email links."),
         # 2026-10-27 (Joel: not all columns fit): the five checkboxes show as one Settings column, and a store
         # spelling that IS the standard name shows as "same".
         "group_checkboxes": "Settings",
@@ -3414,6 +3422,7 @@ REFERENCE_PAGES = {
             {"name": "trust_line_item_totals", "label": "Trust line-item totals", "type": "checkbox"},
             {"name": "ignore_payment_confirmations", "label": "Ignore payment confirmations", "type": "checkbox"},
             {"name": "sales_tax_ok", "label": "OK to charge sales tax", "type": "checkbox"},
+            {"name": "add_item_memo", "label": "Add item memo", "type": "checkbox"},
             {"name": "aliases", "label": "Other spellings / variants", "type": "textarea"},
             {"name": "name_3m", "label": "3M", "type": "text"},
             {"name": "name_madison", "label": "Madison", "type": "text"},

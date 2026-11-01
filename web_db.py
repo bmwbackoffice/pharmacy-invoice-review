@@ -1469,7 +1469,7 @@ def list_qb_ready(entered="no", run_id=None, email_filename=None, store=None,
                        duplicate_ignored, duplicate_group_id, duplicate_reason, duplicate_of,
                        entered_in_qb, entered_qb_by, entered_qb_at,
                        file_path, gmail_link, run_id, class, qb_vendor, qb_account, standard_vendor,
-                       missing_info
+                       missing_info, item_memo
                   FROM (
                     SELECT 'invoice' AS record_type, r.id AS record_id, r.email_filename,
                            r.store_matched, r.vendor_matched, r.invoice_number AS number,
@@ -1478,7 +1478,12 @@ def list_qb_ready(entered="no", run_id=None, email_filename=None, store=None,
                            r.duplicate_reason, r.duplicate_of, r.entered_in_qb,
                            r.entered_qb_by, r.entered_qb_at, r.file_path, r.gmail_link, e.run_id,
                            r.class, r.qb_vendor, r.qb_account, r.standard_vendor,
-                           {_missing_info_sql('invoice_date')} AS missing_info
+                           {_missing_info_sql('invoice_date')} AS missing_info,
+                           -- the item memo only for vendors ticked "Add item memo" (2026-10-30)
+                           CASE WHEN EXISTS (SELECT 1 FROM vendor_name_map vm
+                                              WHERE vm.standard_vendor_name = r.standard_vendor
+                                                AND vm.add_item_memo)
+                                THEN NULLIF(btrim(r.item_memo), '') END AS item_memo
                       FROM invoices r LEFT JOIN emails e ON e.filename = r.email_filename
                       {where}
                     UNION ALL
@@ -1486,7 +1491,7 @@ def list_qb_ready(entered="no", run_id=None, email_filename=None, store=None,
                            r.credit_memo_number, r.credit_memo_date, -abs(r.amount), NULL, NULL,
                            FALSE, FALSE, NULL, NULL, NULL, r.entered_in_qb, r.entered_qb_by, r.entered_qb_at,
                            r.file_path, r.gmail_link, e.run_id, r.class, r.qb_vendor, r.qb_account, r.standard_vendor,
-                           {_missing_info_sql('credit_memo_date')}
+                           {_missing_info_sql('credit_memo_date')}, NULL
                       FROM credit_memos r LEFT JOIN emails e ON e.filename = r.email_filename
                       {where}
                   ) q
@@ -5089,12 +5094,13 @@ _REF = {
     "vendor_name_map": {"unique": "standard_vendor_name",
                          "cols": ["standard_vendor_name", "exclude_from_qb",
                                   "exclude_from_statement_recon", "trust_line_item_totals",
-                                  "ignore_payment_confirmations", "sales_tax_ok",
+                                  "ignore_payment_confirmations", "sales_tax_ok", "add_item_memo",
                                   "aliases", "name_3m",
                                   "name_madison", "name_maple", "name_refuah",
                                   "name_westgate", "name_bmw", "name_lakewood_rx", "name_carepax"],
                          "bool_cols": {"exclude_from_qb", "exclude_from_statement_recon",
-                                       "trust_line_item_totals", "ignore_payment_confirmations", "sales_tax_ok"},
+                                       "trust_line_item_totals", "ignore_payment_confirmations", "sales_tax_ok",
+                                       "add_item_memo"},
                          "order": "lower(standard_vendor_name)"},
     "account_name_map": {"unique": "standard_account_name",
                           "cols": ["standard_account_name", "name_3m", "name_madison",

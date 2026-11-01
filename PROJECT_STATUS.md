@@ -7356,3 +7356,11 @@ payment methods, delivery address, etc. as usual."
 - resolve_vendor_review_items (Phase 0 of every run): unanswered items whose ONLY reason is the vendor/account sentence are answered "record it normally" so they move to QB entry.
 - Dashboard tile "QB setup needed" (-> /qb?needs_action=yes). QB entry: the Which-fix row shows only for Needs action / All.
 - QB entry needs_action filter now treats a blank qb_account as missing (tile counted 26 with qb_account = '', list showed none).
+
+## 2026-10-30 Item memo first in the QuickBooks memo (Promotise)
+Joel: "can we have short memo's added for Promotise invoices? ... put the memo first and then the separator we use for the 2 links, then put the links as usual." Example approved (Classic Click Pen / Lab Coat / 4 x 3 Sticky notes, " - " between different products, " - ..." after three).
+- Setup › Vendor names: new checkbox "Add item memo" (vendor_name_map.add_item_memo; Settings column label in purple; "Show only:" filter comes with it).
+- Prompt: every invoice gets "item_memo" (product names as printed, no colors/sizes/logos; set-up/ink/surcharge/shipping lines left out). Stored in invoices.item_memo (new column) via classify_emails._clean_item_memo (one line, no "<<|>>", max 80).
+- web_db.list_qb_ready returns item_memo only when the bill's standard vendor is ticked; review_app._qb_memo(short_file, short_gmail, item_memo) puts it first: "Classic Click Pen      <<|>>      <doc link>      <<|>>      E:   <email link>". Applies to the Memo column, Copy Selected and both exports. No item memo -> memo exactly as before.
+- backfill_item_memos.py: bills NOT entered in QuickBooks (not kept out, not set aside) of ticked vendors with no item memo; reads the local invoice_files/ PDF and asks the AI. Dry run by default; --commit saves + logs. Also ticks "Add item memo" for Promotise Inc (--tick "<vendor>" for another). On 10/30 all six Promotise bills in the app are already entered, so it fills none.
+- tests/test_item_memo.py. Backups _tmp_view/*.bak_20261030_itemmemo. Needs a web-app restart (notice.py first); classify picks up the prompt on its next run.
